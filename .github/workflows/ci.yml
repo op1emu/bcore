@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 1: Build
+  # Installs LLVM 15, downloads the Blackfin toolchain (cached), configures
+  # CMake, builds all targets (including assembling + linking test ELFs), and
+  # uploads the artifacts for downstream jobs.
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 15
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y llvm-15 llvm-15-dev
+
+      - name: Cache Blackfin toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains/bfin-elf
+          key: bfin-toolchain-elf-gcc-4.3-2014R1-RC2-x86_64
+
+      - name: Download Blackfin toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/toolchains
+          # Use master.dl.sourceforge.net with ?viasf=1 — the stable automation
+          # endpoint that returns the file directly (200 OK, no bot-challenge HTML).
+          curl -fL --retry 3 --retry-delay 5 \
+            -o bfin-toolchain.tar.bz2 \
+            "https://master.dl.sourceforge.net/project/adi-toolchain/2014R1/2014R1-RC2/x86_64/blackfin-toolchain-elf-gcc-4.3-2014R1-RC2.x86_64.tar.bz2?viasf=1"
+          # Archive extracts as ./opt/uClinux/bfin-elf/; strip those 3 leading
+          # components so binaries land at ~/toolchains/bfin-elf/bin/ as expected.
+          tar xjf bfin-toolchain.tar.bz2 --strip-components=3 -C ~/toolchains
+
+      - name: Add toolchain to PATH
+        run: echo "$HOME/toolchains/bfin-elf/bin" >> $GITHUB_PATH
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            build/disasm
+            build/emu
+            build/test_linked/
+            build/test_objects/
+            build/test_config.py
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2: Disassembler comparison test
+  # Runs run_comparison_test.py which compares build/disasm output against
+  # bfin-elf-objdump for every assembled object file.
+  # ──────────────────────────────────────────────────────────────────────────
+  disasm-test:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Blackfin toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains/bfin-elf
+          key: bfin-toolchain-elf-gcc-4.3-2014R1-RC2-x86_64
+
+      - name: Download Blackfin toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/toolchains
+          # Use master.dl.sourceforge.net with ?viasf=1 — the stable automation
+          # endpoint that returns the file directly (200 OK, no bot-challenge HTML).
+          curl -fL --retry 3 --retry-delay 5 \
+            -o bfin-toolchain.tar.bz2 \
+            "https://master.dl.sourceforge.net/project/adi-toolchain/2014R1/2014R1-RC2/x86_64/blackfin-toolchain-elf-gcc-4.3-2014R1-RC2.x86_64.tar.bz2?viasf=1"
+          # Archive extracts as ./opt/uClinux/bfin-elf/; strip those 3 leading
+          # components so binaries land at ~/toolchains/bfin-elf/bin/ as expected.
+          tar xjf bfin-toolchain.tar.bz2 --strip-components=3 -C ~/toolchains
+
+      - name: Add toolchain to PATH
+        run: echo "$HOME/toolchains/bfin-elf/bin" >> $GITHUB_PATH
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Fix binary permissions
+        run: chmod +x build/disasm build/emu
+
+      - name: Run disassembler comparison test
+        run: python3 tests/run_comparison_test.py --no-fail-fast
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 3: Emulator test suite
+  # Runs run_emu_test.py with --ignore-list .github/emu-ignore.txt so that
+  # known-failing tests are skipped.  A warning (non-failing) is printed for
+  # any ignored test that unexpectedly passes, prompting cleanup of the list.
+  # ──────────────────────────────────────────────────────────────────────────
+  emu-test:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Fix binary permissions
+        run: chmod +x build/disasm build/emu
+
+      - name: Run emulator tests
+        run: |
+          python3 tests/run_emu_test.py \
+            --no-fail-fast \
+            --ignore-list .github/emu-ignore.txt
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emu-test-results
+          path: build/test_linked/
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 4: Benchmark
+  # Runs bench.s.elf and reports wall-clock time in the job step summary.
+  # The benchmark must exit 0 (CHECKREG assertions pass) to succeed.
+  # ──────────────────────────────────────────────────────────────────────────
+  benchmark:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Fix binary permissions
+        run: chmod +x build/disasm build/emu
+
+      - name: Run benchmark
+        run: |
+          START=$(date +%s%N)
+          ./build/emu build/test_linked/bench.s.elf
+          EXIT_CODE=$?
+          END=$(date +%s%N)
+          ELAPSED_MS=$(( (END - START) / 1000000 ))
+
+          echo "Benchmark elapsed: ${ELAPSED_MS} ms"
+
+          {
+            echo "### Benchmark Result"
+            echo ""
+            echo "| Test | Wall Time | Status |"
+            echo "|------|-----------|--------|"
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "| bench.s | ${ELAPSED_MS} ms | PASS |"
+            else
+              echo "| bench.s | ${ELAPSED_MS} ms | FAIL (exit ${EXIT_CODE}) |"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+          exit $EXIT_CODE
