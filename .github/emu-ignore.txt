@@ -1,0 +1,58 @@
+# Emulator test ignore list
+# One ELF basename per line. Lines starting with # are comments.
+# Tests listed here are skipped during CI. A warning is printed if an ignored
+# test starts passing (indicating it can be removed from this list).
+
+# --- CEC / single-step ---
+cec-non-operating-env.s.elf    # non-operating environment mode not implemented
+cec-syscfg-ssstep.S.elf        # SSSTEP per-instruction check not implemented
+c_except_sys_sstep.S.elf       # single-step exception
+se_excpt_ssstep.S.elf          # single-step exception
+se_excpt_dagprotviol.S.elf     # DAG protection violation exception not implemented
+se_ssstep_dagprotviol.S.elf    # single-step + DAG protection violation (timeout)
+
+# --- Timer / MMR ---
+c_interr_timer.S.elf
+c_interr_timer_reload.S.elf
+c_interr_timer_tcount.S.elf
+c_interr_timer_tscale.S.elf
+c_interr_disable.S.elf
+c_interr_disable_enable.S.elf
+c_interr_pending.S.elf
+c_mmr_timer.S.elf
+c_progctrl_clisti_interr.S.elf
+c_progctrl_csync_mmr.S.elf
+
+# --- Debug trace buffer ---
+dbg_tr_basic.S.elf
+dbg_tr_simplejp.S.elf
+dbg_tr_tbuf0.S.elf
+dbg_tr_umode.S.elf
+
+# --- LMU / CPLB / memory protection ---
+lmu_excpt_align.S.elf
+lmu_excpt_default.S.elf
+lmu_excpt_illaddr.S.elf
+lmu_excpt_prot0.S.elf
+lmu_excpt_prot1.S.elf
+lmu_cplb_multiple0.S.elf       # timeout — CPLB not implemented
+lmu_cplb_multiple1.S.elf       # timeout — CPLB not implemented
+
+# --- MMR exception ---
+mmr-exception.s.elf
+
+# --- Opcode coverage tests (unimplemented instructions) ---
+se_all16bitopcodes.S.elf
+se_all32bitopcodes.S.elf
+se_all64bitg0opcodes.S.elf
+se_all64bitg1opcodes.S.elf
+se_all64bitg2opcodes.S.elf
+
+# --- Illegal combination (parallel slot rules) ---
+se_illegalcombination.S.elf
+
+# --- Undefined instruction ---
+se_undefinedinstruction3.S.elf
+
+# --- Benchmark (not a pass/fail test; run separately in benchmark job) ---
+bench.s.elf
