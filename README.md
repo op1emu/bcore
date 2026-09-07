@@ -149,6 +149,36 @@ Current pass rate: **790 / 827** emulator tests, **827 / 827** disassembler comp
 
 ---
 
+## Observability (host API)
+
+`include/bcore_profile.h` is the only profiling interface a host needs —
+bcore is a library: it reads no environment variables, does no I/O of its
+own, and leaves destinations to the host. Everything is near zero-cost when
+not armed (`BCORE_ENABLE_PROFILE`, CMake default ON).
+
+- **Code map** — `Core::forEachCompiledBlock(fn)` yields
+  `{host_addr, host_size, guest_pc, variant}` for every live compiled block.
+  Sizes are *exact*, taken from the object-file symbol table via a
+  `JITEventListener` registered on the (default) `RTDyldObjectLinkingLayer` —
+  no "nearest preceding block" heuristics.
+- **Typed event sink** — `Core::setEventSink(BcoreEventSink*)` for translate
+  begin/end (ns), cache hit/miss, and (opt-in, `wantsDispatch()`)
+  per-dispatch events.
+- **Counters** — `Core::stats()` returns a POD snapshot for hosts that want
+  numbers without per-event cost.
+- **Block cost probe** — `Core::setBlockCostProbe(guest_pc, nanos)` burns a
+  calibrated TSC busy-wait per dispatch of that block (never `nanosleep` —
+  sleeping yields the CPU and changes the scheduling behavior being
+  measured). Charged per execution, on the dispatch path, with no codegen or
+  guest-state changes: this is the primitive causal ("marginal cost")
+  profiling is built on. Unarmed, it is one predictable branch.
+
+`BCORE_PERF_JIT_EVENTS=ON` (CMake, default OFF) additionally registers
+LLVM's `PerfJITEventListener`, so `perf inject --jit` resolves JIT frames
+(gated at runtime by the host via `Core::set_perf_jitdump(true)`).
+
+---
+
 ## Reference
 
 Instruction semantics and test fixtures are derived from [op1emu/bfin_sim](https://github.com/op1emu/bfin_sim):

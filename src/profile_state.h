@@ -1,0 +1,69 @@
+#pragma once
+
+// Internal state behind Core's observability API (see include/bcore_profile.h
+// for the public contract). Not installed; only src/ files include this.
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+#include "bcore_profile.h"
+
+namespace llvm { class JITEventListener; }
+class JitEngine;
+
+namespace bcore_profile {
+
+// Calibrated TSC busy-wait backing Core::setBlockCostProbe().
+// Deliberately NOT nanosleep-based: sleeping yields the CPU and changes the
+// scheduling behavior of the very thing being measured. spin_ns() busy-waits
+// so the injected cost stays on the dispatching thread's CPU time.
+uint64_t tsc_hz();          // lazily calibrated (median of 3 x ~5ms windows)
+void spin_ns(uint64_t ns);
+
+struct ProfileState {
+    ProfileState();
+    ~ProfileState();  // out-of-line: owns llvm::JITEventListener (incomplete here)
+
+    struct Block {
+        uint64_t size;
+        uint32_t guest_pc;
+        uint32_t variant;
+    };
+    // host address -> block, sorted by address so hosts can also do their
+    // own range lookups. Protected by blocks_mutex (JIT load/free
+    // notifications and host-side iteration may race with dispatch).
+    std::map<uint64_t, Block> blocks;
+    // JIT object key -> block addresses that object contributed, so
+    // notifyFreeingObject can remove exactly those entries.
+    std::map<uint64_t, std::vector<uint64_t>> blocks_by_object;
+    std::mutex blocks_mutex;
+    // False when the linking layer doesn't support JITEventListener (the
+    // map then only has entries with size 0 from the lookup fallback).
+    bool listener_ok = false;
+
+    BcoreEventSink* sink = nullptr;   // not owned
+    bool sink_wants_dispatch = false;
+    BcoreStats stats{};
+
+    // Runtime opt-in for LLVM's PerfJITEventListener (jitdump output for
+    // `perf inject --jit`). Must be set before the first translation.
+    bool want_perf_jitdump = false;
+
+    void clearBlocks();
+    void recordBlock(uint64_t object_key, uint64_t addr, uint64_t size,
+                     uint32_t guest_pc);
+    void freeObject(uint64_t object_key);
+
+    std::unique_ptr<llvm::JITEventListener> map_listener;
+    std::unique_ptr<llvm::JITEventListener> perf_listener;
+};
+
+// (Re)creates and registers listeners on a fresh JitEngine. Called by
+// Core::init()/invalidate(). Returns false when the linking layer does not
+// support JIT event listeners (host should then treat sizes as unavailable).
+bool attach_listeners(ProfileState& state, JitEngine& jit);
+
+} // namespace bcore_profile

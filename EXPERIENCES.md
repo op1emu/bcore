@@ -387,3 +387,41 @@ In `emit_dsp32mac`, compute after the V/VS update:
 - For non-P mode: sign bit = bit 15 (result is 16-bit in low half)
 - For P mode: sign bit = bit 31 (result is 32-bit full word)
 
+
+## Profiling a JIT-heavy thread: never call backtrace() from a signal handler
+
+Sampling a JIT-dispatching thread with SIGPROF: the handler must not call
+`backtrace()`. On glibc/x86-64, `backtrace()` unwinds via libgcc's
+`_Unwind_Backtrace`, which consults the dynamic loader's EH-frame registry
+under a non-recursive lock — the *same* lock the JIT takes when registering
+unwind info for a freshly emitted block. If the signal lands while the
+thread holds that lock, the handler self-deadlocks the thread against
+itself (observed reliably: thread parked in `futex_wait_queue` with SIGPROF
+blocked in `SigBlk`, i.e. stuck inside its own handler).
+
+Instead, walk the saved-RBP frame chain from the interrupted `ucontext_t`
+(reads only the thread's own stack, no libc/loader calls), and symbolize
+later, off the signal path.
+
+Two sibling traps from the same campaign:
+
+* `setitimer(ITIMER_PROF)` delivers to an arbitrary thread in the process —
+  on a GUI application you end up sampling the GLFW/audio threads instead of
+  the CPU thread. Use `timer_create(CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID)`.
+* Attributing JIT frames to guest PCs by "nearest preceding block address,
+  capped at N bytes" silently misattributes samples beyond the cap. Take
+  exact symbol sizes from the object file in `notifyObjectLoaded` (via
+  `llvm::object::computeSymbolSizes`) and do exact range containment.
+
+## jitdump listeners must be re-registered after invalidate()
+
+`Core::invalidate()` replaces the JitEngine. A `JITEventListener` (e.g.
+LLVM's `PerfJITEventListener` for `perf inject --jit`) registered on the old
+engine silently stops recording everything compiled after the invalidation —
+a boot that invalidates at the bootrom entry produced a jitdump covering
+only the 215 pre-invalidation blocks out of ~21k. `attach_listeners()`
+re-registers on every new engine.
+
+Relatedly: killing the profiled process with default SIGTERM handling
+truncates the jitdump stream (the listener flushes from its destructor).
+Hosts that stop runs via signals should convert them into a clean shutdown.
