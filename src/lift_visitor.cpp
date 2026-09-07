@@ -4054,6 +4054,13 @@ llvm::Value* LiftVisitor::emit_mac_common(
 
 void LiftVisitor::store_dreg_lo(uint32_t dst, llvm::Value* val16) {
     auto* old = load_dreg(dst, "old_rd");
+    // Preserve a complementary half written by another slot of this issue
+    // group. Source operands must still read the pre-issue register value;
+    // only the unwritten half of the destination uses the pending writeback.
+    if (in_parallel_) {
+        auto it = shadow_writes_.find(offsetof(CpuState, dpregs) + dst * 4);
+        if (it != shadow_writes_.end()) old = it->second;
+    }
     auto* hi  = builder_.CreateAnd(old, builder_.getInt32(0xFFFF0000), "rd_hi");
     auto* lo  = builder_.CreateAnd(val16, builder_.getInt32(0x0000FFFF), "val_lo");
     store_dreg(dst, builder_.CreateOr(hi, lo, "new_rd"));
@@ -4061,6 +4068,10 @@ void LiftVisitor::store_dreg_lo(uint32_t dst, llvm::Value* val16) {
 
 void LiftVisitor::store_dreg_hi(uint32_t dst, llvm::Value* val16) {
     auto* old = load_dreg(dst, "old_rd");
+    if (in_parallel_) {
+        auto it = shadow_writes_.find(offsetof(CpuState, dpregs) + dst * 4);
+        if (it != shadow_writes_.end()) old = it->second;
+    }
     auto* lo  = builder_.CreateAnd(old, builder_.getInt32(0x0000FFFF), "rd_lo");
     auto* hi  = builder_.CreateShl(builder_.CreateAnd(val16, builder_.getInt32(0xFFFF)),
                                    builder_.getInt32(16), "val_hi");
