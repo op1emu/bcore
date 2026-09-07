@@ -641,15 +641,12 @@ Value* LiftVisitor::emit_extract_half16(Value* rs, uint32_t HLs) {
 }
 
 void LiftVisitor::emit_merge_half16(uint32_t dst, Value* result16, uint32_t HLs) {
-    auto* rd = load_dreg(dst, "rd");
-    llvm::Value* out;
+    // Route through store_dreg_lo/hi so the complementary half merges against
+    // any pending shadow write from a sibling parallel slot.
     if (HLs & 2)
-        out = builder_.CreateOr(builder_.CreateAnd(rd, builder_.getInt32(0x0000FFFF)),
-                                builder_.CreateShl(result16, 16), "out");
+        store_dreg_hi(dst, result16);
     else
-        out = builder_.CreateOr(builder_.CreateAnd(rd, builder_.getInt32(0xFFFF0000)),
-                                result16, "out");
-    store_dreg(dst, out);
+        store_dreg_lo(dst, result16);
 }
 
 Value* LiftVisitor::emit_xor_reduce_parity(Value* a, Value* b) {

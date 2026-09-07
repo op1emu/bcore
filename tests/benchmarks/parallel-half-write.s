@@ -35,6 +35,19 @@ half_loop_top:
 half_loop_bottom:
     NOP;
     CHECKREG R0, 0x12335678;
+
+    // slot0 dsp32shiftimm writes R0.H; slot1 load writes R0.L.
+    // store_dreg_lo must merge against the shift's pending shadow write.
+    loadsym P2, values;
+    imm32 R0, 0xabcd0005;
+    R0.H = R0.H << 1 || R0.L = W[P2++P5];
+    CHECKREG R0, 0x579a1234;
+
+    // Reverse direction: shift writes R0.L, load writes R0.H.
+    loadsym P2, values;
+    imm32 R0, 0xabcd0005;
+    R0.L = R0.L << 1 || R0.H = W[P2++P5];
+    CHECKREG R0, 0x1234000a;
     pass
 .data
 .align 4
