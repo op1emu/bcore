@@ -122,6 +122,71 @@ The emulator:
   run with `python3 tests/run_comparison_test.py`
 - Emulator tests: assembly files from https://github.com/op1emu/bfin_sim/tree/main/testsuite/ are fetched at configure time, assembled, linked to `.elf`, and run via `./build/emu`
 
+## Profiling and Observability
+
+`include/bcore_profile.h` is the contract — read it first; `README.md`
+("Observability (host API)") covers host-visible behavior. bcore is a library:
+no env vars, no I/O, no printing on success. The host owns all sinks.
+
+Code: `src/profile.cpp` + `src/profile_state.h` (code-map `JITEventListener`,
+`spin_ns`, jitdump attach), dispatch instrumentation in `src/core.cpp` behind
+`#if BCORE_ENABLE_PROFILE`, `Core` API in `include/core.h`, tests in
+`tests/profile_test.cpp` (+ `tests/benchmarks/bench.s`).
+
+### Build and test
+
+| Option | Default | Effect |
+|---|---|---|
+| `BCORE_ENABLE_PROFILE` | ON | dispatch instrumentation (links LLVM `object`); OFF removes the observer branches |
+| `BCORE_PERF_JIT_EVENTS` | OFF | links LLVM `perfjitevents`; still needs a runtime `set_perf_jitdump(true)` |
+| `BCORE_BUILD_PROFILE_TESTS` | OFF | builds the `bcore-profile-test` target |
+
+```bash
+cmake -S . -B build-profile -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DLLVM_DIR=/usr/lib/llvm-15/cmake -DBCORE_ENABLE_PROFILE=ON \
+  -DBCORE_PERF_JIT_EVENTS=ON -DBCORE_BUILD_PROFILE_TESTS=ON
+cmake --build build-profile --target bcore-profile-test
+ctest --test-dir build-profile -R bcore-profile-test --output-on-failure
+./build-profile/bcore-profile-test --bench
+```
+
+Verify profiling changes with `BCORE_ENABLE_PROFILE` both ON and OFF — the test
+is written to pass in both.
+
+### Capabilities
+
+- **Code map** — `forEachCompiledBlock` yields `{host_addr, host_size, guest_pc, variant, loaded_ns, unloaded_ns}`; sizes are exact (`computeSymbolSizes` in the load listener), `0` = unavailable. `profileHasBlockSizes()` reports listener attach. `setProfileHistory(n)` retains bounded retired ranges so pre-`invalidate()` samples still resolve; `profileHistoryDropped()` reports truncation.
+- **Event sink** — `setEventSink()` (non-owning; detach with `nullptr` first). Balanced `onCompileStage` pairs (lift + materialize, failures included) — don't sum parent + child. Hit/dispatch callbacks are opt-in via `wantsCacheHits()` / `wantsDispatch()`; a virtual call per block is not free.
+- **Counters** — `stats()` POD snapshot, one relaxed owner-thread increment per event.
+- **Cost probe** — `setBlockCostProbe(pc, ns)` charges a measured `CLOCK_MONOTONIC` busy spin per dispatch of that entry, dispatch path only (no codegen or guest-state change, never `nanosleep`). The primitive for marginal profiling: baseline, dose, compare. `blockCostProbeStats()` reports matched executions and the actual spin envelope (includes timer reads and preemption, so not exact added CPU time).
+
+Call control/query APIs from the `Core::run()` thread or while it is stopped;
+code-map callbacks run under the map mutex and must not re-enter these APIs.
+
+### `perf inject --jit`
+
+Build with `BCORE_PERF_JIT_EVENTS=ON`; host calls `set_perf_jitdump(true)` any
+time after `init()` (attaches immediately, re-attaches across `invalidate()`);
+`perf record`, then `perf inject --jit` resolves blocks by `bb_0x<pc>` names.
+Shut down cleanly — the listener flushes from its destructor, so a
+default-handled signal truncates the jitdump.
+
+### Invariants — each was a real bug (`40539b2`, `cdf0c13`, `2330427`)
+
+- The perf listener is a **function-local static, non-owning** — never `unique_ptr`/`delete` it (was: `free(): invalid pointer` on every profiling shutdown).
+- Re-register listeners after `invalidate()` (it replaces the engine). Attach the perf listener via its own `attach_perf_listener` path — re-running `attach_listeners()` would replace `map_listener` while `RTDyldObjectLinkingLayer` still holds the old raw pointer. Repeated enable must stay idempotent per engine.
+- Never size blocks by "nearest preceding block, capped at N bytes" — samples past the cap get misattributed. Exact sizes and range containment, or `0`.
+- Never reattribute dropped history to reused JIT addresses; report the drop.
+- A zero-delay probe **stays armed** as a sham so baseline and dose share one accounting path; `guest_pc == 0` is valid; `clearBlockCostProbe()` is the only disarm. The probe must preserve full `CpuState` (the test `memcmp`s it).
+- Enabled builds keep branches and counter increments even with no sink — say "near zero cost when unarmed", not zero overhead.
+- Sampling a JIT thread: no `backtrace()` in the handler (deadlocks against the loader EH-frame lock the JIT holds); walk the saved-RBP chain from `ucontext_t`, symbolize off the signal path, and use `timer_create(CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID)` rather than `setitimer(ITIMER_PROF)`.
+
+### Host-side tooling
+
+The capture/report toolchain lives in the op1emu host (`../..`), not here:
+`docs/profiling.md`, `tools/perfboot.sh`, `profile_report.py`, `marginal.py`,
+`abcompare.py`; host gate `ENABLE_PROFILING` plus the `BCORE_*` options above.
+
 ## Experiences
 - Store experiences in `EXPERIENCES.md` to track insights, challenges, and solutions encountered during development. (Optional but recommended for knowledge sharing)
 
