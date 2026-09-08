@@ -16,12 +16,10 @@ class JitEngine;
 
 namespace bcore_profile {
 
-// Calibrated TSC busy-wait backing Core::setBlockCostProbe().
-// Deliberately NOT nanosleep-based: sleeping yields the CPU and changes the
-// scheduling behavior of the very thing being measured. spin_ns() busy-waits
-// so the injected cost stays on the dispatching thread's CPU time.
-uint64_t tsc_hz();          // lazily calibrated (median of 3 x ~5ms windows)
-void spin_ns(uint64_t ns);
+// Measured CLOCK_MONOTONIC spin; same envelope for sham and nonzero doses.
+// No sleeping, scheduling/real-time coupling may still change by design.
+uint64_t spin_ns(uint64_t ns);
+uint64_t monotonic_ns();
 
 struct ProfileState {
     ProfileState();
@@ -31,6 +29,7 @@ struct ProfileState {
         uint64_t size;
         uint32_t guest_pc;
         uint32_t variant;
+        uint64_t loaded_ns;
     };
     // host address -> block, sorted by address so hosts can also do their
     // own range lookups. Protected by blocks_mutex (JIT load/free
@@ -46,6 +45,12 @@ struct ProfileState {
 
     BcoreEventSink* sink = nullptr;   // not owned
     bool sink_wants_dispatch = false;
+    bool sink_wants_cache_hits = false;
+    bool perf_attached = false;
+    size_t history_capacity = 0;
+    uint64_t history_dropped = 0;
+    std::vector<BcoreBlockInfo> retired;
+    void retire(uint64_t addr, const Block& block, uint64_t now);
     BcoreStats stats{};
 
     // Runtime opt-in for LLVM's PerfJITEventListener (jitdump output for

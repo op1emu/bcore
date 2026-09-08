@@ -7,9 +7,8 @@
 #include "profile_state.h"
 
 #include <algorithm>
-#include <chrono>
+#include <ctime>
 #include <mutex>
-#include <thread>
 
 // Needed unconditionally: ProfileState's destructor must see the complete
 // llvm::JITEventListener type even when BCORE_ENABLE_PROFILE=0 (the unique_ptr
@@ -36,66 +35,24 @@
 
 namespace bcore_profile {
 
-// ---------------------------------------------------------------------------
-// TSC busy-wait (block cost probe)
-// ---------------------------------------------------------------------------
-
-namespace {
-
-#if defined(__x86_64__) || defined(__i386__)
-inline uint64_t read_tsc() {
-    uint32_t lo, hi;
-    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<uint64_t>(hi) << 32) | lo;
-}
-#endif
-
-} // namespace
-
-uint64_t tsc_hz() {
-    static std::once_flag once;
-    static uint64_t hz = 0;
-    std::call_once(once, [] {
-#if defined(__x86_64__) || defined(__i386__)
-        // Median of 3 short calibration windows against steady_clock.
-        // sleeping here is fine — this is calibration, not measurement.
-        uint64_t samples[3];
-        for (int i = 0; i < 3; i++) {
-            const auto t0 = std::chrono::steady_clock::now();
-            const uint64_t c0 = read_tsc();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            const auto t1 = std::chrono::steady_clock::now();
-            const uint64_t c1 = read_tsc();
-            const double sec = std::chrono::duration<double>(t1 - t0).count();
-            samples[i] = static_cast<uint64_t>(static_cast<double>(c1 - c0) / sec);
-        }
-        std::sort(samples, samples + 3);
-        hz = samples[1];
-#else
-        hz = 0;  // spin_ns() falls back to a clock_gettime loop
-#endif
-    });
-    return hz;
+uint64_t monotonic_ns() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return uint64_t(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
 }
 
-void spin_ns(uint64_t ns) {
+uint64_t spin_ns(uint64_t ns) {
+    // Same measured envelope for dose zero. This includes clock-read overhead;
+    // the host subtracts the matched sham envelope, scaled by execution count.
+    const uint64_t start = monotonic_ns();
+    uint64_t end;
+    do {
+        end = monotonic_ns();
 #if defined(__x86_64__) || defined(__i386__)
-    const uint64_t hz = tsc_hz();
-    if (hz != 0) {
-        const uint64_t start = read_tsc();
-        const uint64_t delta =
-            static_cast<uint64_t>((static_cast<unsigned __int128>(ns) * hz) / 1000000000u);
-        while (read_tsc() - start < delta)
-            _mm_pause();
-        return;
-    }
+        if (end - start < ns) _mm_pause();
 #endif
-    // Fallback: CLOCK_MONOTONIC spin (still never sleeps/yields).
-    const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now() - start)
-               .count() < static_cast<int64_t>(ns)) {
-    }
+    } while (end - start < ns);
+    return end - start;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +71,8 @@ ProfileState::~ProfileState() = default;
 
 void ProfileState::clearBlocks() {
     std::lock_guard<std::mutex> lk(blocks_mutex);
+    const auto now = monotonic_ns();
+    for (const auto& [addr, b] : blocks) retire(addr, b, now);
     blocks.clear();
     blocks_by_object.clear();
 }
@@ -121,7 +80,10 @@ void ProfileState::clearBlocks() {
 void ProfileState::recordBlock(uint64_t object_key, uint64_t addr, uint64_t size,
                                uint32_t guest_pc) {
     std::lock_guard<std::mutex> lk(blocks_mutex);
-    blocks[addr] = Block{size, guest_pc, /*variant=*/0};
+    const auto now = history_capacity ? monotonic_ns() : 0;
+    auto old = blocks.find(addr);
+    if (old != blocks.end()) retire(addr, old->second, now);
+    blocks[addr] = Block{size, guest_pc, /*variant=*/0, now};
     blocks_by_object[object_key].push_back(addr);
 }
 
@@ -129,9 +91,22 @@ void ProfileState::freeObject(uint64_t object_key) {
     std::lock_guard<std::mutex> lk(blocks_mutex);
     auto it = blocks_by_object.find(object_key);
     if (it == blocks_by_object.end()) return;
-    for (uint64_t addr : it->second)
-        blocks.erase(addr);
+    const auto now = history_capacity ? monotonic_ns() : 0;
+    for (uint64_t addr : it->second) {
+        auto b = blocks.find(addr);
+        if (b != blocks.end()) {
+            retire(addr, b->second, now);
+            blocks.erase(b);
+        }
+    }
     blocks_by_object.erase(it);
+}
+
+void ProfileState::retire(uint64_t addr, const Block& b, uint64_t now) {
+    if (!history_capacity) return;
+    if (retired.size() >= history_capacity) { ++history_dropped; return; }
+    retired.push_back({reinterpret_cast<const void*>(addr), b.size,
+                       b.guest_pc, b.variant, b.loaded_ns, now});
 }
 
 #if BCORE_ENABLE_PROFILE
@@ -172,13 +147,18 @@ public:
             const uint64_t size = entry.second;
 
             auto name_or = sym.getName();
-            if (!name_or) continue;
+            if (!name_or) { llvm::consumeError(name_or.takeError()); continue; }
             uint32_t guest_pc = 0;
             if (!parse_bb_name(name_or.get(), guest_pc)) continue;
 
             auto sect_or = sym.getSection();
             auto addr_or = sym.getAddress();
-            if (!sect_or || !addr_or) continue;
+            if (!sect_or || !addr_or) {
+                if (!sect_or) llvm::consumeError(sect_or.takeError());
+                if (!addr_or) llvm::consumeError(addr_or.takeError());
+                continue;
+            }
+            if (*sect_or == obj.section_end()) continue;
             const llvm::object::SectionRef sec = **sect_or;
             const uint64_t sec_load = li.getSectionLoadAddress(sec);
             if (sec_load == 0) continue;  // section not loaded (e.g. debug)
@@ -199,6 +179,7 @@ private:
 } // namespace
 
 bool attach_listeners(ProfileState& state, JitEngine& jit) {
+    state.perf_attached = false;
     state.map_listener = std::make_unique<BlockMapListener>(state);
     if (!jit.registerJITEventListener(*state.map_listener)) {
         // Linking layer is not RTDyldObjectLinkingLayer-based: the code map
@@ -220,22 +201,16 @@ bool attach_listeners(ProfileState& state, JitEngine& jit) {
 #if BCORE_PERF_JIT_EVENTS
 bool attach_perf_listener(ProfileState& state, JitEngine& jit) {
     if (!state.want_perf_jitdump) return false;
+    if (state.perf_attached) return true;
     // LLVM's own jitdump writer: gives `perf inject --jit` support for free.
     // nullptr when LLVM was built without LLVM_USE_PERF.
     if (!state.perf_listener)
         state.perf_listener = llvm::JITEventListener::createPerfJITEventListener();
     if (!state.perf_listener) return false;
-    // Safe to call again on the same still-live engine (the real call sites
-    // never do: Core::init()/invalidate() only reach here when
-    // want_perf_jitdump was already true, i.e. a NEW engine; the host's
-    // direct Core::set_perf_jitdump(true) call runs once, before that flag
-    // was ever true during an init()). registerJITEventListener() does not
-    // deduplicate, so a hypothetical repeat call on one unchanged engine
-    // would double-emit jitdump entries for future objects -- annoying, not
-    // unsafe (unlike replacing map_listener, this listener is never reset
-    // out from under a still-registered raw pointer).
-    jit.registerJITEventListener(*state.perf_listener);
-    return true;
+    // LLVM does not deduplicate registrations. The per-engine flag above
+    // prevents duplicate notifications; attach_listeners resets it on rebuild.
+    state.perf_attached = jit.registerJITEventListener(*state.perf_listener);
+    return state.perf_attached;
 }
 #else
 bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }

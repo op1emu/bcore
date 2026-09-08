@@ -41,13 +41,17 @@ public:
     // Counter snapshot for hosts that want numbers without per-event cost.
     BcoreStats stats() const;
 
-    // Arm a calibrated cost probe: each dispatch of `guest_pc` burns an
-    // extra `nanos` nanoseconds of CPU time (TSC busy-wait — never sleeps,
-    // so guest-visible state and scheduling are untouched). The cost is
-    // charged per execution, which is exactly the unit causal profiling
-    // needs. nanos == 0 disarms. guest_pc must be != 0.
+    // Local slowdown experiment; changes real-time coupling by design.
+    // nanos==0 is an armed sham probe, PC 0 is valid. Same-thread API.
     void setBlockCostProbe(uint32_t guest_pc, uint64_t nanos);
     void clearBlockCostProbe();
+    BcoreProbeStats blockCostProbeStats() const;
+
+    // Enable before capture. Retain at most capacity unloaded code ranges;
+    // live ranges are always available. Loss is explicit, never reattributed.
+    void setProfileHistory(size_t capacity);
+    void forEachProfileBlock(const std::function<void(const BcoreBlockInfo&)>& fn) const;
+    uint64_t profileHistoryDropped() const;
 
     // False when the object linking layer doesn't support JIT event
     // listeners; the code map then reports host_size == 0 (lookup-derived
@@ -75,8 +79,6 @@ private:
     int opt_level_ = 2;
     bool dump_ir_ = false;
 
-    // Block cost probe dispatch state. probe_pc_ == 0 means unarmed, so the
-    // dispatch loop pays one predictable load+branch while it stays 0.
-    std::atomic<uint32_t> probe_pc_{0};
-    std::atomic<uint64_t> probe_nanos_{0};
+    bool probe_enabled_ = false;
+    BcoreProbeStats probe_{};
 };

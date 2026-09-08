@@ -62,7 +62,7 @@ bool Core::run(uint32_t pc) {
             sink->onCacheMiss(pc);
             sink->onTranslateBegin(pc);
         }
-        const auto t0 = std::chrono::steady_clock::now();
+        const auto t0 = bcore_profile::monotonic_ns();
 #endif
         auto result = translator_->translate(pc);
         if (dump_ir_) {
@@ -71,29 +71,32 @@ bool Core::run(uint32_t pc) {
             result.module->print(llvm::errs(), nullptr);
             llvm::errs() << "=== end IR ===\n";
         }
-        if (!jit_->addModule(pc,
+#if BCORE_ENABLE_PROFILE
+        const auto lift_end = bcore_profile::monotonic_ns();
+        if (sink) sink->onCompileStage(pc, "lift", t0, lift_end, true);
+        const auto native_begin = bcore_profile::monotonic_ns();
+#endif
+        const bool added = jit_->addModule(pc,
                              std::move(result.module),
                              std::move(result.context),
-                             result.fallthrough_pc))
-            return false;
-        fn = jit_->lookup(pc);
-        if (!fn)
-            return false;
+                             result.fallthrough_pc);
+        fn = added ? jit_->lookup(pc) : nullptr;
 #if BCORE_ENABLE_PROFILE
-        profile_->stats.blocks_translated++;
-        const uint64_t ns = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - t0)
-                .count());
+        const auto native_end = bcore_profile::monotonic_ns();
+        const uint64_t ns = native_end - t0;
         profile_->stats.translate_ns_total += ns;
-        if (sink)
-            sink->onTranslateEnd(pc, ns);
+        if (sink) sink->onCompileStage(pc, "materialize", native_begin, native_end, fn != nullptr);
+        if (fn) {
+            profile_->stats.blocks_translated++;
+            if (sink) sink->onTranslateEnd(pc, ns);
+        } else if (sink) sink->onTranslateFailure(pc, ns);
 #endif
+        if (!fn) return false;
     }
 #if BCORE_ENABLE_PROFILE
     else {
         profile_->stats.cache_hits++;
-        if (sink)
+        if (sink && profile_->sink_wants_cache_hits)
             sink->onCacheHit(pc);
     }
 #endif
@@ -102,12 +105,9 @@ bool Core::run(uint32_t pc) {
     cpu_->pc = pc;
     jit_->set_executing(pc);
 #if BCORE_ENABLE_PROFILE
-    // Block cost probe: burn the armed per-execution cost on this thread
-    // before dispatching. Unarmed (probe_pc_ == 0) this is one predictable
-    // load+branch.
-    if (const uint32_t probed = probe_pc_.load(std::memory_order_relaxed)) {
-        if (probed == pc)
-            bcore_profile::spin_ns(probe_nanos_.load(std::memory_order_relaxed));
+    if (probe_enabled_ && probe_.guest_pc == pc) {
+        ++probe_.executions;
+        probe_.elapsed_ns += bcore_profile::spin_ns(probe_.requested_ns);
     }
 #endif
     fn(cpu_, mem_);
@@ -164,9 +164,9 @@ void Core::forEachCompiledBlock(
         std::lock_guard<std::mutex> lk(profile_->blocks_mutex);
         for (const auto& [addr, b] : profile_->blocks) {
             fn(BcoreBlockInfo{reinterpret_cast<const void*>(addr), b.size,
-                              b.guest_pc, b.variant});
+                              b.guest_pc, b.variant, b.loaded_ns, 0});
         }
-        return;
+        if (profile_->listener_ok) return;
     }
 #endif
     // Fallback (profiling disabled at build time or listener unavailable):
@@ -181,6 +181,7 @@ void Core::setEventSink(BcoreEventSink* sink) {
 #if BCORE_ENABLE_PROFILE
     profile_->sink = sink;
     profile_->sink_wants_dispatch = sink && sink->wantsDispatch();
+    profile_->sink_wants_cache_hits = sink && sink->wantsCacheHits();
 #else
     (void)sink;
 #endif
@@ -196,13 +197,8 @@ BcoreStats Core::stats() const {
 
 void Core::setBlockCostProbe(uint32_t guest_pc, uint64_t nanos) {
 #if BCORE_ENABLE_PROFILE
-    if (guest_pc == 0 || nanos == 0) {
-        clearBlockCostProbe();
-        return;
-    }
-    (void)bcore_profile::tsc_hz();  // calibrate before arming, not on first hit
-    probe_nanos_.store(nanos, std::memory_order_relaxed);
-    probe_pc_.store(guest_pc, std::memory_order_release);
+    probe_ = {guest_pc, nanos, 0, 0};
+    probe_enabled_ = true;
 #else
     (void)guest_pc;
     (void)nanos;
@@ -211,7 +207,7 @@ void Core::setBlockCostProbe(uint32_t guest_pc, uint64_t nanos) {
 
 void Core::clearBlockCostProbe() {
 #if BCORE_ENABLE_PROFILE
-    probe_pc_.store(0, std::memory_order_release);
+    probe_enabled_ = false;
 #endif
 }
 
@@ -230,5 +226,44 @@ void Core::set_perf_jitdump(bool enable) {
         bcore_profile::attach_perf_listener(*profile_, *jit_);
 #else
     (void)enable;
+#endif
+}
+
+BcoreProbeStats Core::blockCostProbeStats() const {
+#if BCORE_ENABLE_PROFILE
+    return probe_;
+#else
+    return {};
+#endif
+}
+void Core::setProfileHistory(size_t capacity) {
+#if BCORE_ENABLE_PROFILE
+    std::lock_guard<std::mutex> lk(profile_->blocks_mutex);
+    profile_->history_capacity = capacity;
+    profile_->retired.clear();
+    profile_->retired.reserve(capacity);
+    profile_->history_dropped = 0;
+    const auto now = capacity ? bcore_profile::monotonic_ns() : 0;
+    for (auto& [addr, b] : profile_->blocks) b.loaded_ns = now;
+#else
+    (void)capacity;
+#endif
+}
+void Core::forEachProfileBlock(const std::function<void(const BcoreBlockInfo&)>& fn) const {
+#if BCORE_ENABLE_PROFILE
+    std::lock_guard<std::mutex> lk(profile_->blocks_mutex);
+    for (const auto& b : profile_->retired) fn(b);
+    for (const auto& [addr, b] : profile_->blocks)
+        fn({reinterpret_cast<const void*>(addr), b.size, b.guest_pc, b.variant, b.loaded_ns, 0});
+#else
+    (void)fn;
+#endif
+}
+uint64_t Core::profileHistoryDropped() const {
+#if BCORE_ENABLE_PROFILE
+    std::lock_guard<std::mutex> lk(profile_->blocks_mutex);
+    return profile_->history_dropped;
+#else
+    return 0;
 #endif
 }

@@ -19,8 +19,8 @@ message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)
 
 # ---- Profiling / observability ----
-# ON by default: the dispatch-path cost when nothing is armed is one
-# predictable branch (see include/bcore_profile.h).
+# Standalone default ON: owner-thread counters and probe/sink branches remain
+# when unarmed. Hosts can compile instrumentation out (see bcore_profile.h).
 option(BCORE_ENABLE_PROFILE
     "JIT observability API: code map, typed event sink, counters, block cost probe" ON)
 # OFF by default: emits jitdump files on disk whenever blocks are compiled.
@@ -182,4 +182,10 @@ else()
     else()
         message(STATUS "No assembly test files found in fetched testsuite or tests/benchmarks/")
     endif()
+endif()
+option(BCORE_BUILD_PROFILE_TESTS "Build focused observability regression/benchmark" OFF)
+if(BCORE_BUILD_PROFILE_TESTS)
+    add_executable(bcore-profile-test tests/profile_test.cpp)
+    target_link_libraries(bcore-profile-test PRIVATE bfin-core)
+    add_test(NAME bcore-profile-test COMMAND bcore-profile-test)
 endif()

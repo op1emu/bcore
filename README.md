@@ -151,31 +151,44 @@ Current pass rate: **790 / 827** emulator tests, **827 / 827** disassembler comp
 
 ## Observability (host API)
 
-`include/bcore_profile.h` is the only profiling interface a host needs —
-bcore is a library: it reads no environment variables, does no I/O of its
-own, and leaves destinations to the host. Everything is near zero-cost when
-not armed (`BCORE_ENABLE_PROFILE`, CMake default ON).
+`include/bcore_profile.h` is the host profiling contract. Host code owns
+configuration and output; bcore reads no environment variables for these APIs.
+`BCORE_ENABLE_PROFILE=OFF` compiles out dispatch instrumentation. Enabled builds
+retain counters/branches even without a sink; no zero-overhead claim is made.
 
-- **Code map** — `Core::forEachCompiledBlock(fn)` yields
-  `{host_addr, host_size, guest_pc, variant}` for every live compiled block.
-  Sizes are *exact*, taken from the object-file symbol table via a
-  `JITEventListener` registered on the (default) `RTDyldObjectLinkingLayer` —
-  no "nearest preceding block" heuristics.
-- **Typed event sink** — `Core::setEventSink(BcoreEventSink*)` for translate
-  begin/end (ns), cache hit/miss, and (opt-in, `wantsDispatch()`)
-  per-dispatch events.
-- **Counters** — `Core::stats()` returns a POD snapshot for hosts that want
-  numbers without per-event cost.
-- **Block cost probe** — `Core::setBlockCostProbe(guest_pc, nanos)` burns a
-  calibrated TSC busy-wait per dispatch of that block (never `nanosleep` —
-  sleeping yields the CPU and changes the scheduling behavior being
-  measured). Charged per execution, on the dispatch path, with no codegen or
-  guest-state changes: this is the primitive causal ("marginal cost")
-  profiling is built on. Unarmed, it is one predictable branch.
+- `Core::forEachCompiledBlock` gives exact live host ranges from LLVM object
+  symbol sizes. Size zero means unavailable, never a guessed range.
+- `setProfileHistory(capacity)` and `forEachProfileBlock` retain bounded retired
+  ranges with CLOCK_MONOTONIC load/unload times. Attribute a sample only within
+  the range's lifetime; `profileHistoryDropped()` exposes truncation.
+- `setEventSink` attaches one non-owning sink. Translation includes balanced
+  lift/materialize stages and explicit failure callbacks. Cache-hit and dispatch
+  callbacks each require their own opt-in; cold-path sinks pay no virtual call
+  on every hit. `stats()` returns owner-thread cumulative counters.
+- `setBlockCostProbe(pc, ns)` arms a measured CLOCK_MONOTONIC busy spin for a
+  selected guest entry. PC zero is valid. **Zero delay remains armed as a sham**;
+  use `clearBlockCostProbe()` to disarm. `blockCostProbeStats()` reports matched
+  executions and actual spin wall envelope, including measurement/preemption.
+  This is local slowdown sensitivity, not a guarantee of inverse speedup under
+  real-time coupling. Probe snapshots coexist with the event sink.
+- `BCORE_PERF_JIT_EVENTS=ON` builds LLVM jitdump support. The host opts in with
+  `set_perf_jitdump(true)`; repeated enable is idempotent per engine. LLVM owns
+  its singleton listener. Disabling prevents attachment to future engines; an
+  already attached LLVM listener remains until that engine is destroyed.
 
-`BCORE_PERF_JIT_EVENTS=ON` (CMake, default OFF) additionally registers
-LLVM's `PerfJITEventListener`, so `perf inject --jit` resolves JIT frames
-(gated at runtime by the host via `Core::set_perf_jitdump(true)`).
+All control/query APIs run on the dispatch thread or while it is stopped.
+Code-map callbacks execute under the map mutex and must not re-enter these APIs.
+Frame-pointer sampling requires host/core compilation with frame pointers;
+full native stacks through generated code or external libraries are not promised.
+
+Focused tests (also work with profiling OFF):
+
+```sh
+cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-15/cmake -DBCORE_BUILD_PROFILE_TESTS=ON
+cmake --build build --target bcore-profile-test
+ctest --test-dir build -R bcore-profile-test --output-on-failure
+./build/bcore-profile-test --bench
+```
 
 ---
 
