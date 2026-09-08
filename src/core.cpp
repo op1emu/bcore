@@ -226,6 +226,8 @@ bool Core::profileHasBlockSizes() const {
 void Core::set_perf_jitdump(bool enable) {
 #if BCORE_ENABLE_PROFILE
     profile_->want_perf_jitdump = enable;
+    if (enable && jit_)
+        bcore_profile::attach_perf_listener(*profile_, *jit_);
 #else
     (void)enable;
 #endif

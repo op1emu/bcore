@@ -211,25 +211,40 @@ bool attach_listeners(ProfileState& state, JitEngine& jit) {
     }
 
 #if BCORE_PERF_JIT_EVENTS
-    if (state.want_perf_jitdump) {
-        // LLVM's own jitdump writer: gives `perf inject --jit` support for
-        // free. nullptr when LLVM was built without LLVM_USE_PERF.
-        // Created once but (re)registered on EVERY engine: Core::invalidate()
-        // replaces the JitEngine, and a listener left on the old engine would
-        // silently stop recording all blocks compiled after invalidation.
-        if (!state.perf_listener)
-            state.perf_listener.reset(
-                llvm::JITEventListener::createPerfJITEventListener());
-        if (state.perf_listener)
-            jit.registerJITEventListener(*state.perf_listener);
-    }
+    if (state.want_perf_jitdump)
+        attach_perf_listener(state, jit);
 #endif
     return true;
 }
 
+#if BCORE_PERF_JIT_EVENTS
+bool attach_perf_listener(ProfileState& state, JitEngine& jit) {
+    if (!state.want_perf_jitdump) return false;
+    // LLVM's own jitdump writer: gives `perf inject --jit` support for free.
+    // nullptr when LLVM was built without LLVM_USE_PERF.
+    if (!state.perf_listener)
+        state.perf_listener = llvm::JITEventListener::createPerfJITEventListener();
+    if (!state.perf_listener) return false;
+    // Safe to call again on the same still-live engine (the real call sites
+    // never do: Core::init()/invalidate() only reach here when
+    // want_perf_jitdump was already true, i.e. a NEW engine; the host's
+    // direct Core::set_perf_jitdump(true) call runs once, before that flag
+    // was ever true during an init()). registerJITEventListener() does not
+    // deduplicate, so a hypothetical repeat call on one unchanged engine
+    // would double-emit jitdump entries for future objects -- annoying, not
+    // unsafe (unlike replacing map_listener, this listener is never reset
+    // out from under a still-registered raw pointer).
+    jit.registerJITEventListener(*state.perf_listener);
+    return true;
+}
+#else
+bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }
+#endif
+
 #else // !BCORE_ENABLE_PROFILE
 
 bool attach_listeners(ProfileState&, JitEngine&) { return false; }
+bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }
 
 #endif
 

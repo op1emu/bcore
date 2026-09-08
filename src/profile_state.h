@@ -49,7 +49,8 @@ struct ProfileState {
     BcoreStats stats{};
 
     // Runtime opt-in for LLVM's PerfJITEventListener (jitdump output for
-    // `perf inject --jit`). Must be set before the first translation.
+    // `perf inject --jit`). Set by Core::set_perf_jitdump(), which also
+    // attaches immediately via attach_perf_listener() below.
     bool want_perf_jitdump = false;
 
     void clearBlocks();
@@ -57,13 +58,29 @@ struct ProfileState {
                      uint32_t guest_pc);
     void freeObject(uint64_t object_key);
 
-    std::unique_ptr<llvm::JITEventListener> map_listener;
-    std::unique_ptr<llvm::JITEventListener> perf_listener;
+    std::unique_ptr<llvm::JITEventListener> map_listener;  // owns BlockMapListener
+    // NON-owning: llvm::JITEventListener::createPerfJITEventListener()
+    // returns a pointer to a function-local `static` object (confirmed via
+    // nm: a .bss symbol with its own initialization guard variable), not a
+    // heap allocation. LLVM manages its lifetime as a process-wide
+    // singleton; wrapping it in unique_ptr and letting that delete it at
+    // Core teardown is a free() on a non-heap pointer (reproduced: glibc
+    // "free(): invalid pointer", SIGABRT, during shutdown).
+    llvm::JITEventListener* perf_listener = nullptr;
 };
 
 // (Re)creates and registers listeners on a fresh JitEngine. Called by
 // Core::init()/invalidate(). Returns false when the linking layer does not
 // support JIT event listeners (host should then treat sizes as unavailable).
 bool attach_listeners(ProfileState& state, JitEngine& jit);
+
+// Registers (creating if needed) the LLVM perf jitdump listener on a JIT
+// engine that is already live. Split out from attach_listeners() so
+// Core::set_perf_jitdump() can attach immediately without touching
+// map_listener: replacing that unique_ptr while its old raw pointer may
+// still be registered inside RTDyldObjectLinkingLayer's listener list (it
+// does not take ownership) would be a use-after-free. No-op, returns false,
+// if !want_perf_jitdump or the build lacks BCORE_PERF_JIT_EVENTS.
+bool attach_perf_listener(ProfileState& state, JitEngine& jit);
 
 } // namespace bcore_profile
