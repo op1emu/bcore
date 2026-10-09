@@ -131,6 +131,8 @@ def main() -> None:
                         help="Parallel worker count (default: auto)")
     parser.add_argument("-t", "--timeout", type=float, default=10.0,
                         help="Per-test timeout in seconds (default: 10)")
+    parser.add_argument("-O", "--opt-level", type=int, choices=range(4), default=0,
+                        help="emu optimization level, IR pipeline and backend (default: 0)")
     parser.add_argument("--ignore-list", metavar="FILE",
                         help="File with ELF basenames to skip (one per line, # comments allowed). "
                              "A warning is printed for any ignored test that passes.")
@@ -183,6 +185,7 @@ def main() -> None:
     print(f"elfs:    {elf_dir}")
     print(f"tests:   {len(active_files)}  (+ {len(ignored_files)} ignored)")
     print(f"timeout: {args.timeout}s")
+    print(f"opt:     -O {args.opt_level}")
     print()
 
     summary = Summary(total=len(active_files), ignored=len(ignored_files))
@@ -193,7 +196,7 @@ def main() -> None:
         t0 = time.monotonic()
         try:
             proc = subprocess.run(
-                [str(emu), str(elf_path), "-O", "0"],
+                [str(emu), str(elf_path), "-O", str(args.opt_level)],
                 capture_output=True,
                 text=True,
                 timeout=args.timeout,

@@ -1,10 +1,12 @@
 #include "jit_engine.h"
 
 #include <cstdio>
+#include <cstring>
 
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
@@ -26,16 +28,20 @@ static llvm::JITEvaluatedSymbol sym_from_ptr(void* ptr) {
         llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable);
 }
 
-bool JitEngine::init(int opt_level) {
+bool JitEngine::init(int opt_level, int codegen_level) {
     opt_level_ = opt_level;
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
+    // The IR pipeline and the backend are separate knobs: the backend level
+    // decides instruction selection and register allocation, the IR pipeline
+    // what the backend is given, and each has its own compile-time cost.
+    const int cg = codegen_level < 0 ? opt_level : codegen_level;
     llvm::CodeGenOpt::Level cg_level =
-        opt_level == 0 ? llvm::CodeGenOpt::None :
-        opt_level == 1 ? llvm::CodeGenOpt::Less :
-        opt_level == 3 ? llvm::CodeGenOpt::Aggressive :
-                         llvm::CodeGenOpt::Default;
+        cg <= 0 ? llvm::CodeGenOpt::None :
+        cg == 1 ? llvm::CodeGenOpt::Less :
+        cg == 3 ? llvm::CodeGenOpt::Aggressive :
+                  llvm::CodeGenOpt::Default;
 
     auto jtmb_or_err = llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!jtmb_or_err) {
@@ -43,6 +49,30 @@ bool JitEngine::init(int opt_level) {
         return false;
     }
     jtmb_or_err->setCodeGenOptLevel(cg_level);
+
+    // The IR pipeline's TargetMachine comes from a copy of the compiler's
+    // builder, so its TTI describes exactly the CPU and features the code will
+    // be generated for. Without one, PassBuilder's TargetIRAnalysis is the
+    // generic implementation: zero vector registers for LoopVectorize/SLP, no
+    // x86 unrolling preferences, generic SimplifyCFG/LICM/JumpThreading costs.
+    // Single-threaded use only, like all of bcore's compilation (X86's
+    // subtarget cache in TargetMachine is unlocked).
+    {
+        auto machine = llvm::orc::JITTargetMachineBuilder(*jtmb_or_err).createTargetMachine();
+        if (!machine) {
+            llvm::errs() << "Failed to create pass TargetMachine: " << machine.takeError() << "\n";
+            return false;
+        }
+        pass_machine_ = std::move(*machine);
+    }
+    // Clang's -O1 leaves both vectorizers off and -O2/-O3 turn both on; the
+    // PipelineTuningOptions defaults (loop vectorization on, SLP off) match
+    // neither, so follow clang.
+    llvm::PipelineTuningOptions tuning;
+    tuning.LoopVectorization = opt_level >= 2;
+    tuning.LoopInterleaving = opt_level >= 2;
+    tuning.SLPVectorization = opt_level >= 2;
+    pb_ = std::make_unique<llvm::PassBuilder>(pass_machine_.get(), tuning);
 
     auto jit_or_err = llvm::orc::LLJITBuilder()
         .setJITTargetMachineBuilder(std::move(*jtmb_or_err))
@@ -85,6 +115,13 @@ bool JitEngine::init(int opt_level) {
     symbols[es.intern("cec_is_user_mode")]    = sym_from_ptr(reinterpret_cast<void*>(&cec_is_user_mode));
     symbols[es.intern("cec_check_pending")]   = sym_from_ptr(reinterpret_cast<void*>(&cec_check_pending));
     symbols[es.intern("bfin_hwloop_step")]    = sym_from_ptr(reinterpret_cast<void*>(&bfin_hwloop_step));
+    // Not called by the lifter. With an IR pipeline, LoopIdiomRecognize can turn
+    // a guest fill/copy loop into llvm.memset/memcpy/memmove, and the backend
+    // lowers a non-constant length to the libc call; resolve it here like every
+    // other symbol rather than through a process-wide search generator.
+    symbols[es.intern("memset")]              = sym_from_ptr(reinterpret_cast<void*>(&::memset));
+    symbols[es.intern("memcpy")]              = sym_from_ptr(reinterpret_cast<void*>(&::memcpy));
+    symbols[es.intern("memmove")]             = sym_from_ptr(reinterpret_cast<void*>(&::memmove));
 
     if (auto err = jd.define(llvm::orc::absoluteSymbols(symbols))) {
         llvm::errs() << "Failed to register symbols: " << err << "\n";
@@ -107,15 +144,19 @@ void JitEngine::optimize_module(llvm::Module& mod) {
     llvm::CGSCCAnalysisManager    cgam;
     llvm::ModuleAnalysisManager   mam;
 
-    pb_.registerModuleAnalyses(mam);
-    pb_.registerCGSCCAnalyses(cgam);
-    pb_.registerFunctionAnalyses(fam);
-    pb_.registerLoopAnalyses(lam);
-    pb_.crossRegisterProxies(lam, fam, cgam, mam);
+    // PassBuilder(TM) registers the same TargetIRAnalysis itself; registering
+    // it first makes that explicit (the later default registration is then a
+    // no-op).
+    fam.registerPass([&] { return pass_machine_->getTargetIRAnalysis(); });
+    pb_->registerModuleAnalyses(mam);
+    pb_->registerCGSCCAnalyses(cgam);
+    pb_->registerFunctionAnalyses(fam);
+    pb_->registerLoopAnalyses(lam);
+    pb_->crossRegisterProxies(lam, fam, cgam, mam);
 
     // Rebuild per-module pipeline each call (analysis managers are fresh).
     // passBuilder itself is reused across calls (avoids plugin registration overhead).
-    llvm::ModulePassManager mpm = pb_.buildPerModuleDefaultPipeline(lvl);
+    llvm::ModulePassManager mpm = pb_->buildPerModuleDefaultPipeline(lvl);
     mpm.run(mod, mam);
 }
 

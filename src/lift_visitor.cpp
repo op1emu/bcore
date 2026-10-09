@@ -7088,7 +7088,12 @@ bool LiftVisitor::decode_dsp32shift_DEPOSIT_X(
         builder_.CreateShl(builder_.getInt32(1), len16), builder_.getInt32(1), "mask16");
     auto* fgnd = builder_.CreateAnd(builder_.CreateLShr(fg, 16), mask16, "fgnd");
     // Sign-extend fgnd within 16 bits: (bs32)(bs16)(fgnd << (16-len)) >> (16-len)
-    auto* shift_amt = builder_.CreateSub(builder_.getInt32(16), len, "shift_amt");
+    // For len 17..31, 16-len is negative: undefined in bfin-sim's C and poison
+    // in LLVM (an IR pipeline folds it away). Both the x86-built reference and
+    // the code this lifter always produced shift by the count mod 32, so the
+    // mask pins that behaviour rather than inventing one.
+    auto* shift_amt = builder_.CreateAnd(builder_.CreateSub(builder_.getInt32(16), len),
+                                         builder_.getInt32(31), "shift_amt");
     auto* shifted_l = builder_.CreateShl(fgnd, shift_amt, "shifted_l");
     // Trunc to i16 then SExt to i32 = sign extends from bit 15
     auto* as_i16  = builder_.CreateTrunc(shifted_l, builder_.getInt16Ty(), "as_i16");
@@ -7526,9 +7531,12 @@ bool LiftVisitor::decode_dsp32shiftimm_ASHIFT32_arith(
     llvm::Value* result;
     llvm::Value* v_flag;
     if (count < 0) {
-        // Left-shift by -count (no saturation for non-S variant)
+        // Left-shift by -count (no saturation for non-S variant). b=1 imm5=0
+        // gives lamt 32: bfin-sim's lshift shifts a bu64 and yields 0, where
+        // an i32 shl by 32 is poison (folded to anything by InstCombine and by
+        // the backend's DAG combiner alike).
         int lamt = -count;
-        result = builder_.CreateShl(rs, builder_.getInt32(lamt), "shl32");
+        result = lamt >= 32 ? builder_.getInt32(0) : builder_.CreateShl(rs, builder_.getInt32(lamt), "shl32");
         // V: detect sign change
         auto* in_sign = builder_.CreateLShr(rs, 31, "in_sign");
         auto* out_sign = builder_.CreateLShr(result, 31, "out_sign");
