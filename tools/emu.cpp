@@ -156,10 +156,12 @@ int main(int argc, char** argv) {
     cpu.pc = eh->e_entry;
     cpu.dpregs[14] = stack_top; // SP
     cpu.ksp = stack_top;        // KSP for user→supervisor stack swap
-    // Set step limit: 0 = unlimited, N = execute up to N instructions
-    cpu.steps_remaining = (max_steps == 0 || max_steps > 0xFFFFFFFFULL)
-                          ? 0u
-                          : static_cast<uint32_t>(max_steps);
+    // Packets per run: 0 = unlimited, N = leave each block after N packets.
+    // One normalized value for Core::init (which picks limited mode from it)
+    // and for every run; a budget above UINT32_MAX is clamped, not truncated.
+    const uint32_t step_budget = max_steps > 0xFFFFFFFFULL ? 0xFFFFFFFFu
+                                                           : static_cast<uint32_t>(max_steps);
+    cpu.steps_remaining = step_budget;
 
     // Initialize Core (JIT + translator)
     Core core(&cpu, &memory);
@@ -178,7 +180,7 @@ int main(int argc, char** argv) {
     // Main execution loop
     uint64_t runs = 0, packets = 0;
     while (!cpu.halted) {
-        cpu.steps_remaining = static_cast<uint32_t>(max_steps);
+        cpu.steps_remaining = step_budget;
         if (!core.run(cpu.pc)) {
             fprintf(stderr, "failed to run BB at 0x%08x\n", cpu.pc);
             return 1;

@@ -119,7 +119,8 @@ Reads an ELF32 Blackfin binary and prints disassembly for all executable section
 |---|---|
 | `--trace` | Print PC + disassembly before each basic-block execution |
 | `--dump` | Print generated LLVM IR per basic block (post-optimization) |
-| `--max-steps N` | Stop after N basic-block steps (0 = unlimited, default) |
+| `--max-steps N` | Leave each block after at most N packets (0 = unlimited, default; 1 single-steps) |
+| `--count-packets` | Print the packets and block runs executed (`packets=N runs=M`) to stderr at exit |
 | `--opt-level N` / `-O N` | LLVM optimization level 0–3 for both the IR pass pipeline and the backend (default: 2) |
 | `--fastmem` | `mmap` memory at address 0 for zero-overhead JIT loads/stores |
 
