@@ -163,3 +163,36 @@ Instruction semantics and test fixtures are derived from [op1emu/bfin_sim](https
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Observability (host API)
+
+`include/bcore_profile.h` is the host profiling contract. Host code owns
+configuration and output; bcore reads no environment variables for these APIs.
+`BCORE_ENABLE_PROFILE=OFF` compiles the instrumentation out of `Core::run`.
+Enabled builds keep a null check and counters per dispatch even without a sink;
+no zero-overhead claim is made.
+
+- `Core::forEachCompiledBlock` gives exact live host ranges from LLVM object
+  symbol sizes. Size zero means unavailable, never a guessed range.
+- `setProfileHistory(capacity)` and `forEachProfileBlock` retain bounded retired
+  ranges with CLOCK_MONOTONIC load/unload times. Attribute a sample only within
+  the range's lifetime; `profileHistoryDropped()` exposes truncation.
+- `setEventSink` attaches one non-owning sink for the translation path: begin,
+  end or failure per translation, and the `lift`, `ir-optimize` and
+  `materialize` stages. Nothing fires on a cache hit. `stats()` returns
+  owner-thread cumulative counters (translations, executions, hits, misses,
+  translation time).
+- `BCORE_PERF_JIT_EVENTS=ON` builds LLVM jitdump support. The host opts in with
+  `set_perf_jitdump(true)`; repeated enable is idempotent per engine and the
+  listener is re-attached across `invalidate()`. LLVM owns its singleton listener.
+
+All control/query APIs run on the dispatch thread or while it is stopped.
+Code-map callbacks execute under the map mutex and must not re-enter these APIs.
+
+Focused test (also passes with profiling OFF):
+
+```sh
+cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-15/cmake -DBCORE_BUILD_PROFILE_TESTS=ON
+cmake --build build --target bcore-profile-test
+ctest --test-dir build -R bcore-profile-test --output-on-failure
+```

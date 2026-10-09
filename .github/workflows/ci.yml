@@ -50,10 +50,25 @@ jobs:
         run: |
           cmake -B build \
             -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBCORE_BUILD_PROFILE_TESTS=ON
 
       - name: Build
         run: cmake --build build -j$(nproc)
+
+      - name: Observability API test
+        run: ctest --test-dir build -R bcore-profile-test --output-on-failure
+
+      # The same test with the instrumentation compiled out.
+      - name: Observability API test (BCORE_ENABLE_PROFILE=OFF)
+        run: |
+          cmake -B build-noprof \
+            -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBCORE_ENABLE_PROFILE=OFF \
+            -DBCORE_BUILD_PROFILE_TESTS=ON
+          cmake --build build-noprof -j$(nproc) --target bcore-profile-test
+          ctest --test-dir build-noprof -R bcore-profile-test --output-on-failure
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
