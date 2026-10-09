@@ -7,7 +7,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 
@@ -44,6 +46,30 @@ struct Sink : BcoreEventSink {
         stages.push_back(stage);
     }
 };
+
+// A sink that takes its time must not be charged to the translation.
+struct SlowSink : BcoreEventSink {
+    void onCompileStage(uint32_t, const char*, uint64_t, uint64_t, bool) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+};
+
+static void check_sink_time_excluded() {
+#if BCORE_ENABLE_PROFILE
+    Ram mem;
+    mem.write16(0, 0x2000);
+    CpuState cpu{};
+    Core core(&cpu, &mem);
+    require(core.init(1), "init");
+    SlowSink sink;
+    core.setEventSink(&sink);
+    require(core.run(0), "dispatch with a slow sink");
+    // Three stage callbacks sleep 600 ms in all; one tiny block compiles in
+    // a few ms.
+    require(core.stats().translate_ns_total < 300000000ull, "stage callbacks are outside translate_ns");
+    core.setEventSink(nullptr);
+#endif
+}
 
 static std::vector<BcoreBlockInfo> blocks(const Core& core) {
     std::vector<BcoreBlockInfo> out;
@@ -104,7 +130,7 @@ static void check(int opt_level) {
     core.setEventSink(nullptr);
 }
 
-#if BCORE_PERF_JIT_EVENTS
+#if BCORE_ENABLE_PROFILE && BCORE_PERF_JIT_EVENTS
 // Names of the JIT_CODE_LOAD records (id 0) in this process's jitdump file.
 static std::vector<std::string> jitdump_loads(const std::filesystem::path& dir) {
     const std::string file = "jit-" + std::to_string(getpid()) + ".dump";
@@ -152,10 +178,11 @@ static void check_jitdump() {
 #endif
 
 int main() {
-#if BCORE_PERF_JIT_EVENTS
+#if BCORE_ENABLE_PROFILE && BCORE_PERF_JIT_EVENTS
     check_jitdump();
 #endif
     check(0);
     check(1);
+    check_sink_time_excluded();
     std::puts("bcore profile test passed");
 }

@@ -140,7 +140,7 @@ jitdump attach), translation-path instrumentation in `src/core.cpp` behind
 | Option | Default | Effect |
 |---|---|---|
 | `BCORE_ENABLE_PROFILE` | ON | code map, event sink, counters (links LLVM `object`); OFF compiles them out of `Core::run` |
-| `BCORE_PERF_JIT_EVENTS` | OFF | links LLVM `perfjitevents`; still needs a runtime `set_perf_jitdump(true)` |
+| `BCORE_PERF_JIT_EVENTS` | OFF | links LLVM `perfjitevents` (requires `BCORE_ENABLE_PROFILE`); still needs a runtime `set_perf_jitdump(true)` |
 | `BCORE_BUILD_PROFILE_TESTS` | OFF | builds the `bcore-profile-test` target |
 
 ```bash
@@ -157,7 +157,7 @@ is written to pass in both.
 ### Capabilities
 
 - **Code map**: `forEachCompiledBlock` yields `{host_addr, host_size, guest_pc, variant, loaded_ns, unloaded_ns}`; sizes are exact (`computeSymbolSizes` in the load listener), `0` = unavailable. `profileHasBlockSizes()` reports listener attach. `setProfileHistory(n)` retains bounded retired ranges so pre-`invalidate()` samples still resolve; `profileHistoryDropped()` reports truncation.
-- **Event sink**: `setEventSink()` (non-owning; detach with `nullptr` first). Translation path only: `onTranslateBegin` / `onTranslateEnd` / `onTranslateFailure` and the `lift`, `ir-optimize` (when `opt_level != 0`) and `materialize` stages. Never sum stages into their parent. Nothing fires on a cache hit.
+- **Event sink**: `setEventSink()` (non-owning; detach with `nullptr` first). Translation path only: `onTranslateBegin` / `onTranslateEnd` / `onTranslateFailure` and the `lift`, `ir-optimize` (when `opt_level != 0`) and `materialize` stages, reported after the translation finishes so sink time is in no measured interval. Never sum stages into their parent. Nothing fires on a cache hit.
 - **Counters**: `stats()` POD snapshot, one owner-thread increment per event.
 
 Call control/query APIs from the `Core::run()` thread or while it is stopped;

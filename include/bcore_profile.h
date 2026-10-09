@@ -7,7 +7,10 @@
 //
 //  * bcore is a library: it never reads environment variables, never does
 //    I/O, and never prints on the success path. The host owns all sinks
-//    and destinations.
+//    and destinations. The one exception is opt-in: set_perf_jitdump(true)
+//    (with BCORE_PERF_JIT_EVENTS=ON) has LLVM's listener create and write
+//    jit-<pid>.dump under $JITDUMPDIR/.debug/jit/ (or $HOME/.debug/jit/);
+//    LLVM, not bcore, reads those variables.
 //  * BCORE_ENABLE_PROFILE=0 compiles every instrumentation point out of
 //    Core::run(). Enabled builds keep a null-sink check and owner-thread
 //    counter increments on the dispatch path; that is near zero, not zero.
@@ -50,7 +53,10 @@ public:
         (void)guest_pc; (void)elapsed_ns;
     }
 
-    // Stages inside a translation, in order and on the CLOCK_MONOTONIC clock:
+    // Stages inside a translation, in order and on the CLOCK_MONOTONIC clock,
+    // reported after the translation has finished (just before
+    // onTranslateEnd/onTranslateFailure), so time spent in these callbacks
+    // is in no stage and not in the elapsed time:
     //   "lift"         decode and emit the block's LLVM IR
     //   "ir-optimize"  the IR pass pipeline (only when opt_level != 0)
     //   "materialize"  add the module to the JIT and look the symbol up:
