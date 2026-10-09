@@ -69,6 +69,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
 
     uint32_t cur_pc = pc;
     int max_insns = 256; // safety limit per BB
+    uint32_t packets = 0;
 
     while (max_insns-- > 0 && !visitor.is_terminated()) {
         uint32_t insn_pc = cur_pc;
@@ -93,6 +94,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
         auto* block = builder.GetInsertBlock();
         builder.SetInsertPoint(insn_entry);
         visitor.emit_insn_len(bytes);
+        visitor.emit_packet_index(++packets);
         builder.CreateBr(insn);
         builder.SetInsertPoint(block);
     }

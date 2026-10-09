@@ -73,6 +73,7 @@ bool Core::run(uint32_t pc) {
 
     cpu_->did_jump = false;
     cpu_->pc = pc;
+    cpu_->packets = 0;
     jit_->set_executing(pc);
     fn(cpu_, mem_);
     jit_->clear_executing();

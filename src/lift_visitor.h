@@ -45,6 +45,7 @@ public:
     void reset_terminated()  { terminated_ = false; }
 
     void emit_insn_len(uint32_t len);
+    void emit_packet_index(uint32_t index);
     // Emit per-instruction step counter check; repositions builder_ to continue block.
     // No-op in unlimited mode. Called by BBTranslator after each instruction.
     void emit_step_check(uint32_t post_insn_pc);
