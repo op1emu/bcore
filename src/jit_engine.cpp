@@ -5,6 +5,7 @@
 
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/Mangling.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/PassManager.h>
@@ -91,37 +92,38 @@ bool JitEngine::init(int opt_level, int codegen_level) {
     // on -rdynamic / ENABLE_EXPORTS.
     auto& es = jit_->getExecutionSession();
     auto& jd = jit_->getMainJITDylib();
+    llvm::orc::MangleAndInterner mangle(es, jit_->getDataLayout());
 
     llvm::orc::SymbolMap symbols;
-    symbols[es.intern("mem_read8")]           = sym_from_ptr(reinterpret_cast<void*>(&mem_read8));
-    symbols[es.intern("mem_read16")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read16));
-    symbols[es.intern("mem_read32")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read32));
-    symbols[es.intern("mem_write8")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_write8));
-    symbols[es.intern("mem_write16")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write16));
-    symbols[es.intern("mem_write32")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write32));
-    symbols[es.intern("bfin_syscall")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_syscall));
-    symbols[es.intern("bfin_putchar")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_putchar));
-    symbols[es.intern("cec_exception")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_exception));
-    symbols[es.intern("cec_raise")]           = sym_from_ptr(reinterpret_cast<void*>(&cec_raise));
-    symbols[es.intern("cec_return_rti")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rti));
-    symbols[es.intern("cec_return_rtx")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rtx));
-    symbols[es.intern("cec_return_rtn")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rtn));
-    symbols[es.intern("cec_return_rte")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rte));
-    symbols[es.intern("cec_cli")]             = sym_from_ptr(reinterpret_cast<void*>(&cec_cli));
-    symbols[es.intern("cec_sti")]             = sym_from_ptr(reinterpret_cast<void*>(&cec_sti));
-    symbols[es.intern("cec_push_reti")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_push_reti));
-    symbols[es.intern("cec_pop_reti")]        = sym_from_ptr(reinterpret_cast<void*>(&cec_pop_reti));
-    symbols[es.intern("cec_check_sup")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_check_sup));
-    symbols[es.intern("cec_is_user_mode")]    = sym_from_ptr(reinterpret_cast<void*>(&cec_is_user_mode));
-    symbols[es.intern("cec_check_pending")]   = sym_from_ptr(reinterpret_cast<void*>(&cec_check_pending));
-    symbols[es.intern("bfin_hwloop_step")]    = sym_from_ptr(reinterpret_cast<void*>(&bfin_hwloop_step));
+    symbols[mangle("mem_read8")]           = sym_from_ptr(reinterpret_cast<void*>(&mem_read8));
+    symbols[mangle("mem_read16")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read16));
+    symbols[mangle("mem_read32")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read32));
+    symbols[mangle("mem_write8")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_write8));
+    symbols[mangle("mem_write16")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write16));
+    symbols[mangle("mem_write32")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write32));
+    symbols[mangle("bfin_syscall")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_syscall));
+    symbols[mangle("bfin_putchar")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_putchar));
+    symbols[mangle("cec_exception")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_exception));
+    symbols[mangle("cec_raise")]           = sym_from_ptr(reinterpret_cast<void*>(&cec_raise));
+    symbols[mangle("cec_return_rti")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rti));
+    symbols[mangle("cec_return_rtx")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rtx));
+    symbols[mangle("cec_return_rtn")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rtn));
+    symbols[mangle("cec_return_rte")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rte));
+    symbols[mangle("cec_cli")]             = sym_from_ptr(reinterpret_cast<void*>(&cec_cli));
+    symbols[mangle("cec_sti")]             = sym_from_ptr(reinterpret_cast<void*>(&cec_sti));
+    symbols[mangle("cec_push_reti")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_push_reti));
+    symbols[mangle("cec_pop_reti")]        = sym_from_ptr(reinterpret_cast<void*>(&cec_pop_reti));
+    symbols[mangle("cec_check_sup")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_check_sup));
+    symbols[mangle("cec_is_user_mode")]    = sym_from_ptr(reinterpret_cast<void*>(&cec_is_user_mode));
+    symbols[mangle("cec_check_pending")]   = sym_from_ptr(reinterpret_cast<void*>(&cec_check_pending));
+    symbols[mangle("bfin_hwloop_step")]    = sym_from_ptr(reinterpret_cast<void*>(&bfin_hwloop_step));
     // Not called by the lifter. With an IR pipeline, LoopIdiomRecognize can turn
     // a guest fill/copy loop into llvm.memset/memcpy/memmove, and the backend
     // lowers a non-constant length to the libc call; resolve it here like every
     // other symbol rather than through a process-wide search generator.
-    symbols[es.intern("memset")]              = sym_from_ptr(reinterpret_cast<void*>(&::memset));
-    symbols[es.intern("memcpy")]              = sym_from_ptr(reinterpret_cast<void*>(&::memcpy));
-    symbols[es.intern("memmove")]             = sym_from_ptr(reinterpret_cast<void*>(&::memmove));
+    symbols[mangle("memset")]              = sym_from_ptr(reinterpret_cast<void*>(&::memset));
+    symbols[mangle("memcpy")]              = sym_from_ptr(reinterpret_cast<void*>(&::memcpy));
+    symbols[mangle("memmove")]             = sym_from_ptr(reinterpret_cast<void*>(&::memmove));
 
     if (auto err = jd.define(llvm::orc::absoluteSymbols(symbols))) {
         llvm::errs() << "Failed to register symbols: " << err << "\n";
