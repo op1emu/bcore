@@ -9,8 +9,8 @@ count of executed packets). The per-block total must equal both single-step
 numbers: a block total that only adds static block lengths overcounts every
 taken conditional branch and hardware-loop back edge that leaves a block early.
 
-Single-stepping compiles one block per packet, so a long test can time out
-there; that test is reported as skipped (it has no oracle), never as passed.
+A single-stepped run that times out is reported as skipped (it has no oracle),
+never as passed; any other run that prints no packet count fails.
 """
 
 import argparse
@@ -32,16 +32,21 @@ def get_project_paths() -> Tuple[Path, Path]:
     return build_dir / "emu", build_dir / "test_linked"
 
 
+class TimedOut(Exception):
+    pass
+
+
 def count(emu: Path, elf: Path, opt_level: int, step: bool,
           timeout: float) -> Optional[Tuple[int, int, int]]:
-    """(exit code, packets, runs), or None on timeout or missing output."""
+    """(exit code, packets, runs); None when the run printed no packet count
+    (a crash, or a failure before the summary). Raises TimedOut."""
     cmd = [str(emu), "--count-packets", "-O", str(opt_level), str(elf)]
     if step:
         cmd[1:1] = ["--max-steps", "1"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return None
+    except subprocess.TimeoutExpired as error:
+        raise TimedOut from error
     m = COUNT_RE.search(proc.stderr)
     if not m:
         return None
@@ -50,12 +55,18 @@ def count(emu: Path, elf: Path, opt_level: int, step: bool,
 
 def check(emu: Path, elf: Path, opt_level: int, timeout: float) -> Tuple[str, str]:
     """("pass" | "skip" | "fail", reason)."""
-    block = count(emu, elf, opt_level, False, timeout)
+    try:
+        block = count(emu, elf, opt_level, False, timeout)
+    except TimedOut:
+        return "fail", "per-block run timed out"
     if block is None:
-        return "fail", "per-block run timed out or printed no packet count"
-    step = count(emu, elf, opt_level, True, timeout)
-    if step is None:
+        return "fail", "per-block run printed no packet count"
+    try:
+        step = count(emu, elf, opt_level, True, timeout)
+    except TimedOut:
         return "skip", "single-step run timed out"
+    if step is None:
+        return "fail", "single-step run printed no packet count"
     if block[0] != step[0]:
         return "fail", f"exit code differs: block={block[0]} step={step[0]}"
     if step[1] != step[2]:
