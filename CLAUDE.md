@@ -162,6 +162,9 @@ is written to pass in both.
 
 Call control/query APIs from the `Core::run()` thread or while it is stopped;
 code-map callbacks run under the map mutex and must not re-enter these APIs.
+Event-sink callbacks run inside `Core::run()` and must neither throw nor call
+back into that `Core` (an `invalidate()` from a callback would free the block
+about to run). A translation that throws still reports `onTranslateFailure`.
 
 ### `perf inject --jit`
 

@@ -68,6 +68,18 @@ bool Core::run(uint32_t pc) {
         profile_->stats.cache_misses++;
         if (sink) sink->onTranslateBegin(pc);
         const uint64_t t0 = bcore_profile::monotonic_ns();
+        // Balances onTranslateBegin when anything below throws (a host
+        // Memory may: decoding reads guest memory through it). The exception
+        // still propagates.
+        struct FailOnUnwind {
+            BcoreEventSink* sink;
+            uint32_t pc;
+            uint64_t t0;
+            bool armed = true;
+            ~FailOnUnwind() {
+                if (armed && sink) sink->onTranslateFailure(pc, bcore_profile::monotonic_ns() - t0);
+            }
+        } fail_on_unwind{sink, pc, t0};
 #endif
         auto result = translator_->translate(pc);
 #if BCORE_ENABLE_PROFILE
@@ -101,6 +113,7 @@ bool Core::run(uint32_t pc) {
             fn = jit_->lookup(pc);
 #if BCORE_ENABLE_PROFILE
         const uint64_t t1 = bcore_profile::monotonic_ns();
+        fail_on_unwind.armed = false;
         profile_->stats.translate_ns_total += t1 - t0;
         if (fn) profile_->stats.blocks_translated++;
         if (sink) {

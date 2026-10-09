@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <chrono>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -116,6 +117,13 @@ static void check(int opt_level) {
     require(core.profileHistoryDropped() == 0, "history within capacity");
     core.invalidate();
     require(core.profileHistoryDropped() == 1, "overflow is counted, not reattributed");
+
+    // A translation that throws (Ram reads are bounds-checked) still pairs
+    // its begin with a failure, and the exception reaches the caller.
+    bool threw = false;
+    try { core.run(0x2000); } catch (const std::out_of_range&) { threw = true; }
+    require(threw, "decoding outside Ram throws");
+    require(sink.failures == 1 && sink.begins == sink.ends + sink.failures, "begin balanced on unwind");
 
 #else
     require(sink.begins == 0 && sink.stages.empty(), "disabled build fires no events");
