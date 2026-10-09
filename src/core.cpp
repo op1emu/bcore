@@ -35,6 +35,8 @@ bool Core::init(int opt_level, int codegen_level) {
         /*unlimited=*/(cpu_->steps_remaining == 0),
         fastmem,
         fast_base);
+    if (cpu_->steps_remaining)
+        translator_->set_max_packets(cpu_->steps_remaining);
     applyModuleTarget();
 
     return true;

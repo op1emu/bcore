@@ -68,7 +68,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
                         fastmem_, fast_base_, mem_->rawmem_limit());
 
     uint32_t cur_pc = pc;
-    int max_insns = 256; // safety limit per BB
+    int max_insns = static_cast<int>(max_packets_); // safety limit per BB
     uint32_t packets = 0;
 
     while (max_insns-- > 0 && !visitor.is_terminated()) {
