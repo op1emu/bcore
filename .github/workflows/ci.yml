@@ -139,6 +139,18 @@ jobs:
             --no-fail-fast \
             --ignore-list .github/emu-ignore.txt
 
+      # The same suite through the O1 IR pass pipeline, the level op1emu runs.
+      # -O 0 never invokes the pipeline, so only this step catches IR that the
+      # passes miscompile (e.g. poison the backend alone tolerated). Compile-
+      # heavy tests take ~15 s at O1, hence the longer timeout.
+      - name: Run emulator tests (-O 1)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/run_emu_test.py \
+            --no-fail-fast \
+            -O 1 -t 60 \
+            --ignore-list .github/emu-ignore.txt
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
