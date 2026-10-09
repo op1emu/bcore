@@ -219,8 +219,11 @@ bool Core::profileHasBlockSizes() const {
 void Core::set_perf_jitdump(bool enable) {
 #if BCORE_ENABLE_PROFILE
     profile_->want_perf_jitdump = enable;
-    if (enable && jit_)
+    if (!jit_) return;
+    if (enable)
         bcore_profile::attach_perf_listener(*profile_, *jit_);
+    else
+        bcore_profile::detach_perf_listener(*profile_, *jit_);
 #else
     (void)enable;
 #endif
@@ -246,9 +249,14 @@ void Core::forEachProfileBlock(const std::function<void(const BcoreBlockInfo&)>&
     for (const auto& b : profile_->retired) fn(b);
     for (const auto& [addr, b] : profile_->blocks)
         fn({reinterpret_cast<const void*>(addr), b.size, b.guest_pc, b.variant, b.loaded_ns, 0});
-#else
-    (void)fn;
+    if (profile_->listener_ok) return;
 #endif
+    // No load listener (or profiling compiled out): live code from the
+    // lookup table, sizes and lifetimes unknown, as in forEachCompiledBlock.
+    if (jit_)
+        jit_->forEachCompiled([&fn](const void* addr, uint32_t pc) {
+            fn(BcoreBlockInfo{addr, /*host_size=*/0, pc, /*variant=*/0});
+        });
 }
 
 uint64_t Core::profileHistoryDropped() const {

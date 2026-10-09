@@ -51,7 +51,8 @@ jobs:
           cmake -B build \
             -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBCORE_BUILD_PROFILE_TESTS=ON
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_PERF_JIT_EVENTS=ON
 
       - name: Build
         run: cmake --build build -j$(nproc)

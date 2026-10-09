@@ -53,9 +53,11 @@ public:
     // addresses only).
     bool profileHasBlockSizes() const;
 
-    // Runtime opt-in for jitdump emission (`perf inject --jit`). Attaches
-    // immediately (safe to call any time after init(), including from a
-    // running boot) and persists across invalidate(). Only has an effect in
+    // Runtime switch for jitdump emission (`perf inject --jit`). Takes effect
+    // immediately on the current engine (safe any time after init(),
+    // including from a running boot) and persists across invalidate():
+    // enabling writes every block compiled from then on, disabling stops
+    // that; records already written stay in the dump. Only has an effect in
     // builds with BCORE_PERF_JIT_EVENTS=ON.
     void set_perf_jitdump(bool enable);
 

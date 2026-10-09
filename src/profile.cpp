@@ -23,7 +23,6 @@
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Object/SymbolSize.h>
-#include <llvm/Support/raw_ostream.h>
 
 #include "jit_engine.h"
 
@@ -159,10 +158,9 @@ bool attach_listeners(ProfileState& state, JitEngine& jit) {
     state.map_listener = std::make_unique<BlockMapListener>(state);
     if (!jit.registerJITEventListener(*state.map_listener)) {
         // Linking layer is not RTDyldObjectLinkingLayer-based: the code map
-        // stays empty and Core::forEachCompiledBlock() falls back to the
-        // lookup-derived address table without sizes.
-        llvm::errs() << "bcore: object linking layer does not support JIT event "
-                        "listeners; exact block sizes unavailable\n";
+        // stays empty and the iteration APIs fall back to the lookup-derived
+        // address table without sizes. Hosts see this through
+        // profileHasBlockSizes(); bcore prints nothing.
         state.map_listener.reset();
         return false;
     }
@@ -188,6 +186,12 @@ bool attach_perf_listener(ProfileState& state, JitEngine& jit) {
     state.perf_attached = jit.registerJITEventListener(*state.perf_listener);
     return state.perf_attached;
 }
+
+void detach_perf_listener(ProfileState& state, JitEngine& jit) {
+    if (!state.perf_attached) return;
+    jit.unregisterJITEventListener(*state.perf_listener);
+    state.perf_attached = false;
+}
 #else
 bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }
 #endif
@@ -196,6 +200,7 @@ bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }
 
 bool attach_listeners(ProfileState&, JitEngine&) { return false; }
 bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }
+void detach_perf_listener(ProfileState&, JitEngine&) {}
 
 #endif
 

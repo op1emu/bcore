@@ -204,3 +204,8 @@ bool JitEngine::registerJITEventListener(llvm::JITEventListener& L) {
     rtdyld->registerJITEventListener(L);
     return true;
 }
+
+void JitEngine::unregisterJITEventListener(llvm::JITEventListener& L) {
+    if (auto* rtdyld = llvm::dyn_cast<llvm::orc::RTDyldObjectLinkingLayer>(&jit_->getObjLinkingLayer()))
+        rtdyld->unregisterJITEventListener(L);
+}

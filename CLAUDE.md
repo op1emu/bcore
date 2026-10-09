@@ -167,7 +167,7 @@ code-map callbacks run under the map mutex and must not re-enter these APIs.
 
 Build with `BCORE_PERF_JIT_EVENTS=ON`; the host calls `set_perf_jitdump(true)`
 any time after `init()` (attaches immediately, re-attaches across
-`invalidate()`); `perf record -k mono`, then `perf inject --jit` resolves blocks
+`invalidate()`; `false` detaches from the current engine at once); `perf record -k mono`, then `perf inject --jit` resolves blocks
 by `bb_0x<pc>` names. LLVM writes the dump under `$JITDUMPDIR/.debug/jit/`
 (or `$HOME/.debug/jit/`). Shut down cleanly: the listener flushes from its
 destructor, so a default-handled signal truncates the jitdump.
