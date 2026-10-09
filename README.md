@@ -193,6 +193,9 @@ no zero-overhead claim is made.
 
 All control/query APIs run on the dispatch thread or while it is stopped.
 Code-map callbacks execute under the map mutex and must not re-enter these APIs.
+Event-sink callbacks run inside `Core::run()`: they must not throw or call back
+into that `Core`. A translation that throws (e.g. from a host `Memory`) still
+reports `onTranslateFailure` before the exception propagates.
 
 Focused test (also passes with profiling OFF):
 

@@ -37,14 +37,22 @@ struct BcoreBlockInfo {
 };
 
 // Typed event sink for the translation (cache-miss) path. All callbacks
-// default to no-ops and fire synchronously on the dispatching thread. None
-// fires on a cache hit, so attaching a sink costs nothing per executed block.
+// default to no-ops and fire synchronously on the dispatching thread, from
+// inside Core::run(). None fires on a cache hit, so attaching a sink costs
+// nothing per executed block.
+//
+// Callbacks must not throw, and must not call back into the Core that is
+// reporting (no run(), invalidate(), init(), setEventSink() or profiling
+// queries): Core::run() is about to execute the block it just compiled, and
+// invalidate() would destroy it. Record what you need and act afterwards.
 class BcoreEventSink {
 public:
     virtual ~BcoreEventSink() = default;
 
     // Brackets one translation, end to end. Exactly one of onTranslateEnd
-    // or onTranslateFailure follows every onTranslateBegin.
+    // or onTranslateFailure follows every onTranslateBegin, also when the
+    // translation throws (the failure is reported, then the exception
+    // propagates).
     virtual void onTranslateBegin(uint32_t guest_pc) { (void)guest_pc; }
     virtual void onTranslateEnd(uint32_t guest_pc, uint64_t elapsed_ns) {
         (void)guest_pc; (void)elapsed_ns;
