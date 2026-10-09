@@ -91,7 +91,7 @@ The emulator:
 **Options:**
 - `--trace`: Print PC and disassembly of each instruction before each BB execution
 - `--dump`: Print generated LLVM IR per basic block (after optimization)
-- `--max-steps N`: Stop after N basic-block steps (0 = unlimited, default)
+- `--max-steps N`: Leave each block after at most N packets (0 = unlimited, default; 1 single-steps)
 - `--opt-level N` / `-O N`: LLVM optimization level 0–3 (default: 2)
 
 ### Adding Emulator Support for New Instructions
