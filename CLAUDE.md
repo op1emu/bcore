@@ -124,6 +124,63 @@ The emulator:
 - Emulator tests: assembly files from https://github.com/op1emu/bfin_sim/tree/main/testsuite/ are fetched at configure time, assembled, linked to `.elf`, and run via `./build/emu`
 - `tests/run_packet_count_test.py`: checks `CpuState::packets` (packets the last `Core::run` entered) against single-stepping for every test ELF
 
+## Profiling and Observability
+
+`include/bcore_profile.h` is the contract; read it first. `README.md`
+("Observability (host API)") covers host-visible behavior. bcore is a library:
+no env vars, no I/O, no printing on success. The host owns all sinks.
+
+Code: `src/profile.cpp` + `src/profile_state.h` (code-map `JITEventListener`,
+jitdump attach), translation-path instrumentation in `src/core.cpp` behind
+`#if BCORE_ENABLE_PROFILE`, `Core` API in `include/core.h`, test in
+`tests/profile_test.cpp`.
+
+### Build and test
+
+| Option | Default | Effect |
+|---|---|---|
+| `BCORE_ENABLE_PROFILE` | ON | code map, event sink, counters (links LLVM `object`); OFF compiles them out of `Core::run` |
+| `BCORE_PERF_JIT_EVENTS` | OFF | links LLVM `perfjitevents`; still needs a runtime `set_perf_jitdump(true)` |
+| `BCORE_BUILD_PROFILE_TESTS` | OFF | builds the `bcore-profile-test` target |
+
+```bash
+cmake -S . -B build-profile -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DLLVM_DIR=/usr/lib/llvm-15/cmake -DBCORE_ENABLE_PROFILE=ON \
+  -DBCORE_PERF_JIT_EVENTS=ON -DBCORE_BUILD_PROFILE_TESTS=ON
+cmake --build build-profile --target bcore-profile-test
+ctest --test-dir build-profile -R bcore-profile-test --output-on-failure
+```
+
+Verify profiling changes with `BCORE_ENABLE_PROFILE` both ON and OFF; the test
+is written to pass in both.
+
+### Capabilities
+
+- **Code map**: `forEachCompiledBlock` yields `{host_addr, host_size, guest_pc, variant, loaded_ns, unloaded_ns}`; sizes are exact (`computeSymbolSizes` in the load listener), `0` = unavailable. `profileHasBlockSizes()` reports listener attach. `setProfileHistory(n)` retains bounded retired ranges so pre-`invalidate()` samples still resolve; `profileHistoryDropped()` reports truncation.
+- **Event sink**: `setEventSink()` (non-owning; detach with `nullptr` first). Translation path only: `onTranslateBegin` / `onTranslateEnd` / `onTranslateFailure` and the `lift`, `ir-optimize` (when `opt_level != 0`) and `materialize` stages. Never sum stages into their parent. Nothing fires on a cache hit.
+- **Counters**: `stats()` POD snapshot, one owner-thread increment per event.
+
+Call control/query APIs from the `Core::run()` thread or while it is stopped;
+code-map callbacks run under the map mutex and must not re-enter these APIs.
+
+### `perf inject --jit`
+
+Build with `BCORE_PERF_JIT_EVENTS=ON`; the host calls `set_perf_jitdump(true)`
+any time after `init()` (attaches immediately, re-attaches across
+`invalidate()`); `perf record -k mono`, then `perf inject --jit` resolves blocks
+by `bb_0x<pc>` names. LLVM writes the dump under `$JITDUMPDIR/.debug/jit/`
+(or `$HOME/.debug/jit/`). Shut down cleanly: the listener flushes from its
+destructor, so a default-handled signal truncates the jitdump.
+
+### Invariants (each was a real bug in the research line)
+
+- The perf listener is a **function-local static, non-owning**: never `unique_ptr`/`delete` it (was: `free(): invalid pointer` on every profiling shutdown).
+- Re-register listeners after `invalidate()` (it replaces the engine). Attach the perf listener via its own `attach_perf_listener` path: re-running `attach_listeners()` would replace `map_listener` while `RTDyldObjectLinkingLayer` still holds the old raw pointer. Repeated enable must stay idempotent per engine.
+- Never size blocks by "nearest preceding block, capped at N bytes": samples past the cap get misattributed. Exact sizes and range containment, or `0`.
+- Never reattribute dropped history to reused JIT addresses; report the drop.
+- Enabled builds keep a null check and counter increments per dispatch even with no sink: say "near zero cost", not zero overhead.
+- Sampling a JIT thread: no `backtrace()` in the handler (see EXPERIENCES.md).
+
 ## Experiences
 - Store experiences in `EXPERIENCES.md` to track insights, challenges, and solutions encountered during development. (Optional but recommended for knowledge sharing)
 
