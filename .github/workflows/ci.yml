@@ -151,6 +151,16 @@ jobs:
             -O 1 -t 60 \
             --ignore-list .github/emu-ignore.txt
 
+      # CpuState::packets against single-stepping (--max-steps 1), where every
+      # run enters one packet. Long tests time out single-stepped and are
+      # reported as skipped.
+      - name: Run packet-count consistency test
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/run_packet_count_test.py \
+            -t 60 \
+            --ignore-list .github/emu-ignore.txt
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

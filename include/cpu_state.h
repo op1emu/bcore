@@ -60,6 +60,12 @@ struct CpuState {
     bool halted;
     int exit_code;
     uint32_t steps_remaining; // 0 = unlimited; N > 0 = decrement per instruction
+    // Packets the last Core::run entered: each packet's entry stores its
+    // 1-based index in the block, so an early exit (a taken conditional
+    // branch, a hardware-loop back edge, an exception) leaves the exact count
+    // rather than the block's static length. A packet that raises an
+    // exception is counted.
+    uint32_t packets;
 };
 
 // ASTAT bit positions (from refs/bfin-sim.h)

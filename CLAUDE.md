@@ -48,7 +48,7 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/jit_engine.h/cpp`: LLJIT wrapper with explicit `absoluteSymbols` registration for all extern "C" helpers
 - `src/bb_translator.h/cpp`: Basic-block translator — decodes instructions until terminator, produces one LLVM function per BB
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)
-- `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--opt-level`)
+- `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--count-packets`, `--opt-level`)
 
 ## Common Development Tasks
 
@@ -79,7 +79,7 @@ The disassembler:
 ### Running the Emulator
 
 ```bash
-./build/emu [--trace] [--dump] [--max-steps N] [--opt-level/-O N] <elf-file>
+./build/emu [--trace] [--dump] [--max-steps N] [--count-packets] [--opt-level/-O N] <elf-file>
 ```
 
 The emulator:
@@ -92,6 +92,7 @@ The emulator:
 - `--trace`: Print PC and disassembly of each instruction before each BB execution
 - `--dump`: Print generated LLVM IR per basic block (after optimization)
 - `--max-steps N`: Leave each block after at most N packets (0 = unlimited, default; 1 single-steps)
+- `--count-packets`: Print the packets and block runs executed (`packets=N runs=M`) to stderr at exit
 - `--opt-level N` / `-O N`: LLVM optimization level 0–3 (default: 2)
 
 ### Adding Emulator Support for New Instructions
@@ -121,6 +122,7 @@ The emulator:
 - `tests/run_comparison_test.py`: Python script to compare disassembly output against `bfin-elf-objdump`
   run with `python3 tests/run_comparison_test.py`
 - Emulator tests: assembly files from https://github.com/op1emu/bfin_sim/tree/main/testsuite/ are fetched at configure time, assembled, linked to `.elf`, and run via `./build/emu`
+- `tests/run_packet_count_test.py`: checks `CpuState::packets` (packets the last `Core::run` entered) against single-stepping for every test ELF
 
 ## Experiences
 - Store experiences in `EXPERIENCES.md` to track insights, challenges, and solutions encountered during development. (Optional but recommended for knowledge sharing)
