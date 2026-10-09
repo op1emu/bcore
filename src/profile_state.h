@@ -83,4 +83,8 @@ bool attach_listeners(ProfileState& state, JitEngine& jit);
 // if !want_perf_jitdump or the build lacks BCORE_PERF_JIT_EVENTS.
 bool attach_perf_listener(ProfileState& state, JitEngine& jit);
 
+// Unregisters the perf listener from a live engine, so blocks compiled from
+// now on are not written. Records already written stay in the jitdump.
+void detach_perf_listener(ProfileState& state, JitEngine& jit);
+
 } // namespace bcore_profile

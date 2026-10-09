@@ -175,7 +175,8 @@ no zero-overhead claim is made.
 - `Core::forEachCompiledBlock` gives exact live host ranges from LLVM object
   symbol sizes. Size zero means unavailable, never a guessed range.
 - `setProfileHistory(capacity)` and `forEachProfileBlock` retain bounded retired
-  ranges with CLOCK_MONOTONIC load/unload times. Attribute a sample only within
+  ranges with CLOCK_MONOTONIC load/unload times (without a load listener, only
+  live lookup-derived entries of size zero). Attribute a sample only within
   the range's lifetime; `profileHistoryDropped()` exposes truncation.
 - `setEventSink` attaches one non-owning sink for the translation path: begin,
   end or failure per translation, and the `lift`, `ir-optimize` and
@@ -184,7 +185,8 @@ no zero-overhead claim is made.
   translation time).
 - `BCORE_PERF_JIT_EVENTS=ON` builds LLVM jitdump support. The host opts in with
   `set_perf_jitdump(true)`; repeated enable is idempotent per engine and the
-  listener is re-attached across `invalidate()`. LLVM owns its singleton listener.
+  listener is re-attached across `invalidate()`. `set_perf_jitdump(false)`
+  detaches it from the current engine at once. LLVM owns its singleton listener.
 
 All control/query APIs run on the dispatch thread or while it is stopped.
 Code-map callbacks execute under the map mutex and must not re-enter these APIs.

@@ -59,6 +59,8 @@ public:
     // RTDyldObjectLinkingLayer; returns false (and registers nothing) on any
     // other layer so callers can degrade gracefully.
     bool registerJITEventListener(llvm::JITEventListener& L);
+    // Undo registerJITEventListener (no-op on other linking layers).
+    void unregisterJITEventListener(llvm::JITEventListener& L);
 
     // Iterate all cached blocks as fn(host_addr, guest_pc). Addresses come
     // from the symbol lookup, sizes are not tracked here -- use the load

@@ -4,8 +4,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 static void require(bool value, const char* message) {
     if (!value) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
@@ -87,23 +91,70 @@ static void check(int opt_level) {
     core.invalidate();
     require(core.profileHistoryDropped() == 1, "overflow is counted, not reattributed");
 
-    // jitdump can be enabled repeatedly and survives invalidate (no-op unless
-    // built with BCORE_PERF_JIT_EVENTS).
-    core.set_perf_jitdump(true);
-    core.set_perf_jitdump(true);
-    core.invalidate();
-    require(core.run(0), "dispatch with jitdump enabled");
 #else
     require(sink.begins == 0 && sink.stages.empty(), "disabled build fires no events");
     require(core.stats().blocks_executed == 0, "disabled build counts nothing");
     require(!core.profileHasBlockSizes(), "disabled build has no sizes");
     auto live = blocks(core);
     require(live.size() == 1 && live[0].host_size == 0, "lookup fallback without sizes");
+    std::vector<BcoreBlockInfo> history;
+    core.forEachProfileBlock([&](const BcoreBlockInfo& b) { history.push_back(b); });
+    require(history.size() == 1 && history[0].host_size == 0, "profile blocks use the same fallback");
 #endif
     core.setEventSink(nullptr);
 }
 
+#if BCORE_PERF_JIT_EVENTS
+// Names of the JIT_CODE_LOAD records (id 0) in this process's jitdump file.
+static std::vector<std::string> jitdump_loads(const std::filesystem::path& dir) {
+    const std::string file = "jit-" + std::to_string(getpid()) + ".dump";
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+        if (entry.path().filename() != file) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto u32 = [&](size_t at) { uint32_t v; std::memcpy(&v, data.data() + at, 4); return v; };
+        std::vector<std::string> loads;
+        for (size_t at = u32(8); at + 16 <= data.size();) {  // header size, then records
+            const uint32_t id = u32(at), size = u32(at + 4);
+            if (size < 16 || at + size > data.size()) break;
+            if (id == 0) loads.emplace_back(data.c_str() + at + 56);  // fixed fields, then the name
+            at += size;
+        }
+        return loads;
+    }
+    return {};
+}
+
+// LLVM's perf listener is a process-wide singleton writing one file, so this
+// runs before anything else enables it.
+static void check_jitdump() {
+    char dir[] = "/tmp/bcore-jitdump-XXXXXX";
+    require(mkdtemp(dir) != nullptr, "temporary jitdump directory");
+    setenv("JITDUMPDIR", dir, 1);
+    Ram mem;
+    mem.write16(0, 0x2000);  // JUMP.S 0 at 0
+    mem.write16(4, 0x2000);  // and at 4
+    CpuState cpu{};
+    Core core(&cpu, &mem);
+    require(core.init(0), "init");
+    core.set_perf_jitdump(true);
+    core.set_perf_jitdump(true);  // repeated enable must not duplicate records
+    require(core.run(0), "dispatch with jitdump");
+    core.invalidate();            // the new engine must get the listener too
+    require(core.run(0), "dispatch after invalidate");
+    core.set_perf_jitdump(false); // detaches from the current engine at once
+    require(core.run(4), "dispatch after disable");
+    const auto loads = jitdump_loads(dir);
+    require(loads == std::vector<std::string>{"bb_0x00000000", "bb_0x00000000"},
+            "one record per compiled block, none after disable");
+    std::filesystem::remove_all(dir);
+}
+#endif
+
 int main() {
+#if BCORE_PERF_JIT_EVENTS
+    check_jitdump();
+#endif
     check(0);
     check(1);
     std::puts("bcore profile test passed");
