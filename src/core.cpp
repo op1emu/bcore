@@ -71,8 +71,10 @@ bool Core::run(uint32_t pc) {
 #endif
         auto result = translator_->translate(pc);
 #if BCORE_ENABLE_PROFILE
+        // Stage callbacks fire only after the translation is timed, so
+        // nothing the sink does lands inside a stage or in translate_ns.
         const uint64_t lift_end = bcore_profile::monotonic_ns();
-        if (sink) sink->onCompileStage(pc, "lift", t0, lift_end, true);
+        uint64_t optimize_end = 0;
 #endif
         // The IR pipeline, once per module and before any dump, so a dump shows
         // the IR that is compiled. It used to run only inside the dump branch:
@@ -81,7 +83,7 @@ bool Core::run(uint32_t pc) {
         if (opt_level_ != 0) {
             jit_->optimize_module(*result.module);
 #if BCORE_ENABLE_PROFILE
-            if (sink) sink->onCompileStage(pc, "ir-optimize", lift_end, bcore_profile::monotonic_ns(), true);
+            optimize_end = bcore_profile::monotonic_ns();
 #endif
         }
         if (dump_ir_) {
@@ -100,12 +102,13 @@ bool Core::run(uint32_t pc) {
 #if BCORE_ENABLE_PROFILE
         const uint64_t t1 = bcore_profile::monotonic_ns();
         profile_->stats.translate_ns_total += t1 - t0;
-        if (sink) sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
-        if (fn) {
-            profile_->stats.blocks_translated++;
-            if (sink) sink->onTranslateEnd(pc, t1 - t0);
-        } else if (sink) {
-            sink->onTranslateFailure(pc, t1 - t0);
+        if (fn) profile_->stats.blocks_translated++;
+        if (sink) {
+            sink->onCompileStage(pc, "lift", t0, lift_end, true);
+            if (optimize_end) sink->onCompileStage(pc, "ir-optimize", lift_end, optimize_end, true);
+            sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
+            if (fn) sink->onTranslateEnd(pc, t1 - t0);
+            else sink->onTranslateFailure(pc, t1 - t0);
         }
 #endif
         if (!fn)

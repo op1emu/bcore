@@ -183,7 +183,10 @@ no zero-overhead claim is made.
   `materialize` stages. Nothing fires on a cache hit. `stats()` returns
   owner-thread cumulative counters (translations, executions, hits, misses,
   translation time).
-- `BCORE_PERF_JIT_EVENTS=ON` builds LLVM jitdump support. The host opts in with
+- `BCORE_PERF_JIT_EVENTS=ON` (requires `BCORE_ENABLE_PROFILE=ON`) builds LLVM
+  jitdump support. It is the one exception to "no I/O": once enabled, LLVM's
+  listener writes `jit-<pid>.dump` under `$JITDUMPDIR/.debug/jit/` (or
+  `$HOME/.debug/jit/`). The host opts in with
   `set_perf_jitdump(true)`; repeated enable is idempotent per engine and the
   listener is re-attached across `invalidate()`. `set_perf_jitdump(false)`
   detaches it from the current engine at once. LLVM owns its singleton listener.

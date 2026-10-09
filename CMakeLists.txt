@@ -33,6 +33,11 @@ if(BCORE_ENABLE_PROFILE)
     llvm_map_components_to_libnames(LLVM_PROFILE_LIBS object)
     list(APPEND LLVM_LIBS ${LLVM_PROFILE_LIBS})
 endif()
+if(BCORE_PERF_JIT_EVENTS AND NOT BCORE_ENABLE_PROFILE)
+    # The jitdump listener is attached by the profiling code; without it
+    # set_perf_jitdump() would silently do nothing.
+    message(FATAL_ERROR "BCORE_PERF_JIT_EVENTS requires BCORE_ENABLE_PROFILE")
+endif()
 if(BCORE_PERF_JIT_EVENTS)
     llvm_map_components_to_libnames(LLVM_PERFJIT_LIBS perfjitevents)
     list(APPEND LLVM_LIBS ${LLVM_PERFJIT_LIBS})
