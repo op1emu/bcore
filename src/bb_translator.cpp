@@ -85,6 +85,10 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
         cur_pc += bytes;
         visitor.set_fallthrough_pc(cur_pc);
         visitor.finalize_pending_exits(insn_pc, bytes);
+        // Limited mode (CpuState::steps_remaining != 0 at init) leaves the block
+        // once the budget runs out; unlimited mode emits nothing here.
+        if (!visitor.is_terminated())
+            visitor.emit_step_check(cur_pc);
 
         auto* block = builder.GetInsertBlock();
         builder.SetInsertPoint(insn_entry);
