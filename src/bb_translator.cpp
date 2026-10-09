@@ -20,6 +20,13 @@ BBTranslator::BBTranslator(Memory* mem,
 BBTranslateResult BBTranslator::translate(uint32_t pc) {
     auto ctx = std::make_unique<LLVMContext>();
     auto mod = std::make_unique<Module>("bb_module", *ctx);
+    // Before the first instruction is built: IRBuilder takes load/store
+    // alignment from the layout, and the IR pipeline reads it (legal integer
+    // widths, i64 alignment). LLJIT's addIRModule accepts a module whose layout
+    // equals its own and rejects any other, so the strings come from that same
+    // JIT (Core passes JitEngine::dataLayout/targetTriple).
+    if (!data_layout_.empty()) mod->setDataLayout(data_layout_);
+    if (!target_triple_.empty()) mod->setTargetTriple(target_triple_);
 
     // Create function: void bb_0x<pc>(CpuState*, Memory*)
     char fname[32];

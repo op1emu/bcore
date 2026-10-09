@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     bool dump_ir = false;
     bool fastmem = false;
     uint64_t max_steps = 0; // 0 = unlimited
-    int opt_level = 2;      // 0=None, 1=Less, 2=Default, 3=Aggressive
+    int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
     const char* elf_path = nullptr;
 
     for (int i = 1; i < argc; i++) {

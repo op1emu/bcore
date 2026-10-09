@@ -387,3 +387,22 @@ In `emit_dsp32mac`, compute after the V/VS update:
 - For non-P mode: sign bit = bit 15 (result is 16-bit in low half)
 - For P mode: sign bit = bit 31 (result is 32-bit full word)
 
+
+## An optimization level must reach the code that runs
+
+`JitEngine::optimize_module` was called only from `Core::run`'s IR-dump branch from
+the initial commit on. A nonzero `opt_level` therefore changed the IR that `--dump`
+printed and nothing that executed, and any timing of "the IR pipeline" measured the
+backend alone. `Core::run` now optimizes every module between translation and
+`addModule`, and the dump prints the module after that.
+
+Turning the pipeline on also means poison is no longer harmless. The backend-only
+path happened to shift by the count mod 32, so `shl i32 x, 32` and a negative
+variable shift count "worked"; InstCombine folds both to anything. Pin the reference
+behaviour explicitly (`& 31`, or the constant result) instead of relying on x86.
+
+The pass pipeline needs the compiler's TargetMachine and every module the JIT's
+DataLayout, both taken from the same `JITTargetMachineBuilder`/LLJIT: without them
+the passes cost-model a generic target with no vector registers and default
+integer widths. LoopIdiomRecognize can emit `memset`/`memcpy`/`memmove`, so those
+are registered as absolute symbols with the rest.

@@ -7,6 +7,7 @@
 #include "disasm_visitor.h"
 #include "jit_engine.h"
 
+#include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -15,11 +16,12 @@ Core::Core(CpuState* cpu, Memory* mem)
 
 Core::~Core() = default;
 
-bool Core::init(int opt_level) {
+bool Core::init(int opt_level, int codegen_level) {
     opt_level_ = opt_level;
+    codegen_level_ = codegen_level;
 
     jit_ = std::make_shared<JitEngine>();
-    if (!jit_->init(opt_level_))
+    if (!jit_->init(opt_level_, codegen_level_))
         return false;
 
     // Use the Memory interface's is_fastmem() to determine mode.
@@ -33,16 +35,28 @@ bool Core::init(int opt_level) {
         /*unlimited=*/(cpu_->steps_remaining == 0),
         fastmem,
         fast_base);
+    applyModuleTarget();
 
     return true;
+}
+
+void Core::applyModuleTarget() {
+    // Same source as the compiler: LLJIT's addIRModule rejects a module whose
+    // non-default layout differs from its own.
+    translator_->setModuleTarget(jit_->dataLayout(), jit_->targetTriple());
 }
 
 bool Core::run(uint32_t pc) {
     BbFunc fn = jit_->lookup(pc);
     if (!fn) {
         auto result = translator_->translate(pc);
-        if (dump_ir_) {
+        // The IR pipeline, once per module and before any dump, so a dump shows
+        // the IR that is compiled. It used to run only inside the dump branch:
+        // from the initial commit on, a nonzero opt_level changed the printed IR
+        // and never the executed code.
+        if (opt_level_ != 0)
             jit_->optimize_module(*result.module);
+        if (dump_ir_) {
             llvm::errs() << "=== IR BB @ " << llvm::format_hex(pc, 10) << " ===\n";
             result.module->print(llvm::errs(), nullptr);
             llvm::errs() << "=== end IR ===\n";
@@ -67,7 +81,11 @@ bool Core::run(uint32_t pc) {
 
 void Core::invalidate() {
     jit_ = std::make_shared<JitEngine>();
-    jit_->init(opt_level_);
+    // Init cannot fail here unless it failed in Core::init already (same host,
+    // same levels); if it ever does, stop rather than dereference a null LLJIT.
+    if (!jit_->init(opt_level_, codegen_level_))
+        llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
+    applyModuleTarget();
 }
 
 std::tuple<std::string, uint32_t> Core::disassemble(uint32_t pc) {
