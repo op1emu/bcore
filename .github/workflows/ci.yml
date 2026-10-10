@@ -71,6 +71,18 @@ jobs:
           cmake --build build-noprof -j$(nproc) --target bcore-profile-test
           ctest --test-dir build-noprof -R bcore-profile-test --output-on-failure
 
+      # Plain `cmake -B build`: BCORE_ENABLE_PROFILE=ON, BCORE_PERF_JIT_EVENTS=OFF.
+      # The main build above forces PERF_JIT_EVENTS=ON and the one before this
+      # forces PROFILE=OFF, so without this step the defaults are never linked.
+      - name: Default options build (PROFILE=ON, PERF_JIT_EVENTS=OFF)
+        run: |
+          cmake -B build-default \
+            -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBCORE_BUILD_PROFILE_TESTS=ON
+          cmake --build build-default -j$(nproc) --target emu disasm bcore-profile-test
+          ctest --test-dir build-default -R bcore-profile-test --output-on-failure
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:

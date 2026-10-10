@@ -194,6 +194,7 @@ void detach_perf_listener(ProfileState& state, JitEngine& jit) {
 }
 #else
 bool attach_perf_listener(ProfileState&, JitEngine&) { return false; }
+void detach_perf_listener(ProfileState&, JitEngine&) {}
 #endif
 
 #else // !BCORE_ENABLE_PROFILE
