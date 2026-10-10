@@ -119,7 +119,8 @@ Reads an ELF32 Blackfin binary and prints disassembly for all executable section
 |---|---|
 | `--trace` | Print PC + disassembly before each basic-block execution |
 | `--dump` | Print generated LLVM IR per basic block (post-optimization) |
-| `--max-steps N` | Stop after N basic-block steps (0 = unlimited, default) |
+| `--max-steps N` | Leave each block after at most N packets (0 = unlimited, default; 1 single-steps) |
+| `--count-packets` | Print the packets and block runs executed (`packets=N runs=M`) to stderr at exit |
 | `--opt-level N` / `-O N` | LLVM optimization level 0–3 for both the IR pass pipeline and the backend (default: 2) |
 | `--fastmem` | `mmap` memory at address 0 for zero-overhead JIT loads/stores |
 
@@ -162,3 +163,44 @@ Instruction semantics and test fixtures are derived from [op1emu/bfin_sim](https
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Observability (host API)
+
+`include/bcore_profile.h` is the host profiling contract. Host code owns
+configuration and output; bcore reads no environment variables for these APIs.
+`BCORE_ENABLE_PROFILE=OFF` compiles the instrumentation out of `Core::run`.
+Enabled builds keep a null check and counters per dispatch even without a sink;
+no zero-overhead claim is made.
+
+- `Core::forEachCompiledBlock` gives exact live host ranges from LLVM object
+  symbol sizes. Size zero means unavailable, never a guessed range.
+- `setProfileHistory(capacity)` and `forEachProfileBlock` retain bounded retired
+  ranges with CLOCK_MONOTONIC load/unload times (without a load listener, only
+  live lookup-derived entries of size zero). Attribute a sample only within
+  the range's lifetime; `profileHistoryDropped()` exposes truncation.
+- `setEventSink` attaches one non-owning sink for the translation path: begin,
+  end or failure per translation, and the `lift`, `ir-optimize` and
+  `materialize` stages. Nothing fires on a cache hit. `stats()` returns
+  owner-thread cumulative counters (translations, executions, hits, misses,
+  translation time).
+- `BCORE_PERF_JIT_EVENTS=ON` (requires `BCORE_ENABLE_PROFILE=ON`) builds LLVM
+  jitdump support. It is the one exception to "no I/O": once enabled, LLVM's
+  listener writes `jit-<pid>.dump` under `$JITDUMPDIR/.debug/jit/` (or
+  `$HOME/.debug/jit/`). The host opts in with
+  `set_perf_jitdump(true)`; repeated enable is idempotent per engine and the
+  listener is re-attached across `invalidate()`. `set_perf_jitdump(false)`
+  detaches it from the current engine at once. LLVM owns its singleton listener.
+
+All control/query APIs run on the dispatch thread or while it is stopped.
+Code-map callbacks execute under the map mutex and must not re-enter these APIs.
+Event-sink callbacks run inside `Core::run()`: they must not throw or call back
+into that `Core`. A translation that throws (e.g. from a host `Memory`) still
+reports `onTranslateFailure` before the exception propagates.
+
+Focused test (also passes with profiling OFF):
+
+```sh
+cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-15/cmake -DBCORE_BUILD_PROFILE_TESTS=ON
+cmake --build build --target bcore-profile-test
+ctest --test-dir build -R bcore-profile-test --output-on-failure
+```

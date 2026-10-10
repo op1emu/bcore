@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
     bool trace = false;
     bool dump_ir = false;
     bool fastmem = false;
+    bool count_packets = false;
     uint64_t max_steps = 0; // 0 = unlimited
     int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
     const char* elf_path = nullptr;
@@ -45,13 +46,15 @@ int main(int argc, char** argv) {
             }
         } else if (strcmp(argv[i], "--fastmem") == 0) {
             fastmem = true;
+        } else if (strcmp(argv[i], "--count-packets") == 0) {
+            count_packets = true;
         } else {
             elf_path = argv[i];
         }
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem] [--count-packets] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
 
@@ -153,10 +156,12 @@ int main(int argc, char** argv) {
     cpu.pc = eh->e_entry;
     cpu.dpregs[14] = stack_top; // SP
     cpu.ksp = stack_top;        // KSP for user→supervisor stack swap
-    // Set step limit: 0 = unlimited, N = execute up to N instructions
-    cpu.steps_remaining = (max_steps == 0 || max_steps > 0xFFFFFFFFULL)
-                          ? 0u
-                          : static_cast<uint32_t>(max_steps);
+    // Packets per run: 0 = unlimited, N = leave each block after N packets.
+    // One normalized value for Core::init (which picks limited mode from it)
+    // and for every run; a budget above UINT32_MAX is clamped, not truncated.
+    const uint32_t step_budget = max_steps > 0xFFFFFFFFULL ? 0xFFFFFFFFu
+                                                           : static_cast<uint32_t>(max_steps);
+    cpu.steps_remaining = step_budget;
 
     // Initialize Core (JIT + translator)
     Core core(&cpu, &memory);
@@ -173,12 +178,15 @@ int main(int argc, char** argv) {
     }
 
     // Main execution loop
+    uint64_t runs = 0, packets = 0;
     while (!cpu.halted) {
-        cpu.steps_remaining = static_cast<uint32_t>(max_steps);
+        cpu.steps_remaining = step_budget;
         if (!core.run(cpu.pc)) {
             fprintf(stderr, "failed to run BB at 0x%08x\n", cpu.pc);
             return 1;
         }
+        ++runs;
+        packets += cpu.packets;
         if (trace) {
             auto [text, next_pc] = core.disassemble(cpu.pc);
             fprintf(stderr, "  %08x:  %s\n", cpu.pc, text.c_str());
@@ -188,5 +196,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (count_packets)
+        fprintf(stderr, "packets=%llu runs=%llu\n",
+                (unsigned long long)packets, (unsigned long long)runs);
     return cpu.exit_code;
 }

@@ -6,6 +6,7 @@
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/Mangling.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/PassManager.h>
@@ -194,3 +195,19 @@ BbFunc JitEngine::lookup(uint32_t pc) {
     return nullptr;
 }
 
+bool JitEngine::registerJITEventListener(llvm::JITEventListener& L) {
+    // Runtime check, not an assumption: LLJIT's default on x86-64 Linux is
+    // RTDyldObjectLinkingLayer (LLJIT.h), but a custom linking-layer creator
+    // or another platform may differ.
+    auto* rtdyld = llvm::dyn_cast<llvm::orc::RTDyldObjectLinkingLayer>(
+        &jit_->getObjLinkingLayer());
+    if (!rtdyld)
+        return false;
+    rtdyld->registerJITEventListener(L);
+    return true;
+}
+
+void JitEngine::unregisterJITEventListener(llvm::JITEventListener& L) {
+    if (auto* rtdyld = llvm::dyn_cast<llvm::orc::RTDyldObjectLinkingLayer>(&jit_->getObjLinkingLayer()))
+        rtdyld->unregisterJITEventListener(L);
+}

@@ -18,6 +18,31 @@ message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
 llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)
 
+# ---- Profiling / observability ----
+# Standalone default ON: the code map, event sink and counters cost a null
+# check and a few increments per dispatch. Hosts can compile them out (see
+# bcore_profile.h).
+option(BCORE_ENABLE_PROFILE
+    "JIT observability API: code map, typed event sink, counters" ON)
+# OFF by default: emits jitdump files on disk whenever blocks are compiled.
+option(BCORE_PERF_JIT_EVENTS
+    "Register LLVM's PerfJITEventListener (enables 'perf inject --jit')" OFF)
+
+if(BCORE_ENABLE_PROFILE)
+    # computeSymbolSizes() lives in the Object library.
+    llvm_map_components_to_libnames(LLVM_PROFILE_LIBS object)
+    list(APPEND LLVM_LIBS ${LLVM_PROFILE_LIBS})
+endif()
+if(BCORE_PERF_JIT_EVENTS AND NOT BCORE_ENABLE_PROFILE)
+    # The jitdump listener is attached by the profiling code; without it
+    # set_perf_jitdump() would silently do nothing.
+    message(FATAL_ERROR "BCORE_PERF_JIT_EVENTS requires BCORE_ENABLE_PROFILE")
+endif()
+if(BCORE_PERF_JIT_EVENTS)
+    llvm_map_components_to_libnames(LLVM_PERFJIT_LIBS perfjitevents)
+    list(APPEND LLVM_LIBS ${LLVM_PERFJIT_LIBS})
+endif()
+
 # ---- Core library (disassembler + emulator) ----
 add_library(bfin-core STATIC
     src/core.cpp
@@ -30,6 +55,7 @@ add_library(bfin-core STATIC
     src/evt.cpp
     src/memory.cpp
     src/cpu_state.cpp
+    src/profile.cpp
 )
 target_include_directories(bfin-core
     PRIVATE
@@ -38,7 +64,11 @@ target_include_directories(bfin-core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_compile_definitions(bfin-core PUBLIC ${LLVM_DEFINITIONS})
+target_compile_definitions(bfin-core PUBLIC
+    ${LLVM_DEFINITIONS}
+    BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
+    BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
+)
 target_link_libraries(bfin-core PUBLIC ${LLVM_LIBS})
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bfin-core PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -158,4 +188,11 @@ else()
     else()
         message(STATUS "No assembly test files found in fetched testsuite or tests/benchmarks/")
     endif()
+endif()
+
+option(BCORE_BUILD_PROFILE_TESTS "Build the observability regression test" OFF)
+if(BCORE_BUILD_PROFILE_TESTS)
+    add_executable(bcore-profile-test tests/profile_test.cpp)
+    target_link_libraries(bcore-profile-test PRIVATE bfin-core)
+    add_test(NAME bcore-profile-test COMMAND bcore-profile-test)
 endif()

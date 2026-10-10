@@ -279,6 +279,10 @@ void LiftVisitor::emit_insn_len(uint32_t len) {
     store_cpu_u32(offsetof(CpuState, insn_len), builder_.getInt32(len));
 }
 
+void LiftVisitor::emit_packet_index(uint32_t index) {
+    store_cpu_u32(offsetof(CpuState, packets), builder_.getInt32(index));
+}
+
 void LiftVisitor::emit_did_jump_exit(bool force) {
     if (terminated_ && !force) return;
     if (!check_did_jump_ && !force) return;

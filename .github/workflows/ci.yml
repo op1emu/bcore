@@ -50,10 +50,26 @@ jobs:
         run: |
           cmake -B build \
             -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_PERF_JIT_EVENTS=ON
 
       - name: Build
         run: cmake --build build -j$(nproc)
+
+      - name: Observability API test
+        run: ctest --test-dir build -R bcore-profile-test --output-on-failure
+
+      # The same test with the instrumentation compiled out.
+      - name: Observability API test (BCORE_ENABLE_PROFILE=OFF)
+        run: |
+          cmake -B build-noprof \
+            -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBCORE_ENABLE_PROFILE=OFF \
+            -DBCORE_BUILD_PROFILE_TESTS=ON
+          cmake --build build-noprof -j$(nproc) --target bcore-profile-test
+          ctest --test-dir build-noprof -R bcore-profile-test --output-on-failure
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -149,6 +165,16 @@ jobs:
           python3 tests/run_emu_test.py \
             --no-fail-fast \
             -O 1 -t 60 \
+            --ignore-list .github/emu-ignore.txt
+
+      # CpuState::packets against single-stepping (--max-steps 1), where every
+      # run enters one packet. Long tests time out single-stepped and are
+      # reported as skipped.
+      - name: Run packet-count consistency test
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/run_packet_count_test.py \
+            -t 60 \
             --ignore-list .github/emu-ignore.txt
 
       - name: Upload test results

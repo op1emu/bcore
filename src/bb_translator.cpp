@@ -68,7 +68,8 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
                         fastmem_, fast_base_, mem_->rawmem_limit());
 
     uint32_t cur_pc = pc;
-    int max_insns = 256; // safety limit per BB
+    int max_insns = static_cast<int>(max_packets_); // safety limit per BB
+    uint32_t packets = 0;
 
     while (max_insns-- > 0 && !visitor.is_terminated()) {
         uint32_t insn_pc = cur_pc;
@@ -85,10 +86,15 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
         cur_pc += bytes;
         visitor.set_fallthrough_pc(cur_pc);
         visitor.finalize_pending_exits(insn_pc, bytes);
+        // Limited mode (CpuState::steps_remaining != 0 at init) leaves the block
+        // once the budget runs out; unlimited mode emits nothing here.
+        if (!visitor.is_terminated())
+            visitor.emit_step_check(cur_pc);
 
         auto* block = builder.GetInsertBlock();
         builder.SetInsertPoint(insn_entry);
         visitor.emit_insn_len(bytes);
+        visitor.emit_packet_index(++packets);
         builder.CreateBr(insn);
         builder.SetInsertPoint(block);
     }

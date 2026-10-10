@@ -15,7 +15,7 @@
 #include "cpu_state.h"
 #include "mem.h"
 
-namespace llvm { class TargetMachine; }
+namespace llvm { class TargetMachine; class JITEventListener; }
 
 // Function signature for JIT'd basic block functions
 using BbFunc = void (*)(CpuState*, Memory*);
@@ -52,6 +52,24 @@ public:
     BbFunc lookup(uint32_t pc);
     void set_executing(uint32_t pc) { executing_bb_pc_ = pc; }
     void clear_executing()          { executing_bb_pc_ = 0; }
+
+    // Register L on the underlying object-linking layer for object load/free
+    // notifications (the profiling code map builds itself from these).
+    // Behavior-neutral on x86-64 Linux where LLJIT defaults to
+    // RTDyldObjectLinkingLayer; returns false (and registers nothing) on any
+    // other layer so callers can degrade gracefully.
+    bool registerJITEventListener(llvm::JITEventListener& L);
+    // Undo registerJITEventListener (no-op on other linking layers).
+    void unregisterJITEventListener(llvm::JITEventListener& L);
+
+    // Iterate all cached blocks as fn(host_addr, guest_pc). Addresses come
+    // from the symbol lookup, sizes are not tracked here -- use the load
+    // listener (via Core::forEachCompiledBlock) when exact sizes are needed.
+    template <typename Fn>
+    void forEachCompiled(Fn&& fn) const {
+        for (const auto& kv : cache_)
+            fn(reinterpret_cast<const void*>(kv.second.fn), kv.first);
+    }
 
 private:
     std::unique_ptr<llvm::orc::LLJIT> jit_;

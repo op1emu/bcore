@@ -45,6 +45,10 @@ public:
     void reset_terminated()  { terminated_ = false; }
 
     void emit_insn_len(uint32_t len);
+    void emit_packet_index(uint32_t index);
+    // Emit per-instruction step counter check; repositions builder_ to continue block.
+    // No-op in unlimited mode. Called by BBTranslator after each instruction.
+    void emit_step_check(uint32_t post_insn_pc);
 
     // Emit per-instruction hwloop probe: PC redirect (when !did_jump) and counter decrement.
     // Mirrors the reference semantics that run after every instruction:
@@ -605,10 +609,6 @@ private:
     // exit the BB immediately. Used after calls that may raise exceptions
     // (cec_push_reti, cec_check_sup) in the middle of a non-terminator instruction.
     void emit_did_jump_exit(bool force);
-
-    // Emit per-instruction step counter check; repositions builder_ to continue block.
-    // No-op when terminated_=true. Called by BBTranslator after each instruction.
-    void emit_step_check(uint32_t post_insn_pc);
 
     // Flag helpers — emit AZ/AN from a 32-bit result value
     void emit_flags_az_an(llvm::Value* result);
