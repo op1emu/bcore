@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "bcore_profile.h"
@@ -52,6 +53,13 @@ struct ProfileState {
     // `perf inject --jit`). Set by Core::set_perf_jitdump(), which also
     // attaches immediately via attach_perf_listener() below.
     bool want_perf_jitdump = false;
+
+    // Object-code shape (bytes, hash) of blocks loaded since the last
+    // takeObjectShape(), recorded by the code-map listener only while
+    // want_object_shapes is set (a sink asked for compile metrics).
+    bool want_object_shapes = false;
+    std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> object_shapes;
+    std::pair<uint64_t, uint64_t> takeObjectShape(uint32_t guest_pc);
 
     void clearBlocks();
     void recordBlock(uint64_t object_key, uint64_t addr, uint64_t size,

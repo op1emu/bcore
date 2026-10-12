@@ -21,6 +21,7 @@
 #include <string>
 
 #include <llvm/ADT/StringRef.h>
+#include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Object/SymbolSize.h>
 
@@ -60,6 +61,15 @@ void ProfileState::recordBlock(uint64_t object_key, uint64_t addr, uint64_t size
     if (old != blocks.end()) retire(addr, old->second, now);
     blocks[addr] = Block{size, guest_pc, /*variant=*/0, now};
     blocks_by_object[object_key].push_back(addr);
+}
+
+std::pair<uint64_t, uint64_t> ProfileState::takeObjectShape(uint32_t guest_pc) {
+    std::lock_guard<std::mutex> lk(blocks_mutex);
+    auto it = object_shapes.find(guest_pc);
+    if (it == object_shapes.end()) return {0, 0};
+    const auto shape = it->second;
+    object_shapes.erase(it);
+    return shape;
 }
 
 void ProfileState::freeObject(uint64_t object_key) {
@@ -111,6 +121,52 @@ bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc) {
 // object files. Exact sizes come from the object-file symbol table via
 // llvm::object::computeSymbolSizes — no "nearest preceding block" heuristic,
 // so a sample inside a block is always attributed to the right block.
+uint64_t fnv1a(uint64_t hash, const void* data, size_t size) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+    return hash;
+}
+
+template <typename T>
+uint64_t fnv1a(uint64_t hash, T value) { return fnv1a(hash, &value, sizeof(value)); }
+
+// The block function's bytes as the compiler emitted them (relocated fields
+// still zero) plus its relocations: identical for identical code whatever
+// addresses the JIT and the helpers land at in this process.
+uint64_t object_code_hash(const llvm::object::ObjectFile& obj, const llvm::object::SectionRef& sec,
+                          uint64_t offset, uint64_t size) {
+    uint64_t hash = 0xcbf29ce484222325ull;
+    auto contents = sec.getContents();
+    if (!contents || offset + size > contents->size()) {
+        if (!contents) llvm::consumeError(contents.takeError());
+        return 0;
+    }
+    hash = fnv1a(hash, contents->data() + offset, size);
+    for (const llvm::object::SectionRef& rsec : obj.sections()) {
+        auto target = rsec.getRelocatedSection();
+        if (!target) { llvm::consumeError(target.takeError()); continue; }
+        if (*target != sec) continue;
+        for (const llvm::object::RelocationRef& reloc : rsec.relocations()) {
+            const uint64_t at = reloc.getOffset();
+            if (at < offset || at >= offset + size) continue;
+            hash = fnv1a(hash, at - offset);
+            hash = fnv1a(hash, reloc.getType());
+            auto symbol = reloc.getSymbol();
+            if (symbol != obj.symbol_end()) {
+                auto name = symbol->getName();
+                if (name) hash = fnv1a(hash, name->data(), name->size());
+                else llvm::consumeError(name.takeError());
+            }
+            if (llvm::isa<llvm::object::ELFObjectFileBase>(&obj)) {
+                auto addend = llvm::object::ELFRelocationRef(reloc).getAddend();
+                if (addend) hash = fnv1a(hash, *addend);
+                else llvm::consumeError(addend.takeError());
+            }
+        }
+    }
+    return hash ? hash : 1;  // 0 means unknown
+}
+
 class BlockMapListener : public llvm::JITEventListener {
 public:
     explicit BlockMapListener(ProfileState& state) : state_(state) {}
@@ -140,6 +196,11 @@ public:
 
             const uint64_t host_addr = sec_load + (*addr_or - sec.getAddress());
             state_.recordBlock(static_cast<uint64_t>(key), host_addr, size, guest_pc);
+            if (state_.want_object_shapes) {
+                const uint64_t hash = object_code_hash(obj, sec, *addr_or - sec.getAddress(), size);
+                std::lock_guard<std::mutex> lock(state_.blocks_mutex);
+                state_.object_shapes[guest_pc] = {size, hash};
+            }
         }
     }
 

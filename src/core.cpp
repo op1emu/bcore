@@ -1,6 +1,7 @@
 #include "core.h"
 
 #include <sstream>
+#include <tuple>
 
 #include "bb_translator.h"
 #include "decoder.h"
@@ -9,6 +10,7 @@
 #include "mmr.h"
 #include "profile_state.h"
 
+#include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
@@ -105,6 +107,18 @@ bool Core::run(uint32_t pc) {
             llvm::errs() << "=== end IR ===\n";
         }
 #if BCORE_ENABLE_PROFILE
+        const bool want_metrics = sink && sink->wantsCompileMetrics();
+        BcoreCompileMetrics metrics;
+        if (want_metrics) {
+            // The module as compiled; addModule() takes it.
+            for (const llvm::Function& function : *result.module) {
+                for (const llvm::BasicBlock& block : function) {
+                    ++metrics.ir_blocks;
+                    metrics.ir_instructions += block.size();
+                }
+            }
+        }
+        profile_->want_object_shapes = want_metrics;
         const uint64_t materialize_begin = bcore_profile::monotonic_ns();
 #endif
         if (jit_->addModule(pc,
@@ -121,6 +135,10 @@ bool Core::run(uint32_t pc) {
             sink->onCompileStage(pc, "lift", t0, lift_end, true);
             if (optimize_end) sink->onCompileStage(pc, "ir-optimize", lift_end, optimize_end, true);
             sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
+            if (fn && want_metrics) {
+                std::tie(metrics.object_bytes, metrics.object_hash) = profile_->takeObjectShape(pc);
+                sink->onCompileMetrics(pc, metrics);
+            }
             if (fn) sink->onTranslateEnd(pc, t1 - t0);
             else sink->onTranslateFailure(pc, t1 - t0);
         }

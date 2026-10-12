@@ -36,6 +36,20 @@ struct BcoreBlockInfo {
     uint64_t    unloaded_ns = 0; // exclusive lifetime end; 0 = still live
 };
 
+// Shape of one compiled block, for checking that a setting changed the code
+// (a nonzero opt level once changed nothing for months) and for relating
+// compile time to code size.
+struct BcoreCompileMetrics {
+    uint64_t ir_instructions = 0;  // the module as compiled: after the IR pipeline
+    uint64_t ir_blocks       = 0;
+    uint64_t object_bytes    = 0;  // the block function's machine code; 0 = unknown
+    // FNV-1a over that machine code before relocation and over its
+    // relocations (offset, type, target symbol, addend): the same for the
+    // same code in any process, independent of where helpers are loaded.
+    // 0 = unknown (no code map).
+    uint64_t object_hash     = 0;
+};
+
 // Typed event sink for the translation (cache-miss) path. All callbacks
 // default to no-ops and fire synchronously on the dispatching thread, from
 // inside Core::run(). None fires on a cache hit, so attaching a sink costs
@@ -75,6 +89,16 @@ public:
     virtual void onCompileStage(uint32_t guest_pc, const char* stage,
                                 uint64_t begin_ns, uint64_t end_ns, bool ok) {
         (void)guest_pc; (void)stage; (void)begin_ns; (void)end_ns; (void)ok;
+    }
+
+    // Compile metrics, once per successful translation, after the stages and
+    // just before onTranslateEnd. Only when wantsCompileMetrics() returns
+    // true: counting the IR and hashing the code cost a pass over each, and
+    // that time is part of the translation it describes (in its elapsed
+    // time, though in no stage).
+    virtual bool wantsCompileMetrics() const { return false; }
+    virtual void onCompileMetrics(uint32_t guest_pc, const BcoreCompileMetrics& metrics) {
+        (void)guest_pc; (void)metrics;
     }
 };
 

@@ -98,6 +98,58 @@ static void check_interrupt_counts() {
 #endif
 }
 
+struct MetricsSink : BcoreEventSink {
+    bool want = true;
+    std::vector<BcoreCompileMetrics> metrics;
+    bool wantsCompileMetrics() const override { return want; }
+    void onCompileMetrics(uint32_t, const BcoreCompileMetrics& m) override { metrics.push_back(m); }
+};
+
+// Compile metrics describe the code as compiled, the same for the same code.
+static BcoreCompileMetrics compile_once(int opt_level, bool want = true) {
+    Ram mem;
+    for (uint32_t a = 0; a < 8; a += 2) mem.write16(a, 0x0000);  // NOP x4
+    mem.write16(8, 0x2000 | ((-4) & 0xfff));                      // JUMP.S 0
+    CpuState cpu{};
+    Core core(&cpu, &mem);
+    require(core.init(opt_level), "init");
+    MetricsSink sink;
+    sink.want = want;
+    core.setEventSink(&sink);
+    require(core.run(0), "dispatch");
+    core.setEventSink(nullptr);
+    if (!want) {
+        require(sink.metrics.empty(), "no metrics unless asked for");
+        return {};
+    }
+#if BCORE_ENABLE_PROFILE
+    require(sink.metrics.size() == 1, "one set of metrics per translation");
+    const auto m = sink.metrics[0];
+    require(m.ir_instructions > 0 && m.ir_blocks > 0, "IR counted");
+    std::vector<BcoreBlockInfo> live;
+    core.forEachCompiledBlock([&](const BcoreBlockInfo& b) { live.push_back(b); });
+    require(live.size() == 1 && m.object_bytes == live[0].host_size, "object bytes are the block's code size");
+    require(m.object_hash != 0, "code hashed");
+    return m;
+#else
+    require(sink.metrics.empty(), "disabled build reports no metrics");
+    return {};
+#endif
+}
+
+static void check_compile_metrics() {
+    compile_once(1, /*want=*/false);
+#if BCORE_ENABLE_PROFILE
+    const auto o0 = compile_once(0), o0_again = compile_once(0), o1 = compile_once(1);
+    require(o0.object_hash == o0_again.object_hash && o0.ir_instructions == o0_again.ir_instructions,
+            "the same code hashes the same in a new engine");
+    require(o0.ir_instructions != o1.ir_instructions && o0.object_hash != o1.object_hash,
+            "the IR pipeline changes the compiled code");
+#else
+    compile_once(0);
+#endif
+}
+
 static std::vector<BcoreBlockInfo> blocks(const Core& core) {
     std::vector<BcoreBlockInfo> out;
     core.forEachCompiledBlock([&](const BcoreBlockInfo& b) { out.push_back(b); });
@@ -219,5 +271,6 @@ int main() {
     check(1);
     check_sink_time_excluded();
     check_interrupt_counts();
+    check_compile_metrics();
     std::puts("bcore profile test passed");
 }
