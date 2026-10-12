@@ -181,16 +181,34 @@ static BcoreCompileMetrics compile_once(int opt_level, bool want = true) {
 // Compiles a block function that reads a private constant table, as the
 // compiler places constant pools and jump tables in their own sections, and
 // returns the hash of the function.
+static uint64_t hash_of_block(const std::string& ir);
+
 static uint64_t hash_of_table_block(int first) {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    const std::string ir =
+    return hash_of_block(
         "@t = private unnamed_addr constant [4 x i32] [i32 " + std::to_string(first) +
         ", i32 7, i32 8, i32 9]\n"
         "define i32 @bb_0x00000000(i32 %i) {\n"
         "  %p = getelementptr [4 x i32], ptr @t, i32 0, i32 %i\n"
         "  %v = load i32, ptr %p\n"
-        "  ret i32 %v\n}\n";
+        "  ret i32 %v\n}\n");
+}
+
+// A table of function pointers: zero before relocation, so only the table's
+// own relocations tell the targets apart.
+static uint64_t hash_of_call_table_block(const char* callee) {
+    return hash_of_block(
+        std::string("declare i32 @mem_read8(i32)\ndeclare i32 @mem_read32(i32)\n"
+                    "@t = private unnamed_addr constant [2 x ptr] [ptr @") + callee + ", ptr @mem_read8]\n"
+        "define i32 @bb_0x00000000(i32 %i) {\n"
+        "  %p = getelementptr [2 x ptr], ptr @t, i32 0, i32 %i\n"
+        "  %f = load ptr, ptr %p\n"
+        "  %v = call i32 %f(i32 0)\n"
+        "  ret i32 %v\n}\n");
+}
+
+static uint64_t hash_of_block(const std::string& ir) {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
     llvm::LLVMContext context;
     llvm::SMDiagnostic diag;
     auto module = llvm::parseIR(llvm::MemoryBufferRef(ir, "table"), diag, context);
@@ -229,6 +247,10 @@ static void check_compile_metrics() {
     // reads differs. A different constant is different code.
     require(hash_of_table_block(1) == hash_of_table_block(1), "the same table hashes the same");
     require(hash_of_table_block(1) != hash_of_table_block(2), "a different constant table is different code");
+    require(hash_of_call_table_block("mem_read32") == hash_of_call_table_block("mem_read32"),
+            "the same function table hashes the same");
+    require(hash_of_call_table_block("mem_read32") != hash_of_call_table_block("mem_read8"),
+            "a table pointing at another function is different code");
 #endif
     compile_once(1, /*want=*/false);
 #if BCORE_ENABLE_PROFILE

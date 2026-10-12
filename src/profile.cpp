@@ -126,12 +126,14 @@ uint64_t fnv1a(uint64_t hash, const void* data, size_t size) {
 } // namespace
 
 // The block function's bytes as the compiler emitted them (relocated fields
-// still zero), its relocations, and the contents of every other section they
-// point into (constant pools, jump tables): identical for identical code
-// whatever addresses the JIT and the helpers land at in this process. A
-// relocation into a constant pool names only a section symbol and an
-// offset, so without the pool's bytes two blocks differing in a constant
-// would look alike.
+// still zero) and its relocations, then every section those relocations
+// point into (constant pools, jump tables, tables of function pointers) with
+// its own relocations, transitively: identical for identical code whatever
+// addresses the JIT and the helpers land at in this process. A relocation
+// names only a symbol and an offset, and a relocated field is zero before
+// relocation, so without the referenced bytes two blocks differing in a
+// constant would look alike, and without their relocations two blocks
+// whose tables point at different functions would.
 std::vector<uint8_t> object_code_material(const llvm::object::ObjectFile& obj, const llvm::object::SectionRef& sec,
                                           uint64_t offset, uint64_t size) {
     std::vector<uint8_t> out;
@@ -146,40 +148,55 @@ std::vector<uint8_t> object_code_material(const llvm::object::ObjectFile& obj, c
         return {};
     }
     append(contents->data() + offset, size);
-    std::vector<llvm::object::SectionRef> referenced;
-    for (const llvm::object::SectionRef& rsec : obj.sections()) {
-        auto target = rsec.getRelocatedSection();
-        if (!target) { llvm::consumeError(target.takeError()); continue; }
-        if (*target != sec) continue;
-        for (const llvm::object::RelocationRef& reloc : rsec.relocations()) {
-            const uint64_t at = reloc.getOffset();
-            if (at < offset || at >= offset + size) continue;
-            append_value(at - offset);
-            append_value(reloc.getType());
-            auto symbol = reloc.getSymbol();
-            if (symbol != obj.symbol_end()) {
-                auto name = symbol->getName();
-                if (name) append(name->data(), name->size());
-                else llvm::consumeError(name.takeError());
-                append_value(0);  // separator
-                auto in = symbol->getSection();
-                if (!in) llvm::consumeError(in.takeError());
-                else if (*in != obj.section_end() && **in != sec &&
-                         std::find(referenced.begin(), referenced.end(), **in) == referenced.end())
-                    referenced.push_back(**in);
-            }
-            if (llvm::isa<llvm::object::ELFObjectFileBase>(&obj)) {
-                auto addend = llvm::object::ELFRelocationRef(reloc).getAddend();
-                if (addend) append_value(static_cast<uint64_t>(*addend));
-                else llvm::consumeError(addend.takeError());
+
+    // Sections in the order first referenced; the function's own section is
+    // covered by its byte range above.
+    std::vector<llvm::object::SectionRef> sections{sec};
+    // Appends the relocations applied to [begin, end) of `target`, queueing
+    // the sections they point into.
+    auto relocations = [&](const llvm::object::SectionRef& target, uint64_t begin, uint64_t end) {
+        for (const llvm::object::SectionRef& rsec : obj.sections()) {
+            auto relocated = rsec.getRelocatedSection();
+            if (!relocated) { llvm::consumeError(relocated.takeError()); continue; }
+            if (*relocated != target) continue;
+            for (const llvm::object::RelocationRef& reloc : rsec.relocations()) {
+                const uint64_t at = reloc.getOffset();
+                if (at < begin || at >= end) continue;
+                append_value(at - begin);
+                append_value(reloc.getType());
+                auto symbol = reloc.getSymbol();
+                if (symbol != obj.symbol_end()) {
+                    auto name = symbol->getName();
+                    if (name) append(name->data(), name->size());
+                    else llvm::consumeError(name.takeError());
+                    append_value(0);  // separator
+                    auto in = symbol->getSection();
+                    if (!in) {
+                        llvm::consumeError(in.takeError());
+                    } else if (*in != obj.section_end()) {
+                        auto known = std::find(sections.begin(), sections.end(), **in);
+                        // Which section, by order of first reference: section
+                        // symbols have empty names.
+                        append_value(static_cast<uint64_t>(known - sections.begin()));
+                        if (known == sections.end()) sections.push_back(**in);
+                    }
+                }
+                if (llvm::isa<llvm::object::ELFObjectFileBase>(&obj)) {
+                    auto addend = llvm::object::ELFRelocationRef(reloc).getAddend();
+                    if (addend) append_value(static_cast<uint64_t>(*addend));
+                    else llvm::consumeError(addend.takeError());
+                }
             }
         }
-    }
-    for (const llvm::object::SectionRef& data : referenced) {
+    };
+    relocations(sec, offset, offset + size);
+    for (size_t i = 1; i < sections.size(); ++i) {  // grows while it runs
+        const llvm::object::SectionRef data = sections[i];
         append_value(data.getSize());
         auto bytes = data.getContents();
         if (bytes) append(bytes->data(), bytes->size());  // empty for zero-fill (bss)
         else llvm::consumeError(bytes.takeError());
+        relocations(data, 0, data.getSize());
     }
     return out;
 }

@@ -44,8 +44,9 @@ struct BcoreCompileMetrics {
     uint64_t ir_blocks       = 0;
     uint64_t object_bytes    = 0;  // the block function's machine code; 0 = unknown
     // FNV-1a over that machine code before relocation, its relocations
-    // (offset, type, target symbol, addend) and the contents of the sections
-    // they point into (constant pools, jump tables): the same for the same
+    // (offset, type, target symbol, addend) and the sections they point into
+    // (constant pools, jump tables, function-pointer tables) with their own
+    // relocations, transitively: the same for the same
     // code in any process, independent of where helpers are loaded. Not
     // across processes when the Memory has a nonzero fast_base(): the
     // fastmem and rawmem paths embed that host address in the code as a
