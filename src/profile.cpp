@@ -63,11 +63,11 @@ void ProfileState::recordBlock(uint64_t object_key, uint64_t addr, uint64_t size
     blocks_by_object[object_key].push_back(addr);
 }
 
-std::pair<uint64_t, uint64_t> ProfileState::takeObjectShape(uint32_t guest_pc) {
+std::pair<uint64_t, std::vector<uint8_t>> ProfileState::takeObjectShape(uint32_t guest_pc) {
     std::lock_guard<std::mutex> lk(blocks_mutex);
     auto it = object_shapes.find(guest_pc);
-    if (it == object_shapes.end()) return {0, 0};
-    const auto shape = it->second;
+    if (it == object_shapes.end()) return {0, {}};
+    auto shape = std::move(it->second);
     object_shapes.erase(it);
     return shape;
 }
@@ -117,31 +117,36 @@ bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc) {
     return true;
 }
 
-// Reconstructs guest attribution for every compiled block from the JIT's own
-// object files. Exact sizes come from the object-file symbol table via
-// llvm::object::computeSymbolSizes — no "nearest preceding block" heuristic,
-// so a sample inside a block is always attributed to the right block.
 uint64_t fnv1a(uint64_t hash, const void* data, size_t size) {
     const auto* bytes = static_cast<const uint8_t*>(data);
     for (size_t i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * 0x100000001b3ull;
     return hash;
 }
 
-template <typename T>
-uint64_t fnv1a(uint64_t hash, T value) { return fnv1a(hash, &value, sizeof(value)); }
+} // namespace
 
 // The block function's bytes as the compiler emitted them (relocated fields
-// still zero) plus its relocations: identical for identical code whatever
-// addresses the JIT and the helpers land at in this process.
-uint64_t object_code_hash(const llvm::object::ObjectFile& obj, const llvm::object::SectionRef& sec,
-                          uint64_t offset, uint64_t size) {
-    uint64_t hash = 0xcbf29ce484222325ull;
+// still zero), its relocations, and the contents of every other section they
+// point into (constant pools, jump tables): identical for identical code
+// whatever addresses the JIT and the helpers land at in this process. A
+// relocation into a constant pool names only a section symbol and an
+// offset, so without the pool's bytes two blocks differing in a constant
+// would look alike.
+std::vector<uint8_t> object_code_material(const llvm::object::ObjectFile& obj, const llvm::object::SectionRef& sec,
+                                          uint64_t offset, uint64_t size) {
+    std::vector<uint8_t> out;
+    auto append = [&out](const void* data, size_t n) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        out.insert(out.end(), bytes, bytes + n);
+    };
+    auto append_value = [&append](uint64_t value) { append(&value, sizeof(value)); };
     auto contents = sec.getContents();
     if (!contents || offset + size > contents->size()) {
         if (!contents) llvm::consumeError(contents.takeError());
-        return 0;
+        return {};
     }
-    hash = fnv1a(hash, contents->data() + offset, size);
+    append(contents->data() + offset, size);
+    std::vector<llvm::object::SectionRef> referenced;
     for (const llvm::object::SectionRef& rsec : obj.sections()) {
         auto target = rsec.getRelocatedSection();
         if (!target) { llvm::consumeError(target.takeError()); continue; }
@@ -149,24 +154,48 @@ uint64_t object_code_hash(const llvm::object::ObjectFile& obj, const llvm::objec
         for (const llvm::object::RelocationRef& reloc : rsec.relocations()) {
             const uint64_t at = reloc.getOffset();
             if (at < offset || at >= offset + size) continue;
-            hash = fnv1a(hash, at - offset);
-            hash = fnv1a(hash, reloc.getType());
+            append_value(at - offset);
+            append_value(reloc.getType());
             auto symbol = reloc.getSymbol();
             if (symbol != obj.symbol_end()) {
                 auto name = symbol->getName();
-                if (name) hash = fnv1a(hash, name->data(), name->size());
+                if (name) append(name->data(), name->size());
                 else llvm::consumeError(name.takeError());
+                append_value(0);  // separator
+                auto in = symbol->getSection();
+                if (!in) llvm::consumeError(in.takeError());
+                else if (*in != obj.section_end() && **in != sec &&
+                         std::find(referenced.begin(), referenced.end(), **in) == referenced.end())
+                    referenced.push_back(**in);
             }
             if (llvm::isa<llvm::object::ELFObjectFileBase>(&obj)) {
                 auto addend = llvm::object::ELFRelocationRef(reloc).getAddend();
-                if (addend) hash = fnv1a(hash, *addend);
+                if (addend) append_value(static_cast<uint64_t>(*addend));
                 else llvm::consumeError(addend.takeError());
             }
         }
     }
+    for (const llvm::object::SectionRef& data : referenced) {
+        append_value(data.getSize());
+        auto bytes = data.getContents();
+        if (bytes) append(bytes->data(), bytes->size());  // empty for zero-fill (bss)
+        else llvm::consumeError(bytes.takeError());
+    }
+    return out;
+}
+
+uint64_t hash_material(const std::vector<uint8_t>& material) {
+    if (material.empty()) return 0;
+    const uint64_t hash = fnv1a(0xcbf29ce484222325ull, material.data(), material.size());
     return hash ? hash : 1;  // 0 means unknown
 }
 
+namespace {
+
+// Reconstructs guest attribution for every compiled block from the JIT's own
+// object files. Exact sizes come from the object-file symbol table via
+// llvm::object::computeSymbolSizes — no "nearest preceding block" heuristic,
+// so a sample inside a block is always attributed to the right block.
 class BlockMapListener : public llvm::JITEventListener {
 public:
     explicit BlockMapListener(ProfileState& state) : state_(state) {}
@@ -197,9 +226,13 @@ public:
             const uint64_t host_addr = sec_load + (*addr_or - sec.getAddress());
             state_.recordBlock(static_cast<uint64_t>(key), host_addr, size, guest_pc);
             if (state_.want_object_shapes) {
-                const uint64_t hash = object_code_hash(obj, sec, *addr_or - sec.getAddress(), size);
+                // Inside materialization: only copy what the hash needs here;
+                // Core hashes it after the translation is timed.
+                const uint64_t begin = monotonic_ns();
+                auto material = object_code_material(obj, sec, *addr_or - sec.getAddress(), size);
                 std::lock_guard<std::mutex> lock(state_.blocks_mutex);
-                state_.object_shapes[guest_pc] = {size, hash};
+                state_.object_shapes[guest_pc] = {size, std::move(material)};
+                state_.capture_ns += monotonic_ns() - begin;
             }
         }
     }

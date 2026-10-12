@@ -43,11 +43,20 @@ struct BcoreCompileMetrics {
     uint64_t ir_instructions = 0;  // the module as compiled: after the IR pipeline
     uint64_t ir_blocks       = 0;
     uint64_t object_bytes    = 0;  // the block function's machine code; 0 = unknown
-    // FNV-1a over that machine code before relocation and over its
-    // relocations (offset, type, target symbol, addend): the same for the
-    // same code in any process, independent of where helpers are loaded.
-    // 0 = unknown (no code map).
+    // FNV-1a over that machine code before relocation, its relocations
+    // (offset, type, target symbol, addend) and the contents of the sections
+    // they point into (constant pools, jump tables): the same for the same
+    // code in any process, independent of where helpers are loaded. Not
+    // across processes when the Memory has a nonzero fast_base(): the
+    // fastmem and rawmem paths embed that host address in the code as a
+    // constant, without a relocation. 0 = unknown (no code map).
     uint64_t object_hash     = 0;
+    // All time spent collecting these metrics: counting the IR, copying the
+    // code while LLVM loads it, and hashing it afterwards. The first two
+    // happen during the translation and are taken out of its elapsed time
+    // and translate_ns_total; the copy falls inside the "materialize" stage.
+    // A host timing the whole translation itself can subtract collect_ns.
+    uint64_t collect_ns      = 0;
 };
 
 // Typed event sink for the translation (cache-miss) path. All callbacks
@@ -93,9 +102,9 @@ public:
 
     // Compile metrics, once per successful translation, after the stages and
     // just before onTranslateEnd. Only when wantsCompileMetrics() returns
-    // true: counting the IR and hashing the code cost a pass over each, and
-    // that time is part of the translation it describes (in its elapsed
-    // time, though in no stage).
+    // true; it is asked before the translation is timed. Counting the IR and
+    // copying the code cost a pass over each: that time (collect_ns) is
+    // removed from the elapsed time, and the hash is computed after timing.
     virtual bool wantsCompileMetrics() const { return false; }
     virtual void onCompileMetrics(uint32_t guest_pc, const BcoreCompileMetrics& metrics) {
         (void)guest_pc; (void)metrics;
