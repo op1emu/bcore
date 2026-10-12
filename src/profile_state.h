@@ -7,16 +7,27 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "bcore_profile.h"
 
-namespace llvm { class JITEventListener; }
+namespace llvm {
+class JITEventListener;
+namespace object { class ObjectFile; class SectionRef; }
+}
 class JitEngine;
 
 namespace bcore_profile {
 
 uint64_t monotonic_ns();  // CLOCK_MONOTONIC, the clock BcoreBlockInfo uses
+
+// What BcoreCompileMetrics::object_hash covers for the function at
+// [offset, offset + size) of `sec`: its unrelocated bytes, its relocations
+// and the sections they point into. Empty when the bytes are unavailable.
+std::vector<uint8_t> object_code_material(const llvm::object::ObjectFile& obj,
+                                          const llvm::object::SectionRef& sec, uint64_t offset, uint64_t size);
+uint64_t hash_material(const std::vector<uint8_t>& material);  // FNV-1a; 0 for empty
 
 struct ProfileState {
     ProfileState();
@@ -52,6 +63,14 @@ struct ProfileState {
     // `perf inject --jit`). Set by Core::set_perf_jitdump(), which also
     // attaches immediately via attach_perf_listener() below.
     bool want_perf_jitdump = false;
+
+    // Object-code shape (bytes, hash) of blocks loaded since the last
+    // takeObjectShape(), recorded by the code-map listener only while
+    // want_object_shapes is set (a sink asked for compile metrics).
+    bool want_object_shapes = false;
+    std::unordered_map<uint32_t, std::pair<uint64_t, std::vector<uint8_t>>> object_shapes;  // pc -> (bytes, material)
+    uint64_t capture_ns = 0;  // time the listener spent copying material, inside materialize
+    std::pair<uint64_t, std::vector<uint8_t>> takeObjectShape(uint32_t guest_pc);
 
     void clearBlocks();
     void recordBlock(uint64_t object_key, uint64_t addr, uint64_t size,

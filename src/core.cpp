@@ -9,6 +9,7 @@
 #include "mmr.h"
 #include "profile_state.h"
 
+#include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
@@ -67,6 +68,9 @@ bool Core::run(uint32_t pc) {
 #if BCORE_ENABLE_PROFILE
         BcoreEventSink* sink = profile_->sink;
         profile_->stats.cache_misses++;
+        // Asked before timing starts: the sink's answer is no part of the
+        // translation.
+        const bool want_metrics = sink && sink->wantsCompileMetrics();
         if (sink) sink->onTranslateBegin(pc);
         const uint64_t t0 = bcore_profile::monotonic_ns();
         // Balances onTranslateBegin when anything below throws (a host
@@ -105,6 +109,20 @@ bool Core::run(uint32_t pc) {
             llvm::errs() << "=== end IR ===\n";
         }
 #if BCORE_ENABLE_PROFILE
+        BcoreCompileMetrics metrics;
+        if (want_metrics) {
+            // The module as compiled; addModule() takes it. Between stages.
+            const uint64_t count_begin = bcore_profile::monotonic_ns();
+            for (const llvm::Function& function : *result.module) {
+                for (const llvm::BasicBlock& block : function) {
+                    ++metrics.ir_blocks;
+                    metrics.ir_instructions += block.size();
+                }
+            }
+            metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
+        }
+        profile_->want_object_shapes = want_metrics;
+        profile_->capture_ns = 0;
         const uint64_t materialize_begin = bcore_profile::monotonic_ns();
 #endif
         if (jit_->addModule(pc,
@@ -115,14 +133,24 @@ bool Core::run(uint32_t pc) {
 #if BCORE_ENABLE_PROFILE
         const uint64_t t1 = bcore_profile::monotonic_ns();
         fail_on_unwind.armed = false;
-        profile_->stats.translate_ns_total += t1 - t0;
+        if (want_metrics) metrics.collect_ns += profile_->capture_ns;
+        const uint64_t elapsed = t1 - t0 - metrics.collect_ns;
+        profile_->stats.translate_ns_total += elapsed;
         if (fn) profile_->stats.blocks_translated++;
         if (sink) {
             sink->onCompileStage(pc, "lift", t0, lift_end, true);
             if (optimize_end) sink->onCompileStage(pc, "ir-optimize", lift_end, optimize_end, true);
             sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
-            if (fn) sink->onTranslateEnd(pc, t1 - t0);
-            else sink->onTranslateFailure(pc, t1 - t0);
+            if (fn && want_metrics) {
+                auto [bytes, material] = profile_->takeObjectShape(pc);
+                metrics.object_bytes = bytes;
+                const uint64_t hash_begin = bcore_profile::monotonic_ns();
+                metrics.object_hash = bcore_profile::hash_material(material);
+                metrics.collect_ns += bcore_profile::monotonic_ns() - hash_begin;
+                sink->onCompileMetrics(pc, metrics);
+            }
+            if (fn) sink->onTranslateEnd(pc, elapsed);
+            else sink->onTranslateFailure(pc, elapsed);
         }
 #endif
         if (!fn)

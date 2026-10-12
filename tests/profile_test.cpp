@@ -2,6 +2,22 @@
 // Builds with BCORE_ENABLE_PROFILE on or off and checks the matching contract.
 #include "core.h"
 #include "mmr.h"
+#if BCORE_ENABLE_PROFILE
+#include "profile_state.h"
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IRReader/IRReader.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Object/ObjectFile.h>
+#include <llvm/Object/SymbolSize.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/Host.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -56,6 +72,21 @@ struct SlowSink : BcoreEventSink {
     }
 };
 
+// A sink slow to answer wantsCompileMetrics, or to take the metrics, is
+// charged to no translation either.
+struct SlowMetricsSink : BcoreEventSink {
+    uint64_t elapsed = 0, collect = 0;
+    bool wantsCompileMetrics() const override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        return true;
+    }
+    void onCompileMetrics(uint32_t, const BcoreCompileMetrics& m) override {
+        collect = m.collect_ns;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    void onTranslateEnd(uint32_t, uint64_t ns) override { elapsed = ns; }
+};
+
 static void check_sink_time_excluded() {
 #if BCORE_ENABLE_PROFILE
     Ram mem;
@@ -70,6 +101,15 @@ static void check_sink_time_excluded() {
     // a few ms.
     require(core.stats().translate_ns_total < 300000000ull, "stage callbacks are outside translate_ns");
     core.setEventSink(nullptr);
+    Core metrics_core(&cpu, &mem);
+    require(metrics_core.init(1), "init");
+    SlowMetricsSink slow_metrics;
+    metrics_core.setEventSink(&slow_metrics);
+    require(metrics_core.run(0), "dispatch with a slow metrics sink");
+    require(metrics_core.stats().translate_ns_total < 150000000ull && slow_metrics.elapsed < 150000000ull,
+            "asking for and taking metrics is outside the translation's time");
+    require(slow_metrics.collect > 0, "collection time reported");
+    metrics_core.setEventSink(nullptr);
 #endif
 }
 
@@ -95,6 +135,133 @@ static void check_interrupt_counts() {
     require(total == 1, "and nowhere else");
 #else
     for (uint64_t count : core.stats().interrupts_entered) require(count == 0, "disabled build counts nothing");
+#endif
+}
+
+struct MetricsSink : BcoreEventSink {
+    bool want = true;
+    std::vector<BcoreCompileMetrics> metrics;
+    bool wantsCompileMetrics() const override { return want; }
+    void onCompileMetrics(uint32_t, const BcoreCompileMetrics& m) override { metrics.push_back(m); }
+};
+
+// Compile metrics describe the code as compiled, the same for the same code.
+static BcoreCompileMetrics compile_once(int opt_level, bool want = true) {
+    Ram mem;
+    for (uint32_t a = 0; a < 8; a += 2) mem.write16(a, 0x0000);  // NOP x4
+    mem.write16(8, 0x2000 | ((-4) & 0xfff));                      // JUMP.S 0
+    CpuState cpu{};
+    Core core(&cpu, &mem);
+    require(core.init(opt_level), "init");
+    MetricsSink sink;
+    sink.want = want;
+    core.setEventSink(&sink);
+    require(core.run(0), "dispatch");
+    core.setEventSink(nullptr);
+    if (!want) {
+        require(sink.metrics.empty(), "no metrics unless asked for");
+        return {};
+    }
+#if BCORE_ENABLE_PROFILE
+    require(sink.metrics.size() == 1, "one set of metrics per translation");
+    const auto m = sink.metrics[0];
+    require(m.ir_instructions > 0 && m.ir_blocks > 0, "IR counted");
+    std::vector<BcoreBlockInfo> live;
+    core.forEachCompiledBlock([&](const BcoreBlockInfo& b) { live.push_back(b); });
+    require(live.size() == 1 && m.object_bytes == live[0].host_size, "object bytes are the block's code size");
+    require(m.object_hash != 0, "code hashed");
+    return m;
+#else
+    require(sink.metrics.empty(), "disabled build reports no metrics");
+    return {};
+#endif
+}
+
+#if BCORE_ENABLE_PROFILE
+// Compiles a block function that reads a private constant table, as the
+// compiler places constant pools and jump tables in their own sections, and
+// returns the hash of the function.
+static uint64_t hash_of_block(const std::string& ir);
+
+static uint64_t hash_of_table_block(int first) {
+    return hash_of_block(
+        "@t = private unnamed_addr constant [4 x i32] [i32 " + std::to_string(first) +
+        ", i32 7, i32 8, i32 9]\n"
+        "define i32 @bb_0x00000000(i32 %i) {\n"
+        "  %p = getelementptr [4 x i32], ptr @t, i32 0, i32 %i\n"
+        "  %v = load i32, ptr %p\n"
+        "  ret i32 %v\n}\n");
+}
+
+// A table of function pointers: zero before relocation, so only the table's
+// own relocations tell the targets apart.
+static uint64_t hash_of_call_table_block(const char* callee) {
+    return hash_of_block(
+        std::string("declare i32 @mem_read8(i32)\ndeclare i32 @mem_read32(i32)\n"
+                    "@t = private unnamed_addr constant [2 x ptr] [ptr @") + callee + ", ptr @mem_read8]\n"
+        "define i32 @bb_0x00000000(i32 %i) {\n"
+        "  %p = getelementptr [2 x ptr], ptr @t, i32 0, i32 %i\n"
+        "  %f = load ptr, ptr %p\n"
+        "  %v = call i32 %f(i32 0)\n"
+        "  ret i32 %v\n}\n");
+}
+
+static uint64_t hash_of_block(const std::string& ir) {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic diag;
+    auto module = llvm::parseIR(llvm::MemoryBufferRef(ir, "table"), diag, context);
+    require(module != nullptr, "test IR parses");
+    const std::string triple = llvm::sys::getProcessTriple();
+    std::string error;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, error);
+    require(target != nullptr, "native target");
+    std::unique_ptr<llvm::TargetMachine> machine(
+        target->createTargetMachine(triple, "generic", "", {}, llvm::Reloc::Static));
+    module->setDataLayout(machine->createDataLayout());
+    llvm::SmallVector<char, 0> object;
+    llvm::raw_svector_ostream stream(object);
+    llvm::legacy::PassManager passes;
+    require(!machine->addPassesToEmitFile(passes, stream, nullptr, llvm::CGFT_ObjectFile), "emit object");
+    passes.run(*module);
+    auto file = llvm::object::ObjectFile::createObjectFile(
+        llvm::MemoryBufferRef(llvm::StringRef(object.data(), object.size()), "table.o"));
+    require(static_cast<bool>(file), "object parses");
+    for (const auto& [symbol, size] : llvm::object::computeSymbolSizes(**file)) {
+        auto name = symbol.getName();
+        auto section = symbol.getSection();
+        auto address = symbol.getAddress();
+        if (!name || !section || !address || *name != "bb_0x00000000") continue;
+        return bcore_profile::hash_material(
+            bcore_profile::object_code_material(**file, **section, *address - (*section)->getAddress(), size));
+    }
+    require(false, "block function found");
+    return 0;
+}
+#endif
+
+static void check_compile_metrics() {
+#if BCORE_ENABLE_PROFILE
+    // The function's bytes and relocations are identical; only the table it
+    // reads differs. A different constant is different code.
+    require(hash_of_table_block(1) == hash_of_table_block(1), "the same table hashes the same");
+    require(hash_of_table_block(1) != hash_of_table_block(2), "a different constant table is different code");
+    require(hash_of_call_table_block("mem_read32") == hash_of_call_table_block("mem_read32"),
+            "the same function table hashes the same");
+    require(hash_of_call_table_block("mem_read32") != hash_of_call_table_block("mem_read8"),
+            "a table pointing at another function is different code");
+#endif
+    compile_once(1, /*want=*/false);
+#if BCORE_ENABLE_PROFILE
+    const auto o0 = compile_once(0), o0_again = compile_once(0), o1 = compile_once(1);
+    require(o0.object_hash == o0_again.object_hash && o0.ir_instructions == o0_again.ir_instructions,
+            "the same code hashes the same in a new engine");
+    require(o0.ir_instructions != o1.ir_instructions && o0.object_hash != o1.object_hash,
+            "the IR pipeline changes the compiled code");
+
+#else
+    compile_once(0);
 #endif
 }
 
@@ -219,5 +386,6 @@ int main() {
     check(1);
     check_sink_time_excluded();
     check_interrupt_counts();
+    check_compile_metrics();
     std::puts("bcore profile test passed");
 }
