@@ -1,6 +1,7 @@
 // Regression test for the JIT observability API (include/bcore_profile.h).
 // Builds with BCORE_ENABLE_PROFILE on or off and checks the matching contract.
 #include "core.h"
+#include "mmr.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -69,6 +70,31 @@ static void check_sink_time_excluded() {
     // a few ms.
     require(core.stats().translate_ns_total < 300000000ull, "stage callbacks are outside translate_ns");
     core.setEventSink(nullptr);
+#endif
+}
+
+extern "C" uint32_t cec_return_rti(CpuState* cpu);
+
+// Interrupt entries are counted per level where the CEC dispatches them.
+static void check_interrupt_counts() {
+    Ram mem;
+    mem.write16(0, 0x2000);
+    CpuState cpu{};
+    Core core(&cpu, &mem);
+    require(core.init(0), "init");
+    cec_init();  // out of reset: IPEND = RST | IRPTEN
+    const BcoreStats before = core.stats();
+    for (uint64_t count : before.interrupts_entered) require(count == 0, "no entries after reset");
+    cec_return_rti(&cpu);              // leave reset for user mode
+    cec_exception(&cpu, 1, nullptr);   // EXCPT 1: dispatched to EVX
+#if BCORE_ENABLE_PROFILE
+    const BcoreStats after = core.stats();
+    require(after.interrupts_entered[3] == 1, "the exception is counted at level 3 (EVX)");
+    uint64_t total = 0;
+    for (uint64_t count : after.interrupts_entered) total += count;
+    require(total == 1, "and nowhere else");
+#else
+    for (uint64_t count : core.stats().interrupts_entered) require(count == 0, "disabled build counts nothing");
 #endif
 }
 
@@ -192,5 +218,6 @@ int main() {
     check(0);
     check(1);
     check_sink_time_excluded();
+    check_interrupt_counts();
     std::puts("bcore profile test passed");
 }

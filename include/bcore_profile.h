@@ -86,4 +86,10 @@ struct BcoreStats {
     uint64_t cache_hits         = 0;
     uint64_t cache_misses       = 0;
     uint64_t translate_ns_total = 0;
+    // Interrupts and exceptions dispatched per IVG level (0 = EMU, 1 = RST,
+    // 2 = NMI, 3 = EVX, ... 15 = IVG15), counted where the CEC sets the
+    // IPEND bit. Guest behavior, unlike the block counters above: with the
+    // same inputs and guest clock they repeat exactly. The CEC state is
+    // process-wide, so they count from the last CpuState reset.
+    uint64_t interrupts_entered[16] = {};
 };
