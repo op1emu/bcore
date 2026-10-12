@@ -6,6 +6,7 @@
 #include "decoder.h"
 #include "disasm_visitor.h"
 #include "jit_engine.h"
+#include "mmr.h"
 #include "profile_state.h"
 
 #include <llvm/Support/ErrorHandling.h>
@@ -218,8 +219,11 @@ void Core::setEventSink(BcoreEventSink* sink) {
 
 BcoreStats Core::stats() const {
 #if BCORE_ENABLE_PROFILE
-    if (profile_)
-        return profile_->stats;  // plain reads; dispatch is single-threaded
+    if (profile_) {
+        BcoreStats stats = profile_->stats;  // plain reads; dispatch is single-threaded
+        cec_entry_counts(stats.interrupts_entered);
+        return stats;
+    }
 #endif
     return {};
 }

@@ -41,6 +41,11 @@ static constexpr uint32_t SP_IDX = 14;
 
 static uint32_t s_cec_mmr[5];  // EVT_OVERRIDE, IMASK, IPEND, ILAT, IPRIO
 static bool s_cec_pending; // Whether an interrupt is pending (set by cec_raise, cleared by cec_return_*)
+#if BCORE_ENABLE_PROFILE
+// Dispatches per IVG level since cec_init(), for BcoreStats: one increment
+// per interrupt or exception taken, nothing per block.
+static uint64_t s_cec_entries[16];
+#endif
 
 // ── Storage-level interface ───────────────────────────────────────────────────
 
@@ -55,6 +60,19 @@ void cec_init() {
     s_cec_mmr[CEC_IDX_ILAT]         = 0u;
     s_cec_mmr[CEC_IDX_IPRIO]        = 0u;
     s_cec_pending = false;
+#if BCORE_ENABLE_PROFILE
+    for (auto& count : s_cec_entries) count = 0;
+#endif
+}
+
+void cec_entry_counts(uint64_t out[16]) {
+    for (int i = 0; i < 16; ++i) {
+#if BCORE_ENABLE_PROFILE
+        out[i] = s_cec_entries[i];
+#else
+        out[i] = 0;
+#endif
+    }
 }
 
 uint32_t cec_mmr_read(CpuState* cpu, uint32_t addr) {
@@ -214,6 +232,9 @@ static void _cec_raise_internal(CpuState* cpu, int ivg) {
 
     ipend() |= (1u << ivg);
     ilat()  &= ~(1u << ivg);
+#if BCORE_ENABLE_PROFILE
+    ++s_cec_entries[ivg];
+#endif
 
     uint32_t oldpc = cpu->pc;
 

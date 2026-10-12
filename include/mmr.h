@@ -65,3 +65,7 @@ void cec_init();
 
 // Returns the current active IVG level: -1 = user mode, >=0 = supervisor.
 int cec_current_ivg();
+
+// Dispatches per IVG level (0 = EMU ... 15 = IVG15) since cec_init(); all
+// zero unless BCORE_ENABLE_PROFILE. Hosts read them through Core::stats().
+void cec_entry_counts(uint64_t out[16]);
