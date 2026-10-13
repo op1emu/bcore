@@ -183,6 +183,11 @@ no zero-overhead claim is made.
   `materialize` stages. Nothing fires on a cache hit. `stats()` returns
   owner-thread cumulative counters (translations, executions, hits, misses,
   translation time).
+- A sink whose `wantsCompileMetrics()` is true gets `onCompileMetrics` for
+  every translation: the IR and machine-code size, a hash of the code, and
+  the block's `terminator`, the kind of instruction that ends it (`jump`,
+  `call`, `return`, `return-from-event`, `loop-setup`, ...) or `packet-cap`
+  when it ends at the packet limit. A conditional branch never ends a block.
 - `BCORE_PERF_JIT_EVENTS=ON` (requires `BCORE_ENABLE_PROFILE=ON`) builds LLVM
   jitdump support. It is the one exception to "no I/O": once enabled, LLVM's
   listener writes `jit-<pid>.dump` under `$JITDUMPDIR/.debug/jit/` (or

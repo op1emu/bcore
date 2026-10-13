@@ -304,6 +304,39 @@ static void check_compile_metrics() {
 #endif
 }
 
+// Every block names what ends it: here a jump, a return, a loop setup and the
+// packet limit.
+static const char* terminator_of(const std::vector<uint16_t>& code, uint32_t max_steps = 0) {
+    Ram mem;
+    for (size_t i = 0; i < code.size(); ++i) mem.write16(2 * i, code[i]);
+    CpuState cpu{};
+    cpu.steps_remaining = max_steps;
+    Core core(&cpu, &mem);
+    require(core.init(0), "init");
+    MetricsSink sink;
+    core.setEventSink(&sink);
+    require(core.run(0), "dispatch");
+    core.setEventSink(nullptr);
+    require(sink.metrics.size() == 1, "one translation");
+    return sink.metrics[0].terminator;
+}
+
+static void check_terminators() {
+#if BCORE_ENABLE_PROFILE
+    const uint16_t nop = 0x0000, rts = 0x0010, jump_back = 0x2000 | ((-2) & 0xfff);
+    require(std::strcmp(terminator_of({nop, nop, jump_back}), "jump") == 0, "JUMP.S ends a block as a jump");
+    require(std::strcmp(terminator_of({nop, rts}), "return") == 0, "RTS ends a block as a return");
+    // LSETUP (lc0 = p0, loop at the next instruction): a 32-bit E0A2 encoding.
+    require(std::strcmp(terminator_of({0xe0a2, 0x0002, nop, nop}), "loop-setup") == 0, "LSETUP ends a block");
+    // A conditional branch never ends one: IF CC JUMP over a NOP, then RTS.
+    require(std::strcmp(terminator_of({0x1801, nop, nop, rts}), "return") == 0,
+            "a conditional branch leaves the block open");
+    // Limited mode stops after the step budget.
+    require(std::strcmp(terminator_of({nop, nop, nop, nop, rts}, 2), "step-budget") == 0,
+            "the step budget ends a limited block");
+#endif
+}
+
 static std::vector<BcoreBlockInfo> blocks(const Core& core) {
     std::vector<BcoreBlockInfo> out;
     core.forEachCompiledBlock([&](const BcoreBlockInfo& b) { out.push_back(b); });
@@ -426,6 +459,7 @@ int main() {
     check_sink_time_excluded();
     check_interrupt_counts();
     check_compile_metrics();
+    check_terminators();
     check_ir_dump();
     std::puts("bcore profile test passed");
 }

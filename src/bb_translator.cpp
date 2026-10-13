@@ -116,5 +116,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
                 fname, err_str.c_str());
     }
 
-    return {std::move(mod), std::move(ctx), visitor.fallthrough_pc()};
+    const char* exit_kind = visitor.is_terminated() ? visitor.exit_kind()
+                             : unlimited_ ? "packet-cap" : "step-budget";
+    return {std::move(mod), std::move(ctx), visitor.fallthrough_pc(), exit_kind};
 }

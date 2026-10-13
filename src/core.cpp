@@ -134,6 +134,7 @@ bool Core::run(uint32_t pc) {
                 }
             }
             metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
+            metrics.terminator = result.exit_kind;
         }
         profile_->want_object_shapes = want_metrics;
         profile_->capture_ns = 0;

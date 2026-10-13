@@ -14,6 +14,11 @@ struct BBTranslateResult {
     std::unique_ptr<llvm::Module> module;
     std::unique_ptr<llvm::LLVMContext> context;
     uint32_t fallthrough_pc;
+    // Why the block ends (BcoreCompileMetrics::terminator): the kind of its
+    // terminating instruction, or "packet-cap" (the per-block packet limit)
+    // or "step-budget" (limited mode). A conditional branch never ends a
+    // block: its taken path exits and decoding continues. A static string.
+    const char* exit_kind = "packet-cap";
 };
 
 class BBTranslator {

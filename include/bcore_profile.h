@@ -59,6 +59,12 @@ struct BcoreCompileMetrics {
     // and translate_ns_total; the copy falls inside the "materialize" stage.
     // A host timing the whole translation itself can subtract collect_ns.
     uint64_t collect_ns      = 0;
+    // What ends the block: the kind of its terminating instruction ("jump",
+    // "call", "return", "return-from-event", "jump-indirect",
+    // "call-indirect", "loop-setup", "raise", "exception", "halt",
+    // "illegal", "unimplemented"), or "packet-cap" / "step-budget" when it
+    // ends at the packet limit. A static string; never null.
+    const char* terminator   = "packet-cap";
 };
 
 // Typed event sink for the translation (cache-miss) path. All callbacks

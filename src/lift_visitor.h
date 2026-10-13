@@ -36,6 +36,9 @@ public:
 
     // Whether the current BB has been terminated (branch/jump)
     bool is_terminated() const { return terminated_; }
+    // What terminated it (a static string such as "jump" or "return"); only
+    // meaningful while is_terminated().
+    const char* exit_kind() const { return exit_kind_; }
 
     // The PC that should be used for fallthrough (set during translation)
     uint32_t fallthrough_pc() const { return fallthrough_pc_; }
@@ -571,6 +574,7 @@ private:
     llvm::Module* module_;
     Memory* mem_ = nullptr;
     bool terminated_ = false;
+    const char* exit_kind_ = "jump";
     bool unlimited_mode_ = true;
     bool in_parallel_ = false;
     int  parallel_slot_ = 0;      // 0=slot0/non-parallel, 1=slot1, 2=slot2
@@ -631,8 +635,9 @@ private:
     void emit_astat_decompose(llvm::Value* astat);
 
     // Set did_jump=true and pc=target
-    void emit_jump(llvm::Value* target);
-    void emit_jump_imm(uint32_t target);
+    void emit_jump(llvm::Value* target, const char* kind = "jump");
+    void emit_jump_imm(uint32_t target, const char* kind = "jump");
+    void terminate(const char* kind) { terminated_ = true; exit_kind_ = kind; }
 
     // Compute hwloop-adjusted return address for CALL instructions:
     // if current_pc == lb[i] and lc[i] > 1, return lt[i]; else return current_pc + insn_len.
