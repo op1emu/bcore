@@ -71,6 +71,7 @@ bool Core::run(uint32_t pc) {
         // Asked before timing starts: the sink's answer is no part of the
         // translation.
         const bool want_metrics = sink && sink->wantsCompileMetrics();
+        const bool want_ir = sink && sink->wantsIrDump(pc);
         if (sink) sink->onTranslateBegin(pc);
         const uint64_t t0 = bcore_profile::monotonic_ns();
         // Balances onTranslateBegin when anything below throws (a host
@@ -92,6 +93,18 @@ bool Core::run(uint32_t pc) {
         // nothing the sink does lands inside a stage or in translate_ns.
         const uint64_t lift_end = bcore_profile::monotonic_ns();
         uint64_t optimize_end = 0;
+        // Printed between stages and taken out of the elapsed time.
+        std::string lifted_ir, optimized_ir;
+        uint64_t dump_ns = 0;
+        auto print = [&](std::string& out) {
+            const uint64_t begin = bcore_profile::monotonic_ns();
+            llvm::raw_string_ostream stream(out);
+            result.module->print(stream, nullptr);
+            stream.flush();
+            dump_ns += bcore_profile::monotonic_ns() - begin;
+        };
+        if (want_ir) print(lifted_ir);
+        const uint64_t optimize_begin = bcore_profile::monotonic_ns();
 #endif
         // The IR pipeline, once per module and before any dump, so a dump shows
         // the IR that is compiled. It used to run only inside the dump branch:
@@ -101,6 +114,7 @@ bool Core::run(uint32_t pc) {
             jit_->optimize_module(*result.module);
 #if BCORE_ENABLE_PROFILE
             optimize_end = bcore_profile::monotonic_ns();
+            if (want_ir) print(optimized_ir);
 #endif
         }
         if (dump_ir_) {
@@ -134,13 +148,17 @@ bool Core::run(uint32_t pc) {
         const uint64_t t1 = bcore_profile::monotonic_ns();
         fail_on_unwind.armed = false;
         if (want_metrics) metrics.collect_ns += profile_->capture_ns;
-        const uint64_t elapsed = t1 - t0 - metrics.collect_ns;
+        const uint64_t elapsed = t1 - t0 - metrics.collect_ns - dump_ns;
         profile_->stats.translate_ns_total += elapsed;
         if (fn) profile_->stats.blocks_translated++;
         if (sink) {
             sink->onCompileStage(pc, "lift", t0, lift_end, true);
-            if (optimize_end) sink->onCompileStage(pc, "ir-optimize", lift_end, optimize_end, true);
+            if (optimize_end) sink->onCompileStage(pc, "ir-optimize", optimize_begin, optimize_end, true);
             sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
+            if (want_ir) {
+                sink->onIrDump(pc, "lifted", lifted_ir);
+                if (optimize_end) sink->onIrDump(pc, "optimized", optimized_ir);
+            }
             if (fn && want_metrics) {
                 auto [bytes, material] = profile_->takeObjectShape(pc);
                 metrics.object_bytes = bytes;

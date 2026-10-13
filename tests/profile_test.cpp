@@ -241,6 +241,45 @@ static uint64_t hash_of_block(const std::string& ir) {
 }
 #endif
 
+// IR text of chosen blocks only, lifted and (with the IR pipeline) optimized.
+struct IrSink : BcoreEventSink {
+    std::vector<std::pair<std::string, std::string>> dumps;  // (stage, text)
+    std::vector<std::string> stages;
+    uint64_t elapsed = 0;
+    bool wantsIrDump(uint32_t pc) const override { return pc == 0; }
+    void onIrDump(uint32_t, const char* stage, const std::string& ir) override { dumps.emplace_back(stage, ir); }
+    void onCompileStage(uint32_t, const char* stage, uint64_t b, uint64_t e, bool) override {
+        require(e >= b, "stage interval");
+        stages.push_back(stage);
+    }
+    void onTranslateEnd(uint32_t, uint64_t ns) override { elapsed = ns; }
+};
+
+static void check_ir_dump() {
+    for (int level : {0, 1}) {
+        Ram mem;
+        mem.write16(0, 0x0000);                    // NOP
+        mem.write16(2, 0x2000 | ((-1) & 0xfff));   // JUMP.S 0
+        mem.write16(0x100, 0x2000);                // JUMP.S 0x100: another block
+        CpuState cpu{};
+        Core core(&cpu, &mem);
+        require(core.init(level), "init");
+        IrSink sink;
+        core.setEventSink(&sink);
+        require(core.run(0) && core.run(0x100), "dispatch");
+        core.setEventSink(nullptr);
+#if BCORE_ENABLE_PROFILE
+        const size_t expected = level ? 2 : 1;
+        require(sink.dumps.size() == expected, "IR of the chosen block only");
+        require(sink.dumps[0].first == "lifted" && sink.dumps[0].second.find("bb_0x00000000") != std::string::npos,
+                "lifted IR names the block function");
+        if (level) require(sink.dumps[1].first == "optimized", "optimized IR follows");
+#else
+        require(sink.dumps.empty(), "disabled build dumps nothing");
+#endif
+    }
+}
+
 static void check_compile_metrics() {
 #if BCORE_ENABLE_PROFILE
     // The function's bytes and relocations are identical; only the table it
@@ -387,5 +426,6 @@ int main() {
     check_sink_time_excluded();
     check_interrupt_counts();
     check_compile_metrics();
+    check_ir_dump();
     std::puts("bcore profile test passed");
 }
