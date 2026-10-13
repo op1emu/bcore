@@ -59,6 +59,20 @@ struct BcoreCompileMetrics {
     // and translate_ns_total; the copy falls inside the "materialize" stage.
     // A host timing the whole translation itself can subtract collect_ns.
     uint64_t collect_ns      = 0;
+    // Where decoding ended the block: the kind of its terminating
+    // instruction ("jump", "call", "return", "return-from-event",
+    // "jump-indirect", "call-indirect", "loop-setup", "raise", "exception",
+    // "halt", "illegal", "unimplemented"), or "packet-cap" when it reached
+    // the 256-packet block limit, or "step-budget" when it reached a
+    // limited-mode budget of at most 256 packets. A static string; never
+    // null.
+    //
+    // It classifies the block as decoded, not each run: a run can leave
+    // earlier, through a taken conditional branch, a hardware loop, an
+    // exception or the step budget, and still counts under this label. Run
+    // counts summed by terminator are therefore a static classification of
+    // the executed blocks, not their runtime exit reasons.
+    const char* terminator   = "packet-cap";
 };
 
 // Typed event sink for the translation (cache-miss) path. All callbacks

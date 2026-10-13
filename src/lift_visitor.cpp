@@ -218,7 +218,7 @@ void LiftVisitor::emit_astat_decompose(Value* astat) {
     store_cpu_u32(offsetof(CpuState, astat_reserved), reserved);
 }
 
-void LiftVisitor::emit_jump(Value* target) {
+void LiftVisitor::emit_jump(Value* target, const char* kind) {
     // For runtime (non-constant) targets, check instruction-fetch alignment.
     // Blackfin requires all instruction fetches to be 16-bit aligned (even addresses).
     // An odd target raises an instruction alignment exception (EXCAUSE=0x23) via EVT3.
@@ -248,11 +248,11 @@ void LiftVisitor::emit_jump(Value* target) {
     // did_jump = true (bool at offset)
     auto* ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), ptr);
-    terminated_ = true;
+    terminate(kind);
 }
 
-void LiftVisitor::emit_jump_imm(uint32_t target) {
-    emit_jump(builder_.getInt32(target));
+void LiftVisitor::emit_jump_imm(uint32_t target, const char* kind) {
+    emit_jump(builder_.getInt32(target), kind);
 }
 
 // If the CALL instruction sits at the bottom of an active hardware loop
@@ -399,7 +399,7 @@ bool LiftVisitor::unimplemented(const char* name) {
     builder_.CreateStore(builder_.getInt32(1), ecode_ptr);
     auto* djptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), djptr);
-    terminated_ = true;
+    terminate("unimplemented");
     return true;
 }
 
@@ -971,7 +971,7 @@ bool LiftVisitor::decode_ProgCtrl_EXCPT(uint16_t imm) {
         {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(imm), mem_ptr_});
     // cec_exception sets cpu->pc = EVT3 and cpu->did_jump = true.
-    terminated_ = true;
+    terminate("exception");
     return true;
 }
 
@@ -979,7 +979,7 @@ bool LiftVisitor::decode_ProgCtrl_RTS() {
     if (parallel_slot_ > 0) return false;
 
     auto* rets = load_cpu_u32(offsetof(CpuState, rets), "rets");
-    emit_jump(rets);
+    emit_jump(rets, "return");
     return true;
 }
 
@@ -990,7 +990,7 @@ bool LiftVisitor::decode_pseudoDEBUG_ABORT(uint16_t g) {
     builder_.CreateStore(builder_.getInt32(1), ecode_ptr);
     auto* djptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), djptr);
-    terminated_ = true;
+    terminate("halt");
     return true;
 }
 
@@ -1000,7 +1000,7 @@ bool LiftVisitor::decode_UJUMP(uint16_t offset) {
 
     int32_t soff = signextend<12>(offset);
     uint32_t target = current_pc + soff * 2;
-    emit_jump_imm(target);
+    emit_jump_imm(target, "jump");
     return true;
 }
 
@@ -1020,7 +1020,7 @@ bool LiftVisitor::decode_BRCC_BRF(uint16_t offset) {
     builder_.CreateCondBr(cond, taken_bb, fallthru_bb);
 
     builder_.SetInsertPoint(taken_bb);
-    emit_jump_imm(target);
+    emit_jump_imm(target, "cond-jump");
     // Don't RetVoid yet — emit_epilog must run on this path too (counter decrement).
     pending_exits_.push_back({taken_bb});
     terminated_ = false;  // reset so fallthru path continues
@@ -1050,7 +1050,7 @@ bool LiftVisitor::decode_BRCC_BRT(uint16_t offset) {
     builder_.CreateCondBr(cond, taken_bb, fallthru_bb);
 
     builder_.SetInsertPoint(taken_bb);
-    emit_jump_imm(target);
+    emit_jump_imm(target, "cond-jump");
     // Don't RetVoid yet — emit_epilog must run on this path too (counter decrement).
     pending_exits_.push_back({taken_bb});
     terminated_ = false;  // reset so fallthru path continues
@@ -1469,7 +1469,7 @@ bool LiftVisitor::decode_CALLa_CALL(uint32_t addr) {
     int32_t soff = signextend<24>(addr);
     uint32_t target = current_pc + static_cast<uint32_t>(soff << 1);
     store_cpu_u32(offsetof(CpuState, rets), emit_hwloop_next_pc(4));
-    emit_jump_imm(target);
+    emit_jump_imm(target, "call");
     return true;
 }
 
@@ -1534,7 +1534,7 @@ bool LiftVisitor::decode_LoopSetup_LC0_P(uint32_t soffset, uint32_t reg, uint32_
     // Otherwise jump to the next instruction so the pre-loop prologue executes;
     // the translator will end the prologue BB just before lt_val.
     uint32_t next_insn = current_pc + 4; // lsetup is a 32-bit instruction
-    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn);
+    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn, "loop-setup");
     return true;
 }
 
@@ -1551,7 +1551,7 @@ bool LiftVisitor::decode_LoopSetup_LC1_P(uint32_t soffset, uint32_t reg, uint32_
     auto* lc = load_preg(reg, "lc_preg");
     store_cpu_u32(offsetof(CpuState, lc[1]), lc);
     uint32_t next_insn = current_pc + 4;
-    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn);
+    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn, "loop-setup");
     return true;
 }
 
@@ -1675,7 +1675,7 @@ bool LiftVisitor::decode_ProgCtrl_RTI() {
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
         {builder_.getInt8PtrTy()}, false);
     auto* newpc = call_extern("cec_return_rti", ft, {cpu_ptr_});
-    emit_jump(newpc);
+    emit_jump(newpc, "return-from-event");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_RTX() {
@@ -1685,7 +1685,7 @@ bool LiftVisitor::decode_ProgCtrl_RTX() {
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
         {builder_.getInt8PtrTy()}, false);
     auto* newpc = call_extern("cec_return_rtx", ft, {cpu_ptr_});
-    emit_jump(newpc);
+    emit_jump(newpc, "return-from-event");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_RTN() {
@@ -1695,7 +1695,7 @@ bool LiftVisitor::decode_ProgCtrl_RTN() {
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
         {builder_.getInt8PtrTy()}, false);
     auto* newpc = call_extern("cec_return_rtn", ft, {cpu_ptr_});
-    emit_jump(newpc);
+    emit_jump(newpc, "return-from-event");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_RTE() {
@@ -1705,7 +1705,7 @@ bool LiftVisitor::decode_ProgCtrl_RTE() {
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
         {builder_.getInt8PtrTy()}, false);
     auto* newpc = call_extern("cec_return_rte", ft, {cpu_ptr_});
-    emit_jump(newpc);
+    emit_jump(newpc, "return-from-event");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_IDLE() {
@@ -1744,7 +1744,7 @@ bool LiftVisitor::decode_ProgCtrl_JUMP_PREG(uint16_t p) {
     if (parallel_slot_ > 0) return false;
 
     auto* target = load_preg(p, "jump_target");
-    emit_jump(target);
+    emit_jump(target, "jump-indirect");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_CALL_PREG(uint16_t p) {
@@ -1752,7 +1752,7 @@ bool LiftVisitor::decode_ProgCtrl_CALL_PREG(uint16_t p) {
 
     store_cpu_u32(offsetof(CpuState, rets), emit_hwloop_next_pc(2));
     auto* target = load_preg(p, "call_target");
-    emit_jump(target);
+    emit_jump(target, "call-indirect");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_CALL_PC_PREG(uint16_t p) {
@@ -1763,7 +1763,7 @@ bool LiftVisitor::decode_ProgCtrl_CALL_PC_PREG(uint16_t p) {
     auto* preg   = load_preg(p, "preg");
     auto* pc     = builder_.getInt32(current_pc);
     auto* target = builder_.CreateAdd(pc, preg, "call_target");
-    emit_jump(target);
+    emit_jump(target, "call-indirect");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_JUMP_PC_PREG(uint16_t p) {
@@ -1772,7 +1772,7 @@ bool LiftVisitor::decode_ProgCtrl_JUMP_PC_PREG(uint16_t p) {
     auto* preg   = load_preg(p, "preg");
     auto* pc     = builder_.getInt32(current_pc);
     auto* target = builder_.CreateAdd(pc, preg, "jump_target");
-    emit_jump(target);
+    emit_jump(target, "jump-indirect");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_RAISE(uint16_t imm) {
@@ -1783,7 +1783,7 @@ bool LiftVisitor::decode_ProgCtrl_RAISE(uint16_t imm) {
     call_extern("cec_raise", ft, {cpu_ptr_, builder_.getInt32(imm)});
     check_cec_pending_ = true;
     // Terminate the BB: cec_raise may have redirected cpu->pc
-    terminated_ = true;
+    terminate("raise");
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_TESTSET(uint16_t p) {
@@ -3565,7 +3565,7 @@ bool LiftVisitor::decode_pseudoDEBUG_HLT(uint16_t) {
     builder_.CreateStore(builder_.getInt32(0), ecode_ptr);
     auto* djptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), djptr);
-    terminated_ = true;
+    terminate("halt");
     return true;
 }
 // DBGHALT/DBGCMPLX/DBG bare: also unhandled in reference sim → NOP
@@ -3591,7 +3591,7 @@ bool LiftVisitor::decode_LoopSetup_LC0(uint32_t soffset, uint32_t reg, uint32_t 
     store_cpu_u32(offsetof(CpuState, lt[0]), builder_.getInt32(lt_val & ~1u));
     store_cpu_u32(offsetof(CpuState, lb[0]), builder_.getInt32(lb_val));
     uint32_t next_insn = current_pc + 4;
-    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn);
+    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn, "loop-setup");
     return true;
 }
 bool LiftVisitor::decode_LoopSetup_LC1(uint32_t soffset, uint32_t reg, uint32_t eoffset) {
@@ -3603,7 +3603,7 @@ bool LiftVisitor::decode_LoopSetup_LC1(uint32_t soffset, uint32_t reg, uint32_t 
     store_cpu_u32(offsetof(CpuState, lt[1]), builder_.getInt32(lt_val & ~1u));
     store_cpu_u32(offsetof(CpuState, lb[1]), builder_.getInt32(lb_val));
     uint32_t next_insn = current_pc + 4;
-    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn);
+    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn, "loop-setup");
     return true;
 }
 // rop=3: set LT/LB and LC = Preg>>1
@@ -3619,7 +3619,7 @@ bool LiftVisitor::decode_LoopSetup_LC0_half(uint32_t soffset, uint32_t reg, uint
     store_cpu_u32(offsetof(CpuState, lc[0]),
                   builder_.CreateLShr(lc, builder_.getInt32(1), "lc_half"));
     uint32_t next_insn = current_pc + 4;
-    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn);
+    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn, "loop-setup");
     return true;
 }
 bool LiftVisitor::decode_LoopSetup_LC1_half(uint32_t soffset, uint32_t reg, uint32_t eoffset) {
@@ -3634,7 +3634,7 @@ bool LiftVisitor::decode_LoopSetup_LC1_half(uint32_t soffset, uint32_t reg, uint
     store_cpu_u32(offsetof(CpuState, lc[1]),
                   builder_.CreateLShr(lc, builder_.getInt32(1), "lc_half"));
     uint32_t next_insn = current_pc + 4;
-    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn);
+    emit_jump_imm((lt_val == next_insn) ? lt_val : next_insn, "loop-setup");
     return true;
 }
 
@@ -3644,7 +3644,7 @@ bool LiftVisitor::decode_CALLa_JUMP(uint32_t addr) {
     // JUMP.L: PC = PC + sext24(addr)*2  (no RETS update)
     int32_t soff = signextend<24>(addr);
     uint32_t target = current_pc + static_cast<uint32_t>(soff << 1);
-    emit_jump_imm(target);
+    emit_jump_imm(target, "jump");
     return true;
 }
 
@@ -7887,7 +7887,7 @@ bool LiftVisitor::decode_unknown_16(uint16_t insn) {
     auto* ft = FunctionType::get(builder_.getVoidTy(),
         {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(exc), mem_ptr_});
-    terminated_ = true;
+    terminate("illegal");
     return true;
 }
 
@@ -7897,6 +7897,6 @@ bool LiftVisitor::decode_unknown_32(uint32_t insn) {
     auto* ft = FunctionType::get(builder_.getVoidTy(),
         {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(exc), mem_ptr_});
-    terminated_ = true;
+    terminate("illegal");
     return true;
 }
