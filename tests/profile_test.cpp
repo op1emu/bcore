@@ -331,9 +331,16 @@ static void check_terminators() {
     // A conditional branch never ends one: IF CC JUMP over a NOP, then RTS.
     require(std::strcmp(terminator_of({0x1801, nop, nop, rts}), "return") == 0,
             "a conditional branch leaves the block open");
-    // Limited mode stops after the step budget.
+    // Limited mode stops after the step budget...
     require(std::strcmp(terminator_of({nop, nop, nop, nop, rts}, 2), "step-budget") == 0,
             "the step budget ends a limited block");
+    // ...unless the budget is above the 256-packet block limit, which then
+    // ends the block first.
+    const std::vector<uint16_t> nops(400, nop);
+    require(std::strcmp(terminator_of(nops), "packet-cap") == 0, "256 packets end an unlimited block");
+    require(std::strcmp(terminator_of(nops, 256), "step-budget") == 0, "a budget of 256 is the budget");
+    require(std::strcmp(terminator_of(nops, 257), "packet-cap") == 0, "a budget of 257 is cut to the cap");
+    require(std::strcmp(terminator_of(nops, 1000), "packet-cap") == 0, "so is a budget of 1000");
 #endif
 }
 

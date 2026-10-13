@@ -185,9 +185,13 @@ no zero-overhead claim is made.
   translation time).
 - A sink whose `wantsCompileMetrics()` is true gets `onCompileMetrics` for
   every translation: the IR and machine-code size, a hash of the code, and
-  the block's `terminator`, the kind of instruction that ends it (`jump`,
-  `call`, `return`, `return-from-event`, `loop-setup`, ...) or `packet-cap`
-  when it ends at the packet limit. A conditional branch never ends a block.
+  the block's `terminator`, where decoding ended it: the kind of its last
+  instruction (`jump`, `call`, `return`, `return-from-event`, `loop-setup`,
+  ...), `packet-cap` at the 256-packet limit, or `step-budget` at a smaller
+  limited-mode budget. A conditional branch never ends a block. It is a
+  static property of the block: a run can leave earlier (a taken branch, a
+  hardware loop, an exception), so run counts summed by terminator classify
+  the blocks that ran, not why each run returned.
 - `BCORE_PERF_JIT_EVENTS=ON` (requires `BCORE_ENABLE_PROFILE=ON`) builds LLVM
   jitdump support. It is the one exception to "no I/O": once enabled, LLVM's
   listener writes `jit-<pid>.dump` under `$JITDUMPDIR/.debug/jit/` (or
