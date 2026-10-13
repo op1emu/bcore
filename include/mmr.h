@@ -31,7 +31,7 @@ inline bool evt_is_addr(uint32_t addr) {
 
 static constexpr uint32_t VEC_UNDEF_I           = 0x21u;
 static constexpr uint32_t VEC_ILGAL_I           = 0x22u;
-static constexpr uint32_t VEC_MISALIGNI         = 0x23u;
+static constexpr uint32_t VEC_MISALIGNI         = 0x2Au;
 static constexpr uint32_t VEC_ILL_RES           = 0x2Eu;
 static constexpr uint32_t VEC_DCPLB_MISS        = 0x26u;
 static constexpr uint32_t VEC_UNCOV             = 0x25u;

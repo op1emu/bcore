@@ -627,6 +627,7 @@ private:
     CmpFlags emit_cc_cmp(llvm::Value* src, llvm::Value* dst);
 
     // Memory access helpers — build FunctionType + call_extern in one call
+    void emit_data_alignment(llvm::Value* addr, unsigned width, bool write);
     llvm::Value* emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm::Value* addr);
     void emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value* val);
 

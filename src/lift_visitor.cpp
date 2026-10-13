@@ -221,7 +221,7 @@ void LiftVisitor::emit_astat_decompose(Value* astat) {
 void LiftVisitor::emit_jump(Value* target, const char* kind) {
     // For runtime (non-constant) targets, check instruction-fetch alignment.
     // Blackfin requires all instruction fetches to be 16-bit aligned (even addresses).
-    // An odd target raises an instruction alignment exception (EXCAUSE=0x23) via EVT3.
+    // An odd target raises an instruction alignment exception (EXCAUSE=0x2A) via EVT3.
     if (!llvm::isa<llvm::ConstantInt>(target)) {
         auto& ctx  = builder_.getContext();
         auto* fn   = builder_.GetInsertBlock()->getParent();
@@ -236,6 +236,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
         builder_.SetInsertPoint(bb_misalign);
         auto* ft_exc = llvm::FunctionType::get(builder_.getVoidTy(),
             {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
+        builder_.CreateStore(builder_.getInt32(current_pc), cpu_field_ptr(offsetof(CpuState, pc), builder_.getInt32Ty()));
         call_extern("cec_exception", ft_exc,
             {cpu_ptr_, builder_.getInt32(VEC_MISALIGNI), mem_ptr_});
         builder_.CreateRetVoid();
@@ -825,7 +826,28 @@ LiftVisitor::CmpFlags LiftVisitor::emit_cc_cmp(Value* src, Value* dst) {
     return {az, an, ac0};
 }
 
+void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool write) {
+    if (width <= 1) return;
+    auto* function = builder_.GetInsertBlock()->getParent();
+    auto* fault = llvm::BasicBlock::Create(builder_.getContext(), "data_misaligned", function);
+    auto* aligned = llvm::BasicBlock::Create(builder_.getContext(), "data_aligned", function);
+    auto* bad = builder_.CreateICmpNE(
+        builder_.CreateAnd(addr, builder_.getInt32(width - 1)), builder_.getInt32(0));
+    llvm::MDBuilder metadata(builder_.getContext());
+    builder_.CreateCondBr(bad, fault, aligned, metadata.createBranchWeights(1, 1000));
+    builder_.SetInsertPoint(fault);
+    const uint32_t packet_pc = current_pc - (parallel_slot_ == 1 ? 4 : parallel_slot_ == 2 ? 6 : 0);
+    auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
+        {builder_.getInt8PtrTy(), builder_.getInt8PtrTy(), builder_.getInt32Ty(),
+         builder_.getInt32Ty(), builder_.getInt32Ty()}, false);
+    call_extern("cec_data_alignment", ft, {cpu_ptr_, mem_ptr_, builder_.getInt32(packet_pc),
+        addr, builder_.getInt32((write ? 1u << 16 : 0) | (parallel_slot_ == 2 ? 1u << 18 : 0))});
+    builder_.CreateRetVoid();
+    builder_.SetInsertPoint(aligned);
+}
+
 llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm::Value* addr) {
+    emit_data_alignment(addr, ret_ty->getIntegerBitWidth() / 8, false);
     if (fastmem_) {
         auto* i64_ty = builder_.getInt64Ty();
         auto* base_c = ConstantInt::get(i64_ty, fast_base_value_);
@@ -886,6 +908,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
 }
 
 void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value* val) {
+    emit_data_alignment(addr, val->getType()->getIntegerBitWidth() / 8, true);
     check_cec_pending_ = true; // mem_write may trigger CEC pending interrupt, so check after write.
     if (fastmem_) {
         // Tier 1: fastmem — direct store, no bounds check, no notify
@@ -1365,7 +1388,6 @@ bool LiftVisitor::decode_PushReg(uint16_t g, uint16_t r) {
         {builder_.getInt8PtrTy()}, false);
     auto* sp = load_preg(6, "sp"); // SP = P6 = dpregs[14]
     auto* new_sp = builder_.CreateSub(sp, builder_.getInt32(4), "sp_dec");
-    store_preg(6, new_sp);
     Value* push_val;
     if (g == 4 && r == 6) {
         push_val = emit_astat_compose();
@@ -1373,6 +1395,7 @@ bool LiftVisitor::decode_PushReg(uint16_t g, uint16_t r) {
         push_val = load_cpu_u32(allreg_offset(g, r), "push_val");
     }
     emit_mem_write("mem_write32", new_sp, push_val);
+    store_preg(6, new_sp);
     if (g == 7) {
         if (r == 3) {
             call_extern("cec_push_reti", ft_sup, {cpu_ptr_});

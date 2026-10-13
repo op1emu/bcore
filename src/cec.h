@@ -32,6 +32,7 @@ inline int cec_current_ivg_val(uint32_t ipend) {
 }
 
 extern "C" {
+    void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc, uint32_t addr, uint32_t flags);
     // EXCPT imm: set SEQSTAT.EXCAUSE, RETX, dispatch to EVT3 handler.
     // mem: pointer to memory object, used only for the EXCPT 0 libgloss syscall
     // fallback (when no EVT3 handler is installed). Pass nullptr when not needed.
