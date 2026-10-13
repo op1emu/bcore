@@ -25,6 +25,7 @@
 // race.
 
 #include <cstdint>
+#include <string>
 
 // One compiled guest basic block as loaded in host memory.
 struct BcoreBlockInfo {
@@ -107,6 +108,18 @@ public:
     // copying the code cost a pass over each: that time (collect_ns) is
     // removed from the elapsed time, and the hash is computed after timing.
     virtual bool wantsCompileMetrics() const { return false; }
+
+    // The LLVM IR of chosen blocks, as text: "lifted" straight from the
+    // decoder, then "optimized" after the IR pipeline when opt_level != 0
+    // (at opt_level 0 the lifted IR is what is compiled). Asked before the
+    // translation is timed; the text is printed between stages, its time is
+    // taken out of the elapsed time, and the callbacks fire after the
+    // stages, before onCompileMetrics. Only for blocks the sink asks for:
+    // printing a module costs about as much as lifting it.
+    virtual bool wantsIrDump(uint32_t guest_pc) const { (void)guest_pc; return false; }
+    virtual void onIrDump(uint32_t guest_pc, const char* stage, const std::string& ir) {
+        (void)guest_pc; (void)stage; (void)ir;
+    }
     virtual void onCompileMetrics(uint32_t guest_pc, const BcoreCompileMetrics& metrics) {
         (void)guest_pc; (void)metrics;
     }
