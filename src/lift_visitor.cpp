@@ -826,6 +826,14 @@ LiftVisitor::CmpFlags LiftVisitor::emit_cc_cmp(Value* src, Value* dst) {
     return {az, an, ac0};
 }
 
+// Raises EXCAUSE 0x24 before a misaligned 16/32-bit access. The faulting access and its register and
+// post-increment updates are skipped. Known limitations:
+// - The rest of a parallel packet is not rolled back: a fault in a later slot can leave a store from an
+//   earlier slot committed.
+// - dis_algn_expt_ is only reset when the next parallel packet begins, so DISALGNEXCPT suppression can
+//   extend to later loads in the same compiled block.
+// - When several exception conditions apply to one instruction, the one raised may differ from the
+//   hardware's priority order.
 void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool write) {
     if (width <= 1) return;
     auto* function = builder_.GetInsertBlock()->getParent();
