@@ -52,6 +52,7 @@ jobs:
             -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
             -DCMAKE_BUILD_TYPE=Release \
             -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON \
             -DBCORE_PERF_JIT_EVENTS=ON
 
       - name: Build
@@ -59,6 +60,9 @@ jobs:
 
       - name: Observability API test
         run: ctest --test-dir build -R bcore-profile-test --output-on-failure
+
+      - name: Data alignment test
+        run: ctest --test-dir build -R bcore-data-alignment-test --output-on-failure
 
       # The same test with the instrumentation compiled out.
       - name: Observability API test (BCORE_ENABLE_PROFILE=OFF)

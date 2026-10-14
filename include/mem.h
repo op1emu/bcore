@@ -17,6 +17,10 @@ public:
     virtual void write16(uint32_t addr, uint16_t val) = 0;
     virtual void write32(uint32_t addr, uint32_t val) = 0;
 
+    // Host records fault MMRs before the core enters EVT3. No CPLB model is implied.
+    virtual void data_alignment_fault(uint32_t pc, uint32_t addr, uint32_t status) {
+        (void)pc; (void)addr; (void)status;
+    }
     virtual const uint8_t* raw() const = 0;
 
     // Host address corresponding to emulator address 0x0.

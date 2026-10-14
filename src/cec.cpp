@@ -518,3 +518,12 @@ extern "C" __attribute__((hot)) bool user_mmr_check(CpuState* cpu, uint32_t addr
     }
     return false;
 }
+
+// BF5xx DCPLB fault status: write bit 16, supervisor bit 17, DAG1 bit 18.
+extern "C" void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc,
+                                    uint32_t addr, uint32_t flags) {
+    const uint32_t status = flags | (cec_is_user_mode() ? 0u : (1u << 17));
+    cpu->pc = pc;
+    mem->data_alignment_fault(pc, addr, status);
+    cec_exception(cpu, 0x24u, mem);
+}
