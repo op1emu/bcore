@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 static void require(bool ok, const char* why) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -21,6 +22,13 @@ public:
     uintptr_t fast_base() const override {return reinterpret_cast<uintptr_t>(bytes.data());}
     bool is_fastmem() const override {return mode==2;}
     uint32_t rawmem_limit() const override {return mode==1 ? bytes.size() : 0;}
+    std::vector<uint8_t*> pages;
+    uint8_t* const* page_table() const override {
+        if(mode!=3) return nullptr;
+        auto& table=const_cast<std::vector<uint8_t*>&>(pages);
+        if(table.empty()) {table.assign(kPageTableEntries,nullptr);table[0]=const_cast<uint8_t*>(bytes.data());}
+        return table.data();
+    }
     uint8_t read8(uint32_t a) const override {return bytes.at(a);}
     uint16_t read16(uint32_t a) const override {uint16_t v;memcpy(&v,&bytes.at(a),2);return v;}
     uint32_t read32(uint32_t a) const override {uint32_t v;memcpy(&v,&bytes.at(a),4);return v;}
@@ -33,7 +41,7 @@ public:
 };
 int main() {
     int count=0;
-    for(int mode=0;mode<3;++mode) for(int opt:{0,2}) {
+    for(int mode=0;mode<4;++mode) for(int opt:{0,2}) {
         for(uint16_t op:{0x9000,0x9200,0x9400,0x9600,0x9800,0x9a00}) for(unsigned offset:{0u,1u,2u,3u}) {
             Ram mem(mode);CpuState cpu{}; Core core(&cpu,&mem);require(core.init(opt),"init");
             cec_init();evt_init();evt_write(EVT_BASE+12,0x300);
@@ -107,5 +115,5 @@ int main() {
         require(mem.faults==0 && cpu.dpregs[0]==0x12345678 && cpu.iregs[0]==0x205,"suppressed load aligns down");
         ++count;
     }
-    printf("PASS: %d data alignment cases (callback/raw/fastmem, O0/O2)\n",count);
+    printf("PASS: %d data alignment cases (callback/raw/fastmem/page table, O0/O2)\n",count);
 }

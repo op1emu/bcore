@@ -584,6 +584,8 @@ private:
     bool check_cec_pending_ = false;  // whether to check cec_pending flag at end of block and exit if set
     uint64_t fast_base_value_ = 0;
     uint32_t rawmem_limit_ = 0;   // non-zero: inline mem reads for addr < rawmem_limit_
+    bool page_table_ = false;     // inline access through CpuState::page_table (Memory::page_table())
+    llvm::Value* page_table_value_ = nullptr;  // CpuState::page_table, loaded once in the entry block
     std::map<size_t, llvm::Value*> shadow_writes_;
     uint32_t fallthrough_pc_ = 0;
     std::vector<PendingExit> pending_exits_;
@@ -628,6 +630,7 @@ private:
 
     // Memory access helpers — build FunctionType + call_extern in one call
     void emit_data_alignment(llvm::Value* addr, unsigned width, bool write);
+    llvm::Value* emit_page_lookup(llvm::Value* addr);
     llvm::Value* emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm::Value* addr);
     void emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value* val);
 

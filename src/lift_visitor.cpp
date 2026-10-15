@@ -48,7 +48,8 @@ LiftVisitor::LiftVisitor(IRBuilder<>& builder, Value* cpu_ptr, Value* mem_ptr,
                          bool fastmem, uint64_t fast_base, uint32_t rawmem_limit)
     : builder_(builder), cpu_ptr_(cpu_ptr), mem_ptr_(mem_ptr), module_(module),
       mem_(mem), unlimited_mode_(unlimited), fastmem_(fastmem), fast_base_value_(fast_base),
-      rawmem_limit_(rawmem_limit) {
+      rawmem_limit_(rawmem_limit),
+      page_table_(!fastmem && rawmem_limit == 0 && mem && mem->page_table() != nullptr) {
 }
 
 uint16_t LiftVisitor::iftech(uint32_t addr) {
@@ -854,6 +855,24 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     builder_.SetInsertPoint(aligned);
 }
 
+// The host address of the page holding addr, or null when the access must
+// call the host (see Memory::page_table()). The table pointer is loaded once,
+// at the top of the entry block, which dominates every access.
+llvm::Value* LiftVisitor::emit_page_lookup(llvm::Value* addr) {
+    auto* ptr_ty = builder_.getInt8PtrTy();
+    if (!page_table_value_) {
+        auto& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
+        llvm::IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
+        auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), cpu_ptr_,
+                                         at_entry.getInt32(offsetof(CpuState, page_table)));
+        page_table_value_ = at_entry.CreateLoad(ptr_ty, field, "page_table");
+    }
+    auto* index = builder_.CreateZExt(builder_.CreateLShr(addr, Memory::kPageBits),
+                                      builder_.getInt64Ty(), "page_index");
+    auto* slot = builder_.CreateGEP(ptr_ty, page_table_value_, index, "page_slot");
+    return builder_.CreateLoad(ptr_ty, slot, "page");
+}
+
 llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm::Value* addr) {
     emit_data_alignment(addr, ret_ty->getIntegerBitWidth() / 8, false);
     if (fastmem_) {
@@ -898,6 +917,42 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
             {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
         auto* slow_result = call_extern(fn, ft, {mem_ptr_, addr});
         emit_did_jump_exit(true);  // fault may have set did_jump
+        auto* slow_bb = builder_.GetInsertBlock();
+        builder_.CreateBr(bb_done);
+
+        builder_.SetInsertPoint(bb_done);
+        auto* phi = builder_.CreatePHI(ret_ty, 2, "mem_val");
+        phi->addIncoming(fast_result, fast_bb);
+        phi->addIncoming(slow_result, slow_bb);
+        return phi;
+    }
+    // Page table: a direct load from a mapped RAM page, a call otherwise. The
+    // access is aligned (checked above), so it lies within its page.
+    if (page_table_) {
+        auto& ctx = builder_.getContext();
+        auto* fn_ = builder_.GetInsertBlock()->getParent();
+        auto* bb_fast = llvm::BasicBlock::Create(ctx, "page_fast", fn_);
+        auto* bb_slow = llvm::BasicBlock::Create(ctx, "page_slow", fn_);
+        auto* bb_done = llvm::BasicBlock::Create(ctx, "page_done", fn_);
+        auto* page = emit_page_lookup(addr);
+        llvm::MDBuilder mdb(ctx);
+        builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
+                              mdb.createBranchWeights(1000, 1));
+
+        builder_.SetInsertPoint(bb_fast);
+        auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
+                                           builder_.getInt64Ty(), "page_offset");
+        auto* ptr = builder_.CreateGEP(builder_.getInt8Ty(), page, offset);
+        auto* fast_result = builder_.CreateAlignedLoad(
+            ret_ty, ptr, llvm::Align(ret_ty->getIntegerBitWidth() / 8), "page_val");
+        auto* fast_bb = builder_.GetInsertBlock();
+        builder_.CreateBr(bb_done);
+
+        builder_.SetInsertPoint(bb_slow);
+        auto* ft = llvm::FunctionType::get(ret_ty,
+            {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
+        auto* slow_result = call_extern(fn, ft, {mem_ptr_, addr});
+        emit_did_jump_exit(true);
         auto* slow_bb = builder_.GetInsertBlock();
         builder_.CreateBr(bb_done);
 
@@ -960,6 +1015,35 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
             {builder_.getInt8PtrTy(), builder_.getInt32Ty(), val_ty}, false);
         call_extern(fn, ft, {mem_ptr_, addr, val});
         emit_did_jump_exit(true);  // MMR write may have raised an exception
+        builder_.CreateBr(bb_done);
+
+        builder_.SetInsertPoint(bb_done);
+        return;
+    }
+    // Page table: as in emit_mem_read.
+    if (page_table_) {
+        auto& ctx = builder_.getContext();
+        auto* fn_ = builder_.GetInsertBlock()->getParent();
+        auto* bb_fast = llvm::BasicBlock::Create(ctx, "page_wr_fast", fn_);
+        auto* bb_slow = llvm::BasicBlock::Create(ctx, "page_wr_slow", fn_);
+        auto* bb_done = llvm::BasicBlock::Create(ctx, "page_wr_done", fn_);
+        auto* page = emit_page_lookup(addr);
+        llvm::MDBuilder mdb(ctx);
+        builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
+                              mdb.createBranchWeights(1000, 1));
+
+        builder_.SetInsertPoint(bb_fast);
+        auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
+                                           builder_.getInt64Ty(), "page_offset");
+        auto* ptr = builder_.CreateGEP(builder_.getInt8Ty(), page, offset);
+        builder_.CreateAlignedStore(val, ptr, llvm::Align(val->getType()->getIntegerBitWidth() / 8));
+        builder_.CreateBr(bb_done);
+
+        builder_.SetInsertPoint(bb_slow);
+        auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
+            {builder_.getInt8PtrTy(), builder_.getInt32Ty(), val->getType()}, false);
+        call_extern(fn, ft, {mem_ptr_, addr, val});
+        emit_did_jump_exit(true);
         builder_.CreateBr(bb_done);
 
         builder_.SetInsertPoint(bb_done);

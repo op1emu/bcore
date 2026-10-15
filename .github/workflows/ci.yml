@@ -64,6 +64,9 @@ jobs:
       - name: Data alignment test
         run: ctest --test-dir build -R bcore-data-alignment-test --output-on-failure
 
+      - name: Page table test
+        run: ctest --test-dir build -R bcore-page-table-test --output-on-failure
+
       # The same test with the instrumentation compiled out.
       - name: Observability API test (BCORE_ENABLE_PROFILE=OFF)
         run: |
@@ -181,6 +184,17 @@ jobs:
           python3 tests/run_emu_test.py \
             --no-fail-fast \
             -O 1 -t 60 \
+            --ignore-list .github/emu-ignore.txt
+
+      # The O1 suite again with every whole RAM page in Memory::page_table(),
+      # so loads and stores take the JIT's inline page-table path (op1emu's)
+      # and only partial pages, MMRs and faults call FlatMemory.
+      - name: Run emulator tests (-O 1 --page-table)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/run_emu_test.py \
+            --no-fail-fast \
+            -O 1 -t 60 --page-table \
             --ignore-list .github/emu-ignore.txt
 
       # CpuState::packets against single-stepping (--max-steps 1), where every

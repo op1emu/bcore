@@ -36,6 +36,25 @@ public:
     // value can be accessed directly via fast_base() + addr without an extern call.
     // Returns 0 in fastmem mode (not needed there).
     virtual uint32_t rawmem_limit() const { return is_fastmem() ? 0u : (base() + size()); }
+
+    // Guest page table for inline access when neither fastmem nor rawmem
+    // applies: kPageTableEntries entries, one per kPageSize-byte guest page,
+    // each the host address of that page's first byte, or null when the page
+    // must go through read*/write* (MMRs, devices with side effects, unmapped
+    // space). An aligned 16- or 32-bit access never crosses a page, and every
+    // access the JIT makes inline is aligned (a misaligned one raises
+    // EXCAUSE 0x24 first). Return null to make every access a call.
+    //
+    // The table's address must stay the same for the Memory's lifetime; its
+    // entries may change only while no compiled block is running, since the
+    // JIT reads an entry once per access. The JIT samples this when it
+    // translates a block: a block translated while it returns null calls
+    // read*/write* for every access, so a host can turn inline access off
+    // (to count every access, say) before translating.
+    static constexpr unsigned kPageBits = 12;
+    static constexpr uint32_t kPageSize = 1u << kPageBits;
+    static constexpr uint32_t kPageTableEntries = 1u << (32 - kPageBits);
+    virtual uint8_t* const* page_table() const { return nullptr; }
 };
 
 // extern "C" wrappers for JIT-generated code
