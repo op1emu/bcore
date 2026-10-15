@@ -50,6 +50,8 @@ LiftVisitor::LiftVisitor(IRBuilder<>& builder, Value* cpu_ptr, Value* mem_ptr,
       mem_(mem), unlimited_mode_(unlimited), fastmem_(fastmem), fast_base_value_(fast_base),
       rawmem_limit_(rawmem_limit),
       page_table_(!fastmem && rawmem_limit == 0 && mem && mem->page_table() != nullptr) {
+    // Core::run clears did_jump before it calls the block.
+    if (auto* entry = builder_.GetInsertBlock()) reg_cache_[entry][kDidJumpClear] = builder_.getInt8(0);
 }
 
 uint16_t LiftVisitor::iftech(uint32_t addr) {
@@ -111,25 +113,42 @@ void LiftVisitor::emit_cpu_store(size_t offset, Value* val) {
         reg_cache_[block].erase(offset);  // a store before the block's end
 }
 
-// What a helper may change in the cached fields. The memory callbacks either
-// leave CpuState alone or raise an exception, which sets did_jump: every one
-// is followed at once by a did_jump exit, so on the path that continues they
-// changed nothing (the Memory contract in mem.h). bfin_hwloop_step writes
-// PC, did_jump and the loop counters. Any other helper may change anything.
+// What a helper may change in the cached fields. The memory callbacks and
+// cec_check_pending either leave them alone or set did_jump (an exception, an
+// interrupt taken): every call is followed at once by a did_jump exit, so on
+// the path that continues they changed nothing (for the callbacks, that is the
+// Memory contract in mem.h). bfin_hwloop_step writes PC, did_jump and the loop
+// counters. Any other helper may change anything.
 void LiftVisitor::reg_cache_after_call(const char* callee) {
     auto* block = builder_.GetInsertBlock();
     if (!block) return;
     auto* cache = &reg_cache_[block];  // a call before the block's end acts on it too
     const std::string name = callee;
-    if (name.rfind("mem_read", 0) == 0 || name.rfind("mem_write", 0) == 0 ||
-        name == "bfin_putchar" || name == "cec_is_user_mode")
+    if (name == "bfin_putchar" || name == "cec_is_user_mode")
         return;
+    if (name.rfind("mem_read", 0) == 0 || name.rfind("mem_write", 0) == 0 ||
+        name == "cec_check_pending") {
+        cache->erase(kDidJumpClear);
+        return;
+    }
     if (name == "bfin_hwloop_step") {
         cache->erase(offsetof(CpuState, lc[0]));
         cache->erase(offsetof(CpuState, lc[1]));
+        cache->erase(kDidJumpClear);
         return;
     }
     cache->clear();
+}
+
+void LiftVisitor::emit_set_did_jump() {
+    auto* ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
+    builder_.CreateStore(builder_.getInt8(1), ptr);
+    if (auto* block = builder_.GetInsertBlock()) reg_cache_[block].erase(kDidJumpClear);
+}
+
+bool LiftVisitor::did_jump_clear() {
+    auto* cache = reg_cache_here();
+    return cache && cache->count(kDidJumpClear);
 }
 
 Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
@@ -326,8 +345,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
 
     store_cpu_u32(offsetof(CpuState, pc), target);
     // did_jump = true (bool at offset)
-    auto* ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
-    builder_.CreateStore(builder_.getInt8(1), ptr);
+    emit_set_did_jump();
     terminate(kind);
 }
 
@@ -366,6 +384,8 @@ void LiftVisitor::emit_packet_index(uint32_t index) {
 void LiftVisitor::emit_did_jump_exit(bool force) {
     if (terminated_ && !force) return;
     if (!check_did_jump_ && !force) return;
+    // Nothing since the block's entry or the last check could have set it.
+    if (did_jump_clear()) return;
 
     auto& ctx = builder_.getContext();
     auto* fn = builder_.GetInsertBlock()->getParent();
@@ -386,6 +406,7 @@ void LiftVisitor::emit_did_jump_exit(bool force) {
 
     builder_.SetInsertPoint(bb_cont);
     carry_reg_cache(from, bb_cont);
+    reg_cache_[bb_cont][kDidJumpClear] = builder_.getInt8(0);
 }
 
 void LiftVisitor::emit_step_check(uint32_t post_insn_pc) {
@@ -418,8 +439,7 @@ void LiftVisitor::emit_step_check(uint32_t post_insn_pc) {
     // bb_exit: store post-instruction PC and set did_jump=true so host uses cpu.pc directly
     builder_.SetInsertPoint(bb_exit);
     store_cpu_u32(offsetof(CpuState, pc), builder_.getInt32(post_insn_pc));
-    auto* dj_ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
-    builder_.CreateStore(builder_.getInt8(1), dj_ptr);
+    emit_set_did_jump();
     builder_.CreateRetVoid();
 
     // Continue here for next instruction (bb_check writes only steps_remaining).
@@ -428,6 +448,10 @@ void LiftVisitor::emit_step_check(uint32_t post_insn_pc) {
 }
 
 void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
+    if (did_jump_clear()) {
+        emit_epilog_clear(insn_pc, insn_len);
+        return;
+    }
     // Delegate the full hw-loop probe to an extern "C" helper to keep IR compact.
     // bfin_hwloop_step():
     //   Phase A (when !did_jump): redirects cpu->pc via hw-loop back-edge rules.
@@ -442,6 +466,65 @@ void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
         auto* ft_check = llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getInt8PtrTy()}, false);
         call_extern("cec_check_pending", ft_check, {cpu_ptr_});
         check_cec_pending_ = false;
+    }
+}
+
+// The epilog on a path where did_jump is known clear, without a call unless
+// one has work to do. bfin_hwloop_step acts only at a loop bottom
+// (lb[i] == insn_pc); anywhere else it sets PC to the next instruction, which
+// this does inline. cec_check_pending acts only while an interrupt is
+// pending. Each call is followed at once by its did_jump exit; leaving after
+// a loop's back edge without cec_check_pending is the same as leaving with
+// it, since the host checks for a pending interrupt right after every block.
+void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
+    auto& ctx = builder_.getContext();
+    auto* fn = builder_.GetInsertBlock()->getParent();
+    auto* i8ptr = builder_.getInt8PtrTy();
+
+    auto* lb0 = load_cpu_u32(offsetof(CpuState, lb[0]), "lb0");
+    auto* lb1 = load_cpu_u32(offsetof(CpuState, lb[1]), "lb1");
+    auto* at_bottom = builder_.CreateOr(builder_.CreateICmpEQ(lb0, builder_.getInt32(insn_pc)),
+                                        builder_.CreateICmpEQ(lb1, builder_.getInt32(insn_pc)), "at_lb");
+    auto* bb_step = BasicBlock::Create(ctx, "hwloop_step", fn);
+    auto* bb_next = BasicBlock::Create(ctx, "hwloop_next", fn);
+    auto* bb_done = BasicBlock::Create(ctx, "hwloop_done", fn);
+    auto* start = builder_.GetInsertBlock();
+    builder_.CreateCondBr(at_bottom, bb_step, bb_next);
+
+    builder_.SetInsertPoint(bb_step);
+    auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
+        {i8ptr, builder_.getInt32Ty(), builder_.getInt32Ty()}, false);
+    call_extern("bfin_hwloop_step", ft,
+        {cpu_ptr_, builder_.getInt32(insn_pc), builder_.getInt32(insn_pc + insn_len)});
+    emit_did_jump_exit(true);
+    builder_.CreateBr(bb_done);
+
+    builder_.SetInsertPoint(bb_next);
+    store_cpu_u32(offsetof(CpuState, pc), builder_.getInt32(insn_pc + insn_len));
+    builder_.CreateBr(bb_done);
+
+    // Both ways did_jump is clear; only the step may have changed a counter.
+    builder_.SetInsertPoint(bb_done);
+    carry_reg_cache(start, bb_done);
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[0]));
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[1]));
+
+    if (check_cec_pending_) {
+        check_cec_pending_ = false;
+        auto* pending = builder_.CreateLoad(builder_.getInt8Ty(),
+            entry_load_ptr(offsetof(CpuState, cec_pending), cec_pending_value_, "cec_pending_flag"),
+            "cec_pending");
+        auto* bb_check = BasicBlock::Create(ctx, "cec_check", fn);
+        auto* bb_after = BasicBlock::Create(ctx, "cec_checked", fn);
+        auto* before = builder_.GetInsertBlock();
+        builder_.CreateCondBr(builder_.CreateICmpNE(pending, builder_.getInt8(0)), bb_check, bb_after);
+        builder_.SetInsertPoint(bb_check);
+        call_extern("cec_check_pending", llvm::FunctionType::get(builder_.getVoidTy(), {i8ptr}, false),
+                    {cpu_ptr_});
+        emit_did_jump_exit(true);
+        builder_.CreateBr(bb_after);
+        builder_.SetInsertPoint(bb_after);
+        carry_reg_cache(before, bb_after);
     }
 }
 
@@ -483,8 +566,7 @@ bool LiftVisitor::unimplemented(const char* name) {
     builder_.CreateStore(builder_.getInt8(1), ptr);
     auto* ecode_ptr = cpu_field_ptr(offsetof(CpuState, exit_code), builder_.getInt32Ty());
     builder_.CreateStore(builder_.getInt32(1), ecode_ptr);
-    auto* djptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
-    builder_.CreateStore(builder_.getInt8(1), djptr);
+    emit_set_did_jump();
     terminate("unimplemented");
     return true;
 }
@@ -941,18 +1023,24 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     carry_reg_cache(from, aligned);
 }
 
-// The host address of the page holding addr, or null when the access must
-// call the host (see Memory::page_table()). The table pointer is loaded once,
-// at the top of the entry block, which dominates every access.
-llvm::Value* LiftVisitor::emit_page_lookup(llvm::Value* addr) {
-    auto* ptr_ty = builder_.getInt8PtrTy();
-    if (!page_table_value_) {
+// A pointer field of CpuState that no guest code changes, loaded once at the
+// top of the entry block (which dominates every use) and kept in `slot`.
+llvm::Value* LiftVisitor::entry_load_ptr(size_t offset, llvm::Value*& slot, const char* name) {
+    if (!slot) {
         auto& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
         llvm::IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
-        auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), cpu_ptr_,
-                                         at_entry.getInt32(offsetof(CpuState, page_table)));
-        page_table_value_ = at_entry.CreateLoad(ptr_ty, field, "page_table");
+        auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), cpu_ptr_, at_entry.getInt32(offset));
+        slot = at_entry.CreateLoad(at_entry.getInt8PtrTy(), field, name);
     }
+    return slot;
+}
+
+// The host address of the page holding addr, or null when the access must
+// call the host (see Memory::page_table()). The table pointer is loaded once,
+// with entry_load_ptr.
+llvm::Value* LiftVisitor::emit_page_lookup(llvm::Value* addr) {
+    auto* ptr_ty = builder_.getInt8PtrTy();
+    entry_load_ptr(offsetof(CpuState, page_table), page_table_value_, "page_table");
     auto* index = builder_.CreateZExt(builder_.CreateLShr(addr, Memory::kPageBits),
                                       builder_.getInt64Ty(), "page_index");
     auto* slot = builder_.CreateGEP(ptr_ty, page_table_value_, index, "page_slot");
@@ -1197,8 +1285,7 @@ bool LiftVisitor::decode_pseudoDEBUG_ABORT(uint16_t g) {
     builder_.CreateStore(builder_.getInt8(1), ptr);
     auto* ecode_ptr = cpu_field_ptr(offsetof(CpuState, exit_code), builder_.getInt32Ty());
     builder_.CreateStore(builder_.getInt32(1), ecode_ptr);
-    auto* djptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
-    builder_.CreateStore(builder_.getInt8(1), djptr);
+    emit_set_did_jump();
     terminate("halt");
     return true;
 }
@@ -3776,8 +3863,7 @@ bool LiftVisitor::decode_pseudoDEBUG_HLT(uint16_t) {
     builder_.CreateStore(builder_.getInt8(1), ptr);
     auto* ecode_ptr = cpu_field_ptr(offsetof(CpuState, exit_code), builder_.getInt32Ty());
     builder_.CreateStore(builder_.getInt32(0), ecode_ptr);
-    auto* djptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
-    builder_.CreateStore(builder_.getInt8(1), djptr);
+    emit_set_did_jump();
     terminate("halt");
     return true;
 }
