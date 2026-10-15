@@ -80,8 +80,11 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
         snprintf(label_name, sizeof(label_name), "insn_0x%08x", insn_pc);
         auto* insn = BasicBlock::Create(ctx, label_name, fn);
 
+        auto* previous = builder.GetInsertBlock();
         builder.CreateBr(insn_entry);
         builder.SetInsertPoint(insn);
+        // insn_entry, between the two, writes insn_len and packets only.
+        visitor.carry_reg_cache(previous, insn);
         int bytes = decodeInstruction(visitor, cur_pc);  // sets visitor.current_pc = cur_pc
         cur_pc += bytes;
         visitor.set_fallthrough_pc(cur_pc);

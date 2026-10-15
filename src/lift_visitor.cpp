@@ -65,6 +65,73 @@ Value* LiftVisitor::cpu_field_ptr(size_t offset, Type* ty, const Twine& name) {
     return builder_.CreateBitCast(gep, ty->getPointerTo(), name);
 }
 
+// ---- Register cache ----
+//
+// Guest registers stay in SSA values from one instruction to the next instead
+// of being reloaded from CpuState at every use. The cache is write-through:
+// every store still goes to CpuState where the lifter puts it, so memory is
+// always current and bypassing the cache is always correct; only loads are
+// saved, and nothing has to be copied out at exits or before calls.
+//
+// Each LLVM block has its own cache, describing the fields' values at the
+// block's end, where the builder appends. A block starts empty unless
+// carry_reg_cache() hands it its predecessor's cache: that is how a value
+// survives the blocks the lifter creates within the straight-line path
+// (memory fast/slow diamonds, did_jump exits, conditional branches, the next
+// instruction). A call invalidates what its callee may write.
+
+// The fields the cache holds: the data, pointer, DAG and loop registers,
+// RETS, the accumulators and the ASTAT bits. Not PC, CYCLES, the other system
+// registers or the execution state, which helpers and the host own.
+static bool reg_cacheable(size_t offset) {
+    return (offset >= offsetof(CpuState, dpregs) && offset <= offsetof(CpuState, rets)) ||
+           (offset >= offsetof(CpuState, az) && offset <= offsetof(CpuState, astat_reserved));
+}
+
+std::map<size_t, Value*>* LiftVisitor::reg_cache_here() {
+    auto* block = builder_.GetInsertBlock();
+    // Only appending to a block extends what its cache describes.
+    if (!block || builder_.GetInsertPoint() != block->end()) return nullptr;
+    return &reg_cache_[block];
+}
+
+void LiftVisitor::carry_reg_cache(BasicBlock* from, BasicBlock* to) {
+    auto it = reg_cache_.find(from);
+    if (it == reg_cache_.end() || from == to) return;
+    reg_cache_[to] = it->second;
+}
+
+void LiftVisitor::emit_cpu_store(size_t offset, Value* val) {
+    auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
+    builder_.CreateStore(val, ptr);
+    if (!reg_cacheable(offset)) return;
+    if (auto* cache = reg_cache_here())
+        (*cache)[offset] = val;
+    else if (auto* block = builder_.GetInsertBlock())
+        reg_cache_[block].erase(offset);  // a store before the block's end
+}
+
+// What a helper may change in the cached fields. The memory callbacks either
+// leave CpuState alone or raise an exception, which sets did_jump: every one
+// is followed at once by a did_jump exit, so on the path that continues they
+// changed nothing (the Memory contract in mem.h). bfin_hwloop_step writes
+// PC, did_jump and the loop counters. Any other helper may change anything.
+void LiftVisitor::reg_cache_after_call(const char* callee) {
+    auto* block = builder_.GetInsertBlock();
+    if (!block) return;
+    auto* cache = &reg_cache_[block];  // a call before the block's end acts on it too
+    const std::string name = callee;
+    if (name.rfind("mem_read", 0) == 0 || name.rfind("mem_write", 0) == 0 ||
+        name == "bfin_putchar" || name == "cec_is_user_mode")
+        return;
+    if (name == "bfin_hwloop_step") {
+        cache->erase(offsetof(CpuState, lc[0]));
+        cache->erase(offsetof(CpuState, lc[1]));
+        return;
+    }
+    cache->clear();
+}
+
 Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
     // CYCLES read (cycles[0]): reload cycles[1] (CYCLES2) from shadow (cycles[2]).
     // Bypass store_cpu_u32 to avoid the cycles[1]->cycles[2] redirect below.
@@ -74,8 +141,15 @@ Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
         auto* c2_ptr = cpu_field_ptr(offsetof(CpuState, cycles[1]), builder_.getInt32Ty());
         builder_.CreateStore(shadow_val, c2_ptr);
     }
+    auto* cache = reg_cacheable(offset) ? reg_cache_here() : nullptr;
+    if (cache) {
+        auto it = cache->find(offset);
+        if (it != cache->end()) return it->second;
+    }
     auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty(), name + ".ptr");
-    return builder_.CreateLoad(builder_.getInt32Ty(), ptr, name);
+    auto* value = builder_.CreateLoad(builder_.getInt32Ty(), ptr, name);
+    if (cache) (*cache)[offset] = value;
+    return value;
 }
 
 void LiftVisitor::store_cpu_u32(size_t offset, Value* val) {
@@ -86,16 +160,15 @@ void LiftVisitor::store_cpu_u32(size_t offset, Value* val) {
     if (in_parallel_) {
         shadow_writes_[offset] = val;
     } else {
-        auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
-        builder_.CreateStore(val, ptr);
+        emit_cpu_store(offset, val);
     }
 }
 
 void LiftVisitor::on_parallel_end() {
-    for (const auto& [offset, val] : shadow_writes_) {
-        auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
-        builder_.CreateStore(val, ptr);
-    }
+    // The cache sees a packet's register writes only here, so the packet's
+    // own reads got the values from before it, as the hardware's do.
+    for (const auto& [offset, val] : shadow_writes_)
+        emit_cpu_store(offset, val);
     shadow_writes_.clear();
     in_parallel_ = false;
     parallel_slot_ = 0;
@@ -220,10 +293,13 @@ void LiftVisitor::emit_astat_decompose(Value* astat) {
 }
 
 void LiftVisitor::emit_jump(Value* target, const char* kind) {
-    // For runtime (non-constant) targets, check instruction-fetch alignment.
+    // Check instruction-fetch alignment unless the target is known to be even.
     // Blackfin requires all instruction fetches to be 16-bit aligned (even addresses).
     // An odd target raises an instruction alignment exception (EXCAUSE=0x2A) via EVT3.
-    if (!llvm::isa<llvm::ConstantInt>(target)) {
+    // A register target can be a constant too: the register cache forwards
+    // what an earlier instruction in the block stored (RETS = R0 after R0 = 1).
+    auto* constant_target = llvm::dyn_cast<llvm::ConstantInt>(target);
+    if (!constant_target || (constant_target->getZExtValue() & 1)) {
         auto& ctx  = builder_.getContext();
         auto* fn   = builder_.GetInsertBlock()->getParent();
         auto* bb_aligned   = llvm::BasicBlock::Create(ctx, "jump_aligned",   fn);
@@ -231,6 +307,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
 
         auto* lsb       = builder_.CreateAnd(target, builder_.getInt32(1), "lsb");
         auto* is_odd    = builder_.CreateICmpNE(lsb, builder_.getInt32(0), "is_odd");
+        auto* from = builder_.GetInsertBlock();
         builder_.CreateCondBr(is_odd, bb_misalign, bb_aligned);
 
         // Misaligned branch: raise alignment exception.
@@ -244,6 +321,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
 
         // Aligned branch: normal jump.
         builder_.SetInsertPoint(bb_aligned);
+        carry_reg_cache(from, bb_aligned);
     }
 
     store_cpu_u32(offsetof(CpuState, pc), target);
@@ -299,6 +377,7 @@ void LiftVisitor::emit_did_jump_exit(bool force) {
     auto* dj_ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     auto* dj_val = builder_.CreateLoad(builder_.getInt8Ty(), dj_ptr, "dj");
     auto* dj_set = builder_.CreateICmpNE(dj_val, builder_.getInt8(0), "dj_set");
+    auto* from = builder_.GetInsertBlock();
     builder_.CreateCondBr(dj_set, bb_exit, bb_cont);
 
     // On exit: cpu->pc is already set by the exception handler; just return.
@@ -306,6 +385,7 @@ void LiftVisitor::emit_did_jump_exit(bool force) {
     builder_.CreateRetVoid();
 
     builder_.SetInsertPoint(bb_cont);
+    carry_reg_cache(from, bb_cont);
 }
 
 void LiftVisitor::emit_step_check(uint32_t post_insn_pc) {
@@ -325,6 +405,7 @@ void LiftVisitor::emit_step_check(uint32_t post_insn_pc) {
 
     // If steps_remaining != 0 (limited mode), go to step_check; else skip
     auto* is_limited = builder_.CreateICmpNE(sr_val, builder_.getInt32(0), "is_limited");
+    auto* from = builder_.GetInsertBlock();
     builder_.CreateCondBr(is_limited, bb_check, bb_cont);
 
     // bb_check: decrement counter; if it hits 0, exit now
@@ -341,8 +422,9 @@ void LiftVisitor::emit_step_check(uint32_t post_insn_pc) {
     builder_.CreateStore(builder_.getInt8(1), dj_ptr);
     builder_.CreateRetVoid();
 
-    // Continue here for next instruction
+    // Continue here for next instruction (bb_check writes only steps_remaining).
     builder_.SetInsertPoint(bb_cont);
+    carry_reg_cache(from, bb_cont);
 }
 
 void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
@@ -389,7 +471,9 @@ void LiftVisitor::finalize_pending_exits(uint32_t insn_pc, uint32_t insn_len) {
 Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
                                 ArrayRef<Value*> args) {
     auto* fn = module_->getOrInsertFunction(name, ft).getCallee();
-    return builder_.CreateCall(ft, fn, args);
+    auto* call = builder_.CreateCall(ft, fn, args);
+    reg_cache_after_call(name);
+    return call;
 }
 
 bool LiftVisitor::unimplemented(const char* name) {
@@ -843,6 +927,7 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     auto* bad = builder_.CreateICmpNE(
         builder_.CreateAnd(addr, builder_.getInt32(width - 1)), builder_.getInt32(0));
     llvm::MDBuilder metadata(builder_.getContext());
+    auto* from = builder_.GetInsertBlock();
     builder_.CreateCondBr(bad, fault, aligned, metadata.createBranchWeights(1, 1000));
     builder_.SetInsertPoint(fault);
     const uint32_t packet_pc = current_pc - (parallel_slot_ == 1 ? 4 : parallel_slot_ == 2 ? 6 : 0);
@@ -853,6 +938,7 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
         addr, builder_.getInt32((write ? 1u << 16 : 0) | (parallel_slot_ == 2 ? 1u << 18 : 0))});
     builder_.CreateRetVoid();
     builder_.SetInsertPoint(aligned);
+    carry_reg_cache(from, aligned);
 }
 
 // The host address of the page holding addr, or null when the access must
@@ -898,6 +984,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         // Hint: fast path (addr in normal range) is overwhelmingly likely
         llvm::MDBuilder mdb(builder_.getContext());
         auto* likely_metadata = mdb.createBranchWeights(1000, 1);
+        auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(in_range, bb_fast, bb_slow, likely_metadata);
 
         // Fast path: direct load from fast_base + addr
@@ -921,6 +1008,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         builder_.CreateBr(bb_done);
 
         builder_.SetInsertPoint(bb_done);
+        carry_reg_cache(start, bb_done);  // guest RAM or a callback; never CpuState
         auto* phi = builder_.CreatePHI(ret_ty, 2, "mem_val");
         phi->addIncoming(fast_result, fast_bb);
         phi->addIncoming(slow_result, slow_bb);
@@ -936,6 +1024,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* bb_done = llvm::BasicBlock::Create(ctx, "page_done", fn_);
         auto* page = emit_page_lookup(addr);
         llvm::MDBuilder mdb(ctx);
+        auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
                               mdb.createBranchWeights(1000, 1));
 
@@ -957,6 +1046,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         builder_.CreateBr(bb_done);
 
         builder_.SetInsertPoint(bb_done);
+        carry_reg_cache(start, bb_done);  // guest RAM or a callback; never CpuState
         auto* phi = builder_.CreatePHI(ret_ty, 2, "mem_val");
         phi->addIncoming(fast_result, fast_bb);
         phi->addIncoming(slow_result, slow_bb);
@@ -996,6 +1086,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* in_range = builder_.CreateICmpULT(addr, limit_c, "in_range");
         llvm::MDBuilder mdb(builder_.getContext());
         auto* likely_metadata = mdb.createBranchWeights(1000, 1);
+        auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(in_range, bb_fast, bb_slow, likely_metadata);
 
         // Fast path: direct store to fast_base + addr (no notify, no extern call)
@@ -1018,6 +1109,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         builder_.CreateBr(bb_done);
 
         builder_.SetInsertPoint(bb_done);
+        carry_reg_cache(start, bb_done);  // guest RAM or a callback; never CpuState
         return;
     }
     // Page table: as in emit_mem_read.
@@ -1029,6 +1121,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* bb_done = llvm::BasicBlock::Create(ctx, "page_wr_done", fn_);
         auto* page = emit_page_lookup(addr);
         llvm::MDBuilder mdb(ctx);
+        auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
                               mdb.createBranchWeights(1000, 1));
 
@@ -1047,6 +1140,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         builder_.CreateBr(bb_done);
 
         builder_.SetInsertPoint(bb_done);
+        carry_reg_cache(start, bb_done);  // guest RAM or a callback; never CpuState
         return;
     }
     // Tier 3: always extern call (rawmem_limit not available)
@@ -1141,6 +1235,7 @@ bool LiftVisitor::decode_BRCC_BRF(uint16_t offset) {
     terminated_ = false;  // reset so fallthru path continues
 
     builder_.SetInsertPoint(fallthru_bb);
+    carry_reg_cache(taken_bb->getSinglePredecessor(), fallthru_bb);
     return true;
 }
 
@@ -1171,6 +1266,7 @@ bool LiftVisitor::decode_BRCC_BRT(uint16_t offset) {
     terminated_ = false;  // reset so fallthru path continues
 
     builder_.SetInsertPoint(fallthru_bb);
+    carry_reg_cache(taken_bb->getSinglePredecessor(), fallthru_bb);
     return true;
 }
 
@@ -1532,6 +1628,7 @@ bool LiftVisitor::decode_PopReg(uint16_t g, uint16_t r) {
             auto* bb_cont = BasicBlock::Create(ctx2, "usp_pop_cont", fn2);
             auto* ft_um = FunctionType::get(builder_.getInt1Ty(), {}, false);
             auto* is_um = call_extern("cec_is_user_mode", ft_um, {});
+            auto* from = builder_.GetInsertBlock();
             builder_.CreateCondBr(is_um, bb_user, bb_cont);
             builder_.SetInsertPoint(bb_user);
             auto* ft_exc = FunctionType::get(builder_.getVoidTy(),
@@ -1539,6 +1636,7 @@ bool LiftVisitor::decode_PopReg(uint16_t g, uint16_t r) {
             call_extern("cec_exception", ft_exc, {cpu_ptr_, builder_.getInt32(VEC_ILGAL_I), mem_ptr_});
             builder_.CreateRetVoid();
             builder_.SetInsertPoint(bb_cont);
+            carry_reg_cache(from, bb_cont);
         } else {
             call_extern("cec_check_sup", ft_sup, {cpu_ptr_});
         }
