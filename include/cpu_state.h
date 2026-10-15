@@ -66,6 +66,11 @@ struct CpuState {
     // rather than the block's static length. A packet that raises an
     // exception is counted.
     uint32_t packets;
+    // Memory::page_table() of the Memory this state runs with, or null; set
+    // by Core. Generated code loads it from here rather than embedding the
+    // host address, so the same block compiles to the same code in every
+    // process.
+    uint8_t* const* page_table;
 };
 
 // ASTAT bit positions (from refs/bfin-sim.h)

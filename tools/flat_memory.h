@@ -65,6 +65,25 @@ public:
 
     bool is_fastmem() const override { return fastmem_; }
 
+    // Page-table mode (non-fastmem only): no rawmem limit; the JIT reaches
+    // every whole guest page inside the buffer and below the MMR space
+    // through page_table(), and calls read*/write* for the rest (partial
+    // pages, MMRs, out-of-range addresses that fault).
+    void enable_page_table() {
+        if (fastmem_) return;
+        pages_.assign(kPageTableEntries, nullptr);
+        const uint64_t begin = (static_cast<uint64_t>(base_) + kPageSize - 1) & ~uint64_t(kPageSize - 1);
+        const uint64_t end = std::min<uint64_t>(static_cast<uint64_t>(base_) + data_.size(), 0xFFC00000u);
+        for (uint64_t page = begin; page + kPageSize <= end; page += kPageSize)
+            pages_[page >> kPageBits] = data_.data() + (page - base_);
+    }
+    uint32_t rawmem_limit() const override {
+        return pages_.empty() ? Memory::rawmem_limit() : 0u;
+    }
+    uint8_t* const* page_table() const override {
+        return pages_.empty() ? nullptr : pages_.data();
+    }
+
     // Bulk load for ELF segment loading — concrete-only, not virtual
     void load(uint32_t addr, const uint8_t* buf, uint32_t len) {
         if (fastmem_) {
@@ -216,4 +235,5 @@ private:
     uint8_t* mmap_base_;
     size_t mmap_size_;
     CpuState* cpu_;
+    std::vector<uint8_t*> pages_;
 };

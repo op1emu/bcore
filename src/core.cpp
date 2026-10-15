@@ -65,6 +65,10 @@ void Core::applyModuleTarget() {
 bool Core::run(uint32_t pc) {
     BbFunc fn = jit_->lookup(pc);
     if (!fn) {
+        // The translation below inlines accesses through this table if there
+        // is one; the code finds it in CpuState (see Memory::page_table()).
+        if (uint8_t* const* table = mem_->page_table())
+            cpu_->page_table = table;
 #if BCORE_ENABLE_PROFILE
         BcoreEventSink* sink = profile_->sink;
         profile_->stats.cache_misses++;
