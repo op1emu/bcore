@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -67,6 +68,11 @@ public:
     // Emit epilog + RetVoid on all pending exit blocks, then clear the list.
     // Must be called by BBTranslator right after emit_epilog().
     void finalize_pending_exits(uint32_t insn_pc, uint32_t insn_len);
+
+    // The register cache (see load_cpu_u32) of `from` holds on entry to `to`:
+    // every path into `to` comes from the end of `from` through code that
+    // writes none of the cached CpuState fields.
+    void carry_reg_cache(llvm::BasicBlock* from, llvm::BasicBlock* to);
 
     // ProgCtrl instructions
     bool decode_ProgCtrl_NOP();
@@ -587,6 +593,12 @@ private:
     bool page_table_ = false;     // inline access through CpuState::page_table (Memory::page_table())
     llvm::Value* page_table_value_ = nullptr;  // CpuState::page_table, loaded once in the entry block
     std::map<size_t, llvm::Value*> shadow_writes_;
+    // Register cache: per LLVM block, the value each cached CpuState field
+    // holds at the block's end (the insertion point) on every path there.
+    std::unordered_map<llvm::BasicBlock*, std::map<size_t, llvm::Value*>> reg_cache_;
+    std::map<size_t, llvm::Value*>* reg_cache_here();
+    void emit_cpu_store(size_t offset, llvm::Value* val);
+    void reg_cache_after_call(const char* callee);
     uint32_t fallthrough_pc_ = 0;
     std::vector<PendingExit> pending_exits_;
 
