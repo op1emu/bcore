@@ -3,6 +3,7 @@
 #include <sstream>
 
 #include "bb_translator.h"
+#include "cec.h"
 #include "decoder.h"
 #include "disasm_visitor.h"
 #include "jit_engine.h"
@@ -69,6 +70,7 @@ bool Core::run(uint32_t pc) {
         // is one; the code finds it in CpuState (see Memory::page_table()).
         if (uint8_t* const* table = mem_->page_table())
             cpu_->page_table = table;
+        cpu_->cec_pending = &bcore_cec_pending;
 #if BCORE_ENABLE_PROFILE
         BcoreEventSink* sink = profile_->sink;
         profile_->stats.cache_misses++;

@@ -71,6 +71,9 @@ struct CpuState {
     // host address, so the same block compiles to the same code in every
     // process.
     uint8_t* const* page_table;
+    // The CEC's interrupt-may-be-pending flag; set by Core, read by generated
+    // code before it calls cec_check_pending.
+    const bool* cec_pending;
 };
 
 // ASTAT bit positions (from refs/bfin-sim.h)

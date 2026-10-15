@@ -40,7 +40,11 @@ static constexpr uint32_t SP_IDX = 14;
 // ── CEC-owned register state ──────────────────────────────────────────────────
 
 static uint32_t s_cec_mmr[5];  // EVT_OVERRIDE, IMASK, IPEND, ILAT, IPRIO
-static bool s_cec_pending; // Whether an interrupt is pending (set by cec_raise, cleared by cec_return_*)
+// Whether an interrupt may be pending (set by cec_raise and the like, cleared
+// by cec_check_pending). Generated code reads it, through
+// CpuState::cec_pending, to call cec_check_pending only when there is
+// something to check.
+extern "C" { bool bcore_cec_pending; }
 #if BCORE_ENABLE_PROFILE
 // Dispatches per IVG level since cec_init(), for BcoreStats: one increment
 // per interrupt or exception taken, nothing per block.
@@ -59,7 +63,7 @@ void cec_init() {
     s_cec_mmr[CEC_IDX_IPEND]        = IVG_RST_B | IVG_IRPTEN_B;
     s_cec_mmr[CEC_IDX_ILAT]         = 0u;
     s_cec_mmr[CEC_IDX_IPRIO]        = 0u;
-    s_cec_pending = false;
+    bcore_cec_pending = false;
 #if BCORE_ENABLE_PROFILE
     for (auto& count : s_cec_entries) count = 0;
 #endif
@@ -89,7 +93,7 @@ void cec_mmr_write(CpuState* cpu, uint32_t addr, uint32_t val) {
         // Only maskable bits are writable; unmaskable bits are preserved.
         s_cec_mmr[idx] = (val & CEC_MASKABLE_B) | (s_cec_mmr[idx] & CEC_UNMASKABLE_B);
         // Pending check
-        s_cec_pending = true;
+        bcore_cec_pending = true;
         break;
     case CEC_IDX_IPEND:
         // Read-only from software perspective — silently ignore.
@@ -329,7 +333,7 @@ extern "C" void cec_raise(CpuState* cpu, uint32_t ivg) {
     // Latch the IVG in ILAT, then check for pending dispatch.
     // This matches the reference's cec_latch() pattern.
     ilat() |= (1u << ivg);
-    s_cec_pending = true;
+    bcore_cec_pending = true;
 }
 
 // ── Return instructions ───────────────────────────────────────────────────────
@@ -472,7 +476,7 @@ extern "C" void cec_sti(CpuState* cpu, uint32_t mask) {
     // Write maskable bits from value; preserve unmaskable bits.
     imask() = (mask & IVG_MASKABLE_B) | (imask() & IVG_UNMASKABLE_B);
     // Check for pending interrupts that are now eligible.
-    s_cec_pending = true;
+    bcore_cec_pending = true;
 }
 
 // ── Push/Pop RETI ─────────────────────────────────────────────────────────────
@@ -482,7 +486,7 @@ extern "C" void cec_push_reti(CpuState* cpu) {
     if (cpu->did_jump) return;  // Exception was raised; don't continue.
     // Clear IRPTEN: enable nested interrupts.
     ipend() &= ~IVG_IRPTEN_B;
-    s_cec_pending = true;
+    bcore_cec_pending = true;
 }
 
 extern "C" void cec_pop_reti(CpuState* cpu) {
@@ -505,9 +509,9 @@ extern "C" void cec_check_sup(CpuState* cpu) {
 // ── Pending interrupt check ───────────────────────────────────────────────────
 
 extern "C" void cec_check_pending(CpuState* cpu) {
-    if (s_cec_pending) {
+    if (bcore_cec_pending) {
         _cec_raise_internal(cpu, -1);
-        s_cec_pending = false;
+        bcore_cec_pending = false;
     }
 }
 
