@@ -92,6 +92,15 @@ static void test_table_chain(int opt) {
     require(c.run(0x300, 100) == 100 && c.cpu.dpregs[0] == 51 && c.cpu.pc == 0x300, "chained through the table");
 }
 
+// A block that returns to itself through a register has no native loop
+// (nothing says it will) and chains to itself through the table.
+static void test_self_through_table(int opt) {
+    Chained c(opt);
+    c.code(0x600, {kIncR0, 0x0010});  // R0 += 1; RTS
+    c.cpu.rets = 0x600;
+    require(c.run(0x600, 10) == 10 && c.cpu.dpregs[0] == 5 && c.cpu.chain_blocks == 4, "self through the table");
+}
+
 // A pending interrupt returns to the host (which would check it).
 static void test_pending(int opt) {
     Chained c(opt);
@@ -124,6 +133,7 @@ int main() {
         test_table(opt);
         test_budget(opt);
         test_table_chain(opt);
+        test_self_through_table(opt);
         test_pending(opt);
         test_host_cycles(opt);
         test_dry(opt);

@@ -21,7 +21,7 @@ BBTranslator::BBTranslator(Memory* mem,
                            bool unlimited, bool fastmem, uint64_t fast_base)
     : mem_(mem), unlimited_(unlimited), fastmem_(fastmem), fast_base_(fast_base) {}
 
-BBTranslateResult BBTranslator::translate(uint32_t pc) {
+BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
     auto ctx = std::make_unique<LLVMContext>();
     auto mod = std::make_unique<Module>("bb_module", *ctx);
     // Before the first instruction is built: IRBuilder takes load/store
@@ -70,6 +70,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
     LiftVisitor visitor(builder, cpu_ptr, mem_ptr, mod.get(),
                         mem_, unlimited_,
                         fastmem_, fast_base_, mem_->rawmem_limit());
+    visitor.set_hint(hint);
 
     uint32_t cur_pc = pc;
     BasicBlock* first_entry = nullptr;  // the first packet's entry
@@ -118,7 +119,11 @@ BBTranslateResult BBTranslator::translate(uint32_t pc) {
     }
 
     if (host_cycles_ && visitor.accesses_cycles()) emit_host_cycles(builder, cpu_ptr, first_entry);
-    if (chaining_ && unlimited_) emit_chain_exit(builder, fn, cpu_ptr, mem_ptr, pc, first_entry);
+    // A native loop where the block may well branch to itself: a jump to its
+    // start, or the start of a hardware loop now. Elsewhere a jump to itself
+    // chains through the table, as to any block.
+    const bool self_loop = visitor.jumps_to(pc) || (hint && (hint->lt[0] == pc || hint->lt[1] == pc));
+    if (chaining_ && unlimited_) emit_chain_exit(builder, fn, cpu_ptr, mem_ptr, pc, self_loop ? first_entry : nullptr);
 
     // Verify the module
     std::string err_str;
@@ -163,13 +168,14 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
 // budget lasts (the CEC, a halt, the host's memory callbacks and other
 // threads set it to 0 when the host has work), no interrupt may be pending
 // (the host would call cec_check_pending), and the block is compiled and in
-// the chain table, or is this one (a native loop).
+// the chain table, or is this one and self_loop is its first packet (a
+// native loop).
 void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* mem,
-                                   uint32_t entry_pc, BasicBlock* first_entry) {
+                                   uint32_t entry_pc, BasicBlock* self_loop) {
     std::vector<ReturnInst*> returns;
     for (auto& block : *fn)
         if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator())) returns.push_back(ret);
-    if (returns.empty() || !first_entry) return;
+    if (returns.empty()) return;
 
     auto& ctx = fn->getContext();
     auto* i8 = b.getInt8Ty();
@@ -204,7 +210,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     b.SetInsertPoint(target);
     auto* next = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, pc)), "next_pc");
     auto* self = BasicBlock::Create(ctx, "chain_self", fn);
-    b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, lookup);
+    if (self_loop) b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, lookup);
+    else b.CreateBr(lookup);
 
     b.SetInsertPoint(lookup);
     auto* table = b.CreateLoad(ptr, field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
@@ -231,7 +238,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         b.CreateStore(b.CreateAdd(b.CreateLoad(i32, blocks_ptr), b.getInt32(1)), blocks_ptr);
         return true;
     };
-    if (chain(self)) b.CreateBr(first_entry);
+    if (self_loop && chain(self)) b.CreateBr(self_loop);
+    if (!self_loop) self->eraseFromParent();
     if (chain(hit)) {
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});

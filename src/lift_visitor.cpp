@@ -342,6 +342,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
     // A register target can be a constant too: the register cache forwards
     // what an earlier instruction in the block stored (RETS = R0 after R0 = 1).
     auto* constant_target = llvm::dyn_cast<llvm::ConstantInt>(target);
+    if (constant_target) const_targets_.insert(uint32_t(constant_target->getZExtValue()));
     if (!constant_target || (constant_target->getZExtValue() & 1)) {
         auto& ctx  = builder_.getContext();
         auto* fn   = builder_.GetInsertBlock()->getParent();
@@ -494,21 +495,97 @@ void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
 }
 
 // The epilog on a path where did_jump is known clear, without a call unless
-// one has work to do. bfin_hwloop_step acts only at a loop bottom
-// (lb[i] == insn_pc); anywhere else it sets PC to the next instruction, which
-// this does inline. cec_check_pending acts only while an interrupt is
-// pending. As in emit_epilog, the check follows the step also when the step
-// took a loop's back edge, so an interrupt the instruction enabled is taken
-// with RETI at the loop top.
+// one has work to do. At a loop bottom (lb[i] == insn_pc) it is
+// bfin_hwloop_step inline: phase A takes the back edge of a loop with more
+// than one iteration left (loop 1 over loop 0), phase B counts down loop 1
+// and, unless loop 1 goes on, loop 0. Anywhere else it sets PC to the next
+// instruction. cec_check_pending acts only while an interrupt is pending. As
+// bfin_hwloop_step did, the check follows the step also when the step took a
+// loop's back edge, so an interrupt the instruction enabled is taken with
+// RETI at the loop top. A taken back edge leaves the block (through its
+// chain exit, to the loop top: a native loop when that is the block's start).
 void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     auto& ctx = builder_.getContext();
     auto* fn = builder_.GetInsertBlock()->getParent();
-    auto* i8ptr = builder_.getInt8PtrTy();
+    auto* i32 = builder_.getInt32Ty();
     const bool check_cec = check_cec_pending_;
     check_cec_pending_ = false;
+    const uint32_t next_pc = insn_pc + insn_len;
 
     auto* lb0 = load_cpu_u32(offsetof(CpuState, lb[0]), "lb0");
     auto* lb1 = load_cpu_u32(offsetof(CpuState, lb[1]), "lb1");
+    if (!hint_ || (hint_->lb[0] != insn_pc && hint_->lb[1] != insn_pc)) {
+        emit_epilog_call(insn_pc, insn_len, lb0, lb1, check_cec);
+        return;
+    }
+    auto* at0 = builder_.CreateICmpEQ(lb0, builder_.getInt32(insn_pc), "at_lb0");
+    auto* at1 = builder_.CreateICmpEQ(lb1, builder_.getInt32(insn_pc), "at_lb1");
+    auto* at_bottom = builder_.CreateOr(at0, at1, "at_lb");
+    auto* bb_step = BasicBlock::Create(ctx, "hwloop_step", fn);
+    auto* bb_back = BasicBlock::Create(ctx, "hwloop_back", fn);
+    auto* bb_stay = BasicBlock::Create(ctx, "hwloop_stay", fn);
+    auto* bb_next = BasicBlock::Create(ctx, "hwloop_next", fn);
+    auto* bb_done = BasicBlock::Create(ctx, "hwloop_done", fn);
+    auto* start = builder_.GetInsertBlock();
+    builder_.CreateCondBr(at_bottom, bb_step, bb_next);
+
+    builder_.SetInsertPoint(bb_step);
+    auto field = [&](size_t offset) { return cpu_field_ptr(offset, i32); };
+    auto* lc0 = builder_.CreateLoad(i32, field(offsetof(CpuState, lc[0])), "lc0");
+    auto* lc1 = builder_.CreateLoad(i32, field(offsetof(CpuState, lc[1])), "lc1");
+    auto* one = builder_.getInt32(1);
+    auto* zero = builder_.getInt32(0);
+    // Phase A.
+    auto* take0 = builder_.CreateAnd(at0, builder_.CreateICmpUGT(lc0, one), "take0");
+    auto* take1 = builder_.CreateAnd(at1, builder_.CreateICmpUGT(lc1, one), "take1");
+    auto* lt0 = builder_.CreateLoad(i32, field(offsetof(CpuState, lt[0])), "lt0");
+    auto* lt1 = builder_.CreateLoad(i32, field(offsetof(CpuState, lt[1])), "lt1");
+    auto* target = builder_.CreateSelect(take1, lt1,
+                       builder_.CreateSelect(take0, lt0, builder_.getInt32(next_pc)), "hwloop_pc");
+    builder_.CreateStore(target, field(offsetof(CpuState, pc)));
+    // Phase B.
+    auto* dec1 = builder_.CreateAnd(at1, builder_.CreateICmpNE(lc1, zero), "dec1");
+    auto* lc1_new = builder_.CreateSelect(dec1, builder_.CreateSub(lc1, one), lc1, "lc1_new");
+    builder_.CreateStore(lc1_new, field(offsetof(CpuState, lc[1])));
+    auto* loop1_on = builder_.CreateAnd(dec1, builder_.CreateICmpNE(lc1_new, zero), "loop1_on");
+    auto* dec0 = builder_.CreateAnd(builder_.CreateAnd(at0, builder_.CreateICmpNE(lc0, zero)),
+                                    builder_.CreateNot(loop1_on), "dec0");
+    builder_.CreateStore(builder_.CreateSelect(dec0, builder_.CreateSub(lc0, one), lc0, "lc0_new"),
+                         field(offsetof(CpuState, lc[0])));
+    builder_.CreateCondBr(builder_.CreateICmpNE(target, builder_.getInt32(next_pc)), bb_back, bb_stay);
+
+    // The back edge sets did_jump, as the helper did, and leaves.
+    builder_.SetInsertPoint(bb_back);
+    emit_set_did_jump();
+    if (check_cec) emit_cec_check(false);
+    builder_.CreateRetVoid();
+
+    // The loop ends here: go on, unless an interrupt is taken.
+    builder_.SetInsertPoint(bb_stay);
+    if (check_cec) {
+        emit_cec_check(false);
+        emit_did_jump_exit(true);
+    }
+    builder_.CreateBr(bb_done);
+
+    builder_.SetInsertPoint(bb_next);
+    store_cpu_u32(offsetof(CpuState, pc), builder_.getInt32(next_pc));
+    if (check_cec) emit_cec_check(true);
+    builder_.CreateBr(bb_done);
+
+    // Both ways did_jump is clear; only the step may have changed a counter.
+    builder_.SetInsertPoint(bb_done);
+    carry_reg_cache(start, bb_done);
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[0]));
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[1]));
+}
+
+// The same where no loop ends here when the block is translated: the step
+// is a call, at a bottom the loop registers name only later.
+void LiftVisitor::emit_epilog_call(uint32_t insn_pc, uint32_t insn_len, Value* lb0, Value* lb1, bool check_cec) {
+    auto& ctx = builder_.getContext();
+    auto* fn = builder_.GetInsertBlock()->getParent();
+    auto* i8ptr = builder_.getInt8PtrTy();
     auto* at_bottom = builder_.CreateOr(builder_.CreateICmpEQ(lb0, builder_.getInt32(insn_pc)),
                                         builder_.CreateICmpEQ(lb1, builder_.getInt32(insn_pc)), "at_lb");
     auto* bb_step = BasicBlock::Create(ctx, "hwloop_step", fn);

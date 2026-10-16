@@ -1,5 +1,7 @@
 #pragma once
 
+#include <set>
+
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -46,6 +48,13 @@ public:
     uint32_t fallthrough_pc() const { return fallthrough_pc_; }
     // Whether the block reads or writes CYCLES or CYCLES2.
     bool accesses_cycles() const { return accesses_cycles_; }
+    // The guest state when the block is translated, a hint for code that is
+    // exact either way but faster for what the hint says: the hardware-loop
+    // step inline at a bottom the loop registers name now (a call
+    // elsewhere). Null for none.
+    void set_hint(const CpuState* hint) { hint_ = hint; }
+    // Whether a jump in the block has a constant target at this PC.
+    bool jumps_to(uint32_t pc) const { return const_targets_.count(pc) != 0; }
     void set_fallthrough_pc(uint32_t pc) { fallthrough_pc_ = pc; }
 
     // Reset terminated_ so a linear scan can continue past branch instructions
@@ -590,6 +599,8 @@ private:
     bool dis_algn_expt_ = false;  // DISALGNEXCPT fired in current parallel group
     bool fastmem_ = false;
     bool accesses_cycles_ = false;
+    const CpuState* hint_ = nullptr;
+    std::set<uint32_t> const_targets_;
     bool check_did_jump_ = false;  // whether to check did_jump flag at end of block and exit if set
     bool check_cec_pending_ = false;  // whether to check cec_pending flag at end of block and exit if set
     uint64_t fast_base_value_ = 0;
@@ -612,6 +623,7 @@ private:
     static constexpr size_t kDidJumpClear = offsetof(CpuState, did_jump);
     bool did_jump_clear();
     void emit_set_did_jump();
+    void emit_epilog_call(uint32_t insn_pc, uint32_t insn_len, llvm::Value* lb0, llvm::Value* lb1, bool check_cec);
     void emit_stop_chaining();
     void emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len);
     void emit_cec_check(bool exit_in_check);
