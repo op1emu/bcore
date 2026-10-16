@@ -168,8 +168,9 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
 // budget lasts (the CEC, a halt, the host's memory callbacks and other
 // threads set it to 0 when the host has work), no interrupt may be pending
 // (the host would call cec_check_pending), and the block is compiled and in
-// the chain table, or is this one and self_loop is its first packet (a
-// native loop).
+// the chain table, which holds no block the host's filter rejects. When it
+// is this one and self_loop is its first packet, a branch there runs it (a
+// native loop); otherwise a musttail call does.
 void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* mem,
                                    uint32_t entry_pc, BasicBlock* self_loop) {
     std::vector<ReturnInst*> returns;
@@ -209,9 +210,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
 
     b.SetInsertPoint(target);
     auto* next = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, pc)), "next_pc");
-    auto* self = BasicBlock::Create(ctx, "chain_self", fn);
-    if (self_loop) b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, lookup);
-    else b.CreateBr(lookup);
+    b.CreateBr(lookup);
 
     b.SetInsertPoint(lookup);
     auto* table = b.CreateLoad(ptr, field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
@@ -221,6 +220,11 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
     auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
     b.CreateCondBr(b.CreateICmpEQ(slot_pc, next), hit, leave);
+    auto* self = BasicBlock::Create(ctx, "chain_self", fn);
+    auto* other = BasicBlock::Create(ctx, "chain_other", fn);
+    b.SetInsertPoint(hit);
+    if (self_loop) b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other);
+    else b.CreateBr(other);
 
     // What the host does before the next block: retire, then clear the
     // packet index and did_jump (Core::run).
@@ -240,7 +244,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     };
     if (self_loop && chain(self)) b.CreateBr(self_loop);
     if (!self_loop) self->eraseFromParent();
-    if (chain(hit)) {
+    if (chain(other)) {
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});
         call->setTailCallKind(CallInst::TCK_MustTail);

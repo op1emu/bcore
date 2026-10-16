@@ -59,8 +59,10 @@ public:
     // it up. A new engine (Core::invalidate) starts with an empty table.
     const ChainSlot* chainTable() const { return chain_.get(); }
     // PCs the filter rejects are never in the table, so generated code never
-    // runs them itself: the host runs every block that starts there.
-    void setChainFilter(std::function<bool(uint32_t)> filter) { chain_filter_ = std::move(filter); }
+    // runs them itself: the host runs every block that starts there. Setting
+    // it empties the table; a block is published again when the host next
+    // looks it up, if the filter accepts it.
+    void setChainFilter(std::function<bool(uint32_t)> filter);
     void set_executing(uint32_t pc) { executing_bb_pc_ = pc; }
     void clear_executing()          { executing_bb_pc_ = 0; }
 

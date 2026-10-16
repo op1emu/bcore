@@ -27,10 +27,14 @@ public:
     bool run(uint32_t pc);
     std::tuple<std::string, uint32_t> disassemble(uint32_t pc);
     void set_dump_ir(bool enable);
-    // PCs a chained block may run next (see CpuState::chain_budget); the
-    // host runs every block starting at a PC the filter rejects. Takes effect
-    // for blocks compiled or looked up from now on, and persists across
-    // invalidate(). The filter is called on the run() thread only.
+    // PCs a chained block may run next, itself included (see
+    // CpuState::chain_budget); the host runs every block starting at a PC
+    // the filter rejects. Setting it empties the chain table, so it applies
+    // to every block from now on; it persists across invalidate(). The
+    // filter is called on the run() thread only, when a block is compiled or
+    // looked up: its answer for a PC may change from false to true (the
+    // block is published at its next lookup), but to reject a PC it accepted
+    // before, set the filter again.
     void set_chain_filter(std::function<bool(uint32_t)> filter);
     // Blocks compiled from now on may run the next block themselves instead
     // of returning, while CpuState::chain_budget lasts (never in limited

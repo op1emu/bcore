@@ -101,6 +101,41 @@ static void test_self_through_table(int opt) {
     require(c.run(0x600, 10) == 10 && c.cpu.dpregs[0] == 5 && c.cpu.chain_blocks == 4, "self through the table");
 }
 
+// The filter holds for a block's own native loop too, a jump to itself or
+// a hardware loop at its start: a rejected block runs once and returns.
+static void test_filtered_self(int opt) {
+    {
+        Chained c(opt);
+        c.core.set_chain_filter([](uint32_t) { return false; });
+        c.code(0x100, {kIncR0, 0x2fff});  // R0 += 1; JUMP.S 0x100
+        require(c.run(0x100, 8) == 2 && c.cpu.dpregs[0] == 1 && c.cpu.chain_blocks == 0, "filtered self jump");
+    }
+    {
+        Chained c(opt);
+        c.core.set_chain_filter([](uint32_t) { return false; });
+        c.cpu.lt[0] = 0x400; c.cpu.lb[0] = 0x400; c.cpu.lc[0] = 4;
+        c.code(0x400, {kIncR0, 0x2000});  // one-packet hardware loop; JUMP.S 0
+        require(c.run(0x400, 3) == 1 && c.cpu.dpregs[0] == 1 && c.cpu.pc == 0x400, "filtered hardware loop");
+    }
+}
+
+// Setting a filter applies to blocks already in the table: a lookup asks it
+// again, and no block chains into one it now rejects.
+static void test_refilter(int opt) {
+    Chained c(opt);
+    c.code(0x200, {kIncR0, 0x207f});  // R0 += 1; JUMP.S 0x300
+    c.code(0x300, {kIncR0, 0x2f7f});  // R0 += 1; JUMP.S 0x200
+    c.run(0x200, 0);
+    c.run(0x300, 0);
+    int calls = 0;
+    c.core.set_chain_filter([&](uint32_t pc) { ++calls; return pc != 0x200; });
+    c.run(0x200, 0);
+    require(calls > 0 && slot(c.cpu, 0x200).pc == kChainEmpty, "a lookup asks the new filter");
+    const uint32_t before = c.cpu.dpregs[0];
+    c.run(0x300, 6);
+    require(c.cpu.dpregs[0] - before == 1 && c.cpu.chain_blocks == 0 && c.cpu.pc == 0x200, "no chain into a rejected block");
+}
+
 // A pending interrupt returns to the host (which would check it).
 static void test_pending(int opt) {
     Chained c(opt);
@@ -129,11 +164,13 @@ static void test_dry(int opt) {
 }
 
 int main() {
-    for (int opt : {0, 1}) {
+    for (int opt : {0, 1, 2, 3}) {
         test_table(opt);
         test_budget(opt);
         test_table_chain(opt);
         test_self_through_table(opt);
+        test_filtered_self(opt);
+        test_refilter(opt);
         test_pending(opt);
         test_host_cycles(opt);
         test_dry(opt);
