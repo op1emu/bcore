@@ -48,7 +48,7 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/jit_engine.h/cpp`: LLJIT wrapper with explicit `absoluteSymbols` registration for all extern "C" helpers
 - `src/bb_translator.h/cpp`: Basic-block translator — decodes instructions until terminator, produces one LLVM function per BB
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)
-- `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--count-packets`, `--opt-level`)
+- `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--count-packets`, `--chain`, `--opt-level`)
 
 ## Common Development Tasks
 
@@ -79,7 +79,7 @@ The disassembler:
 ### Running the Emulator
 
 ```bash
-./build/emu [--trace] [--dump] [--max-steps N] [--count-packets] [--opt-level/-O N] <elf-file>
+./build/emu [--trace] [--dump] [--max-steps N] [--count-packets] [--chain] [--opt-level/-O N] <elf-file>
 ```
 
 The emulator:
@@ -93,6 +93,7 @@ The emulator:
 - `--dump`: Print generated LLVM IR per basic block (after optimization)
 - `--max-steps N`: Leave each block after at most N packets (0 = unlimited, default; 1 single-steps)
 - `--count-packets`: Print the packets and block runs executed (`packets=N runs=M`) to stderr at exit
+- `--chain`: Blocks run the next block themselves until a CEC event or a halt (CpuState::chain_budget); results match a run without it
 - `--opt-level N` / `-O N`: LLVM optimization level 0–3 (default: 2)
 
 ### Adding Emulator Support for New Instructions
