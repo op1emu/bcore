@@ -10,6 +10,7 @@
 #include <llvm/IR/Module.h>
 
 class Memory;
+struct CpuState;
 
 struct BBTranslateResult {
     std::unique_ptr<llvm::Module> module;
@@ -29,7 +30,8 @@ public:
                  bool unlimited = true,
                  bool fastmem = false, uint64_t fast_base = 0);
 
-    BBTranslateResult translate(uint32_t pc);
+    // hint: the guest state now, for heuristics only (LiftVisitor::set_hint).
+    BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr);
     // Upper bound on packets per block (default and maximum 256). Limited
     // mode sets it to the step budget, since a run never executes more:
     // translating the rest of the block would only be compiled again from
@@ -55,7 +57,7 @@ public:
 private:
     void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* mem,
-                         uint32_t entry_pc, llvm::BasicBlock* first_entry);
+                         uint32_t entry_pc, llvm::BasicBlock* self_loop);
 
     Memory* mem_;
     bool unlimited_;

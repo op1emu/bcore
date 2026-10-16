@@ -95,7 +95,7 @@ bool Core::run(uint32_t pc) {
             }
         } fail_on_unwind{sink, pc, t0};
 #endif
-        auto result = translator_->translate(pc);
+        auto result = translator_->translate(pc, cpu_);
 #if BCORE_ENABLE_PROFILE
         // Stage callbacks fire only after the translation is timed, so
         // nothing the sink does lands inside a stage or in translate_ns.
