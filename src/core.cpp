@@ -37,6 +37,7 @@ bool Core::init(int opt_level, int codegen_level) {
     jit_ = std::make_shared<JitEngine>();
     if (!jit_->init(opt_level_, codegen_level_))
         return false;
+    jit_->setChainFilter(chain_filter_);
     attachProfiler();
 
     // Use the Memory interface's is_fastmem() to determine mode.
@@ -190,6 +191,11 @@ bool Core::run(uint32_t pc) {
     // (cpu_state_init) between runs of blocks that are already compiled.
     cpu_->page_table = page_table_;
     cpu_->cec_pending = &bcore_cec_pending;
+    cpu_->chain_table = jit_->chainTable();
+    cpu_->chain_packets = 0;
+    cpu_->chain_blocks = 0;
+    cpu_->chain_would = 0;
+    cpu_->cycles_base = uint64_t(cpu_->cycles[1]) << 32 | cpu_->cycles[0];
     cpu_->did_jump = false;
     cpu_->pc = pc;
     cpu_->packets = 0;
@@ -208,6 +214,7 @@ void Core::invalidate() {
     // same levels); if it ever does, stop rather than dereference a null LLJIT.
     if (!jit_->init(opt_level_, codegen_level_))
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
+    jit_->setChainFilter(chain_filter_);
     applyModuleTarget();
 #if BCORE_ENABLE_PROFILE
     // The old engine's objects are gone; drop their map entries before the
@@ -234,6 +241,11 @@ std::tuple<std::string, uint32_t> Core::disassemble(uint32_t pc) {
 
     uint32_t next_pc = pc + static_cast<uint32_t>(insn_len);
     return {text, next_pc};
+}
+
+void Core::set_chain_filter(std::function<bool(uint32_t)> filter) {
+    chain_filter_ = std::move(filter);
+    if (jit_) jit_->setChainFilter(chain_filter_);
 }
 
 void Core::set_dump_ir(bool enable) {

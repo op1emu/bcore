@@ -1,6 +1,7 @@
 #include "jit_engine.h"
 
 #include <cstdio>
+#include <atomic>
 #include <cstring>
 
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
@@ -87,6 +88,8 @@ bool JitEngine::init(int opt_level, int codegen_level) {
 
     // Pre-allocate hash buckets to avoid rehash overhead during execution.
     cache_.reserve(1024);
+    chain_ = std::make_unique<ChainSlot[]>(size_t(1) << kChainBits);
+    for (size_t i = 0; i < (size_t(1) << kChainBits); ++i) chain_[i] = {kChainEmpty, 0, nullptr};
 
     // Manually register all extern "C" symbols that JIT'd code may call.
     // This is more reliable than DynamicLibrarySearchGenerator which depends
@@ -186,14 +189,32 @@ bool JitEngine::addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
     }
     auto fn = reinterpret_cast<BbFunc>(sym->getValue());
     cache_[pc] = BBInfo{fn, fallthrough_pc};
+    publishChain(pc, fn);
     return true;
 }
 
+// The function before the PC: generated code that matches the PC calls the
+// function, so it must never see a new PC with the old function. Single
+// threaded, so ordering the compiler's stores is enough.
+void JitEngine::publishChain(uint32_t pc, BbFunc fn) {
+    if (chain_filter_ && !chain_filter_(pc)) return;
+    ChainSlot& slot = chain_[chainIndex(pc)];
+    slot.pc = kChainEmpty;
+    std::atomic_signal_fence(std::memory_order_release);
+    slot.fn = fn;
+    std::atomic_signal_fence(std::memory_order_release);
+    slot.pc = pc;
+}
+
 BbFunc JitEngine::lookup(uint32_t pc) {
+    const ChainSlot& slot = chain_[chainIndex(pc)];
+    if (slot.pc == pc) return slot.fn;
     auto it = cache_.find(pc);
-    if (it != cache_.end())
-        return it->second.fn;
-    return nullptr;
+    if (it == cache_.end())
+        return nullptr;
+    // Lost its slot to a block with the same index, or filtered.
+    publishChain(pc, it->second.fn);
+    return it->second.fn;
 }
 
 bool JitEngine::registerJITEventListener(llvm::JITEventListener& L) {
