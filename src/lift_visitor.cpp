@@ -153,6 +153,11 @@ void LiftVisitor::carry_reg_cache_over_access(BasicBlock* from, BasicBlock* to) 
     if (mem_keeps_regs_) carry_reg_cache(from, to);
 }
 
+// A halt returns to the host (CpuState::chain_budget), as the CEC's do.
+void LiftVisitor::emit_stop_chaining() {
+    builder_.CreateStore(builder_.getInt32(0), cpu_field_ptr(offsetof(CpuState, chain_budget), builder_.getInt32Ty()));
+}
+
 void LiftVisitor::emit_set_did_jump() {
     auto* ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), ptr);
@@ -164,7 +169,12 @@ bool LiftVisitor::did_jump_clear() {
     return cache && cache->count(kDidJumpClear);
 }
 
+static bool is_cycles(size_t offset) {
+    return offset >= offsetof(CpuState, cycles[0]) && offset <= offsetof(CpuState, cycles[2]);
+}
+
 Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
+    accesses_cycles_ |= is_cycles(offset);
     // CYCLES read (cycles[0]): reload cycles[1] (CYCLES2) from shadow (cycles[2]).
     // Bypass store_cpu_u32 to avoid the cycles[1]->cycles[2] redirect below.
     if (offset == offsetof(CpuState, cycles[0])) {
@@ -185,6 +195,7 @@ Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
 }
 
 void LiftVisitor::store_cpu_u32(size_t offset, Value* val) {
+    accesses_cycles_ |= is_cycles(offset);
     // CYCLES2 write (cycles[1]): redirect to shadow (cycles[2]); readable value
     // only updates when CYCLES is read (see load_cpu_u32 above).
     if (offset == offsetof(CpuState, cycles[1]))
@@ -587,6 +598,7 @@ bool LiftVisitor::unimplemented(const char* name) {
     // Set halted=true, did_jump=true to break out
     auto* ptr = cpu_field_ptr(offsetof(CpuState, halted), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), ptr);
+    emit_stop_chaining();
     auto* ecode_ptr = cpu_field_ptr(offsetof(CpuState, exit_code), builder_.getInt32Ty());
     builder_.CreateStore(builder_.getInt32(1), ecode_ptr);
     emit_set_did_jump();
@@ -1306,6 +1318,7 @@ bool LiftVisitor::decode_ProgCtrl_RTS() {
 bool LiftVisitor::decode_pseudoDEBUG_ABORT(uint16_t g) {
     auto* ptr = cpu_field_ptr(offsetof(CpuState, halted), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), ptr);
+    emit_stop_chaining();
     auto* ecode_ptr = cpu_field_ptr(offsetof(CpuState, exit_code), builder_.getInt32Ty());
     builder_.CreateStore(builder_.getInt32(1), ecode_ptr);
     emit_set_did_jump();
@@ -3884,6 +3897,7 @@ bool LiftVisitor::decode_pseudoDEBUG_DBG_A1(uint16_t) { return true; }
 bool LiftVisitor::decode_pseudoDEBUG_HLT(uint16_t) {
     auto* ptr = cpu_field_ptr(offsetof(CpuState, halted), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), ptr);
+    emit_stop_chaining();
     auto* ecode_ptr = cpu_field_ptr(offsetof(CpuState, exit_code), builder_.getInt32Ty());
     builder_.CreateStore(builder_.getInt32(0), ecode_ptr);
     emit_set_did_jump();
@@ -8132,6 +8146,7 @@ static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
         return B.CreateBitCast(gep, ty->getPointerTo());
     };
     B.CreateStore(B.getInt8(1),  make_ptr(offsetof(CpuState, halted),    B.getInt8Ty()));
+    B.CreateStore(B.getInt32(0), make_ptr(offsetof(CpuState, chain_budget), B.getInt32Ty()));
     B.CreateStore(B.getInt32(1), make_ptr(offsetof(CpuState, exit_code), B.getInt32Ty()));
     B.CreateStore(B.getInt8(1),  make_ptr(offsetof(CpuState, did_jump),  B.getInt8Ty()));
     B.CreateRetVoid();

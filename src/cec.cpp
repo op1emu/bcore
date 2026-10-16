@@ -214,6 +214,7 @@ static void _cec_raise_internal(CpuState* cpu, int ivg) {
                     cpu->pc, curr_ivg, ivg);
             cpu->halted = true;
             cpu->exit_code = 1;
+            cpu->chain_budget = 0;
             return;
         } else {
             do_dispatch = true;
@@ -234,6 +235,9 @@ static void _cec_raise_internal(CpuState* cpu, int ivg) {
 
     // ── Dispatch (process_int) ────────────────────────────────────────────────
 
+    // The host sees every entry (and the halts below): what it does between
+    // blocks depends on IPEND.
+    cpu->chain_budget = 0;
     ipend() |= (1u << ivg);
     ilat()  &= ~(1u << ivg);
 #if BCORE_ENABLE_PROFILE
@@ -304,6 +308,8 @@ static void _cec_raise_internal(CpuState* cpu, int ivg) {
 // ── EXCPT ─────────────────────────────────────────────────────────────────────
 
 extern "C" void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem) {
+    // Every exception returns to the host, the libgloss syscall included.
+    cpu->chain_budget = 0;
     // Set SEQSTAT.EXCAUSE (bits 5:0).
     cpu->seqstat = (cpu->seqstat & ~EXCAUSE_MASK) | (excp & EXCAUSE_MASK);
 
@@ -353,6 +359,7 @@ static uint32_t read_ret_reg(CpuState* cpu, int ivg) {
 // Returns the new PC.
 static uint32_t cec_return_common(CpuState* cpu, int ivg) {
     // Reference: cec_return (dv-bfin_cec.c lines 683-795).
+    cpu->chain_budget = 0;
 
     // Always clear EMU bit (reference line 704).
     ipend() &= ~IVG_EMU_B;

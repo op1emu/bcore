@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 
@@ -47,8 +48,15 @@ public:
         data_layout_ = std::move(data_layout);
         target_triple_ = std::move(triple);
     }
+    // See Core::set_chaining, set_chain_dry and set_host_cycles.
+    void set_chaining(bool chaining, bool dry) { chaining_ = chaining; chain_dry_ = dry; }
+    void set_host_cycles(bool host_cycles) { host_cycles_ = host_cycles; }
 
 private:
+    void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
+    void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* mem,
+                         uint32_t entry_pc, llvm::BasicBlock* first_entry);
+
     Memory* mem_;
     bool unlimited_;
     static constexpr uint32_t kMaxPackets = 256;
@@ -56,6 +64,9 @@ private:
     bool budget_limited_ = false;
     bool fastmem_ = false;
     uint64_t fast_base_ = 0;
+    bool chaining_ = false;
+    bool chain_dry_ = false;
+    bool host_cycles_ = false;
     std::string data_layout_;
     std::string target_triple_;
 };
