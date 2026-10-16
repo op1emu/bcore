@@ -55,6 +55,15 @@ public:
     static constexpr uint32_t kPageSize = 1u << kPageBits;
     static constexpr uint32_t kPageTableEntries = 1u << (32 - kPageBits);
     virtual uint8_t* const* page_table() const { return nullptr; }
+
+    // Whether read*/write* leave the guest registers alone: the data, pointer,
+    // DAG and loop registers, RETS, the accumulators and the ASTAT bits in
+    // CpuState. They may still raise an exception (which sets did_jump; the
+    // block leaves right after the call) or latch an interrupt. Return true
+    // only if every callback keeps to that: generated code then reuses register
+    // values it loaded before an access instead of reloading them after it. The
+    // JIT samples this when it translates a block, like page_table().
+    virtual bool callbacks_preserve_registers() const { return false; }
 };
 
 // extern "C" wrappers for JIT-generated code

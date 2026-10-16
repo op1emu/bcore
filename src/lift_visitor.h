@@ -592,6 +592,7 @@ private:
     uint64_t fast_base_value_ = 0;
     uint32_t rawmem_limit_ = 0;   // non-zero: inline mem reads for addr < rawmem_limit_
     bool page_table_ = false;     // inline access through CpuState::page_table (Memory::page_table())
+    bool mem_keeps_regs_ = false; // Memory::callbacks_preserve_registers()
     llvm::Value* page_table_value_ = nullptr;  // CpuState::page_table, loaded once in the entry block
     llvm::Value* cec_pending_value_ = nullptr;  // CpuState::cec_pending, likewise
     llvm::Value* entry_load_ptr(size_t offset, llvm::Value*& slot, const char* name);
@@ -602,12 +603,14 @@ private:
     std::map<size_t, llvm::Value*>* reg_cache_here();
     void emit_cpu_store(size_t offset, llvm::Value* val);
     void reg_cache_after_call(const char* callee);
+    void carry_reg_cache_over_access(llvm::BasicBlock* from, llvm::BasicBlock* to);
     // A cache entry under did_jump's offset means did_jump is known to be
     // clear at that point (it is never a register value).
     static constexpr size_t kDidJumpClear = offsetof(CpuState, did_jump);
     bool did_jump_clear();
     void emit_set_did_jump();
     void emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len);
+    void emit_cec_check(bool exit_in_check);
     uint32_t fallthrough_pc_ = 0;
     std::vector<PendingExit> pending_exits_;
 
