@@ -53,6 +53,8 @@ bool Core::init(int opt_level, int codegen_level) {
         fast_base);
     if (cpu_->steps_remaining)
         translator_->set_max_packets(cpu_->steps_remaining);
+    translator_->set_chaining(chaining_, chain_dry_);
+    translator_->set_host_cycles(host_cycles_);
     applyModuleTarget();
 
     return true;
@@ -203,7 +205,7 @@ bool Core::run(uint32_t pc) {
     fn(cpu_, mem_);
     jit_->clear_executing();
 #if BCORE_ENABLE_PROFILE
-    profile_->stats.blocks_executed++;
+    profile_->stats.blocks_executed += 1 + cpu_->chain_blocks;
 #endif
     return true;
 }
@@ -246,6 +248,17 @@ std::tuple<std::string, uint32_t> Core::disassemble(uint32_t pc) {
 void Core::set_chain_filter(std::function<bool(uint32_t)> filter) {
     chain_filter_ = std::move(filter);
     if (jit_) jit_->setChainFilter(chain_filter_);
+}
+
+void Core::set_chaining(bool chaining, bool dry) {
+    chaining_ = chaining;
+    chain_dry_ = dry;
+    if (translator_) translator_->set_chaining(chaining_, chain_dry_);
+}
+
+void Core::set_host_cycles(bool host_cycles) {
+    host_cycles_ = host_cycles;
+    if (translator_) translator_->set_host_cycles(host_cycles_);
 }
 
 void Core::set_dump_ir(bool enable) {

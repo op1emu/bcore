@@ -44,6 +44,8 @@ public:
 
     // The PC that should be used for fallthrough (set during translation)
     uint32_t fallthrough_pc() const { return fallthrough_pc_; }
+    // Whether the block reads or writes CYCLES or CYCLES2.
+    bool accesses_cycles() const { return accesses_cycles_; }
     void set_fallthrough_pc(uint32_t pc) { fallthrough_pc_ = pc; }
 
     // Reset terminated_ so a linear scan can continue past branch instructions
@@ -587,6 +589,7 @@ private:
     int  parallel_slot_ = 0;      // 0=slot0/non-parallel, 1=slot1, 2=slot2
     bool dis_algn_expt_ = false;  // DISALGNEXCPT fired in current parallel group
     bool fastmem_ = false;
+    bool accesses_cycles_ = false;
     bool check_did_jump_ = false;  // whether to check did_jump flag at end of block and exit if set
     bool check_cec_pending_ = false;  // whether to check cec_pending flag at end of block and exit if set
     uint64_t fast_base_value_ = 0;
@@ -609,6 +612,7 @@ private:
     static constexpr size_t kDidJumpClear = offsetof(CpuState, did_jump);
     bool did_jump_clear();
     void emit_set_did_jump();
+    void emit_stop_chaining();
     void emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len);
     void emit_cec_check(bool exit_in_check);
     uint32_t fallthrough_pc_ = 0;

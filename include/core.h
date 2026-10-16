@@ -32,6 +32,16 @@ public:
     // for blocks compiled or looked up from now on, and persists across
     // invalidate(). The filter is called on the run() thread only.
     void set_chain_filter(std::function<bool(uint32_t)> filter);
+    // Blocks compiled from now on may run the next block themselves instead
+    // of returning, while CpuState::chain_budget lasts (never in limited
+    // mode). With dry, such a block sets CpuState::chain_would and returns
+    // instead (to check a host's budget against what it then does).
+    void set_chaining(bool chaining, bool dry = false);
+    // The host writes CYCLES before every run (as op1emu does): a chained
+    // block that accesses CYCLES then writes it first, to
+    // CpuState::cycles_base plus the packets chained before it, as such a
+    // host would have. Off by default (bcore's emu leaves CYCLES alone).
+    void set_host_cycles(bool host_cycles);
 
     // ---- JIT observability (contract in bcore_profile.h) ----
 
@@ -86,4 +96,7 @@ private:
     int codegen_level_ = -1;
     bool dump_ir_ = false;
     std::function<bool(uint32_t)> chain_filter_;
+    bool chaining_ = false;
+    bool chain_dry_ = false;
+    bool host_cycles_ = false;
 };

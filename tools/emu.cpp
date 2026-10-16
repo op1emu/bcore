@@ -28,6 +28,7 @@ int main(int argc, char** argv) {
     bool fastmem = false;
     bool page_table = false;
     bool count_packets = false;
+    bool chain = false;
     uint64_t max_steps = 0; // 0 = unlimited
     int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
     const char* elf_path = nullptr;
@@ -51,13 +52,19 @@ int main(int argc, char** argv) {
             page_table = true;
         } else if (strcmp(argv[i], "--count-packets") == 0) {
             count_packets = true;
+        } else if (strcmp(argv[i], "--chain") == 0) {
+            chain = true;
         } else {
             elf_path = argv[i];
         }
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        return 1;
+    }
+    if (chain && (max_steps || trace)) {
+        fprintf(stderr, "error: --chain runs blocks without returning: not with --max-steps or --trace\n");
         return 1;
     }
 
@@ -170,6 +177,8 @@ int main(int argc, char** argv) {
     // Initialize Core (JIT + translator)
     Core core(&cpu, &memory);
     if (dump_ir) core.set_dump_ir(true);
+    // Blocks run the next one themselves until a CEC event or a halt.
+    core.set_chaining(chain);
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
         return 1;
@@ -182,15 +191,17 @@ int main(int argc, char** argv) {
     }
 
     // Main execution loop
-    uint64_t runs = 0, packets = 0;
+    uint64_t runs = 0, packets = 0, host_runs = 0;
     while (!cpu.halted) {
         cpu.steps_remaining = step_budget;
+        cpu.chain_budget = chain ? 1u << 30 : 0;
         if (!core.run(cpu.pc)) {
             fprintf(stderr, "failed to run BB at 0x%08x\n", cpu.pc);
             return 1;
         }
-        ++runs;
-        packets += cpu.packets;
+        ++host_runs;
+        runs += 1 + cpu.chain_blocks;
+        packets += cpu.chain_packets + cpu.packets;
         if (trace) {
             auto [text, next_pc] = core.disassemble(cpu.pc);
             fprintf(stderr, "  %08x:  %s\n", cpu.pc, text.c_str());
@@ -201,7 +212,11 @@ int main(int argc, char** argv) {
     }
 
     if (count_packets)
+    {
         fprintf(stderr, "packets=%llu runs=%llu\n",
                 (unsigned long long)packets, (unsigned long long)runs);
+        // Runs that returned here, the rest ran from the block before them.
+        if (chain) fprintf(stderr, "returns=%llu\n", (unsigned long long)host_runs);
+    }
     return cpu.exit_code;
 }
