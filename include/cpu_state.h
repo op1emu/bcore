@@ -67,12 +67,12 @@ struct CpuState {
     // exception is counted.
     uint32_t packets;
     // Memory::page_table() of the Memory this state runs with, or null; set
-    // by Core. Generated code loads it from here rather than embedding the
-    // host address, so the same block compiles to the same code in every
-    // process.
+    // by Core before every block it runs. Generated code loads it from here
+    // rather than embedding the host address, so the same block compiles to
+    // the same code in every process.
     uint8_t* const* page_table;
-    // The CEC's interrupt-may-be-pending flag; set by Core, read by generated
-    // code before it calls cec_check_pending.
+    // The CEC's interrupt-may-be-pending flag; set by Core likewise, read by
+    // generated code before it calls cec_check_pending.
     const bool* cec_pending;
 };
 

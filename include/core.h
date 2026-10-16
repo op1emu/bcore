@@ -68,6 +68,9 @@ private:
 
     CpuState* cpu_;
     Memory* mem_;
+    // Memory::page_table() as last seen non-null at a translation; Core::run
+    // copies it into CpuState::page_table.
+    uint8_t* const* page_table_ = nullptr;
     // Declared before jit_ on purpose: a JitEngine being destroyed frees its
     // objects through the registered listener, which writes into profile_ --
     // so profile_ must outlive any engine.

@@ -83,6 +83,9 @@ public:
     uint8_t* const* page_table() const override {
         return pages_.empty() ? nullptr : pages_.data();
     }
+    // The callbacks reach CEC/EVT state or raise an exception; they never
+    // write a guest register.
+    bool callbacks_preserve_registers() const override { return true; }
 
     // Bulk load for ELF segment loading — concrete-only, not virtual
     void load(uint32_t addr, const uint8_t* buf, uint32_t len) {

@@ -69,8 +69,7 @@ bool Core::run(uint32_t pc) {
         // The translation below inlines accesses through this table if there
         // is one; the code finds it in CpuState (see Memory::page_table()).
         if (uint8_t* const* table = mem_->page_table())
-            cpu_->page_table = table;
-        cpu_->cec_pending = &bcore_cec_pending;
+            page_table_ = table;
 #if BCORE_ENABLE_PROFILE
         BcoreEventSink* sink = profile_->sink;
         profile_->stats.cache_misses++;
@@ -187,6 +186,10 @@ bool Core::run(uint32_t pc) {
     }
 #endif
 
+    // Set on every run, not once: the host may reset CpuState
+    // (cpu_state_init) between runs of blocks that are already compiled.
+    cpu_->page_table = page_table_;
+    cpu_->cec_pending = &bcore_cec_pending;
     cpu_->did_jump = false;
     cpu_->pc = pc;
     cpu_->packets = 0;

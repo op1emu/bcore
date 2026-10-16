@@ -5,6 +5,7 @@
 #include "mmr.h"
 #include "../src/evt.h"
 #include "../src/cec.h"
+#include "../tools/flat_memory.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -66,7 +67,109 @@ static const Case kCases[] = {
     {0x9a00, "B[P0++] = R0", true, 1, false},
 };
 
+// FlatMemory that calls for every access, or inlines its one RAM page.
+class CallingFlat : public FlatMemory {
+public:
+    explicit CallingFlat(CpuState* cpu, bool table) : FlatMemory(0, kPageSize, cpu) {
+        if (table) enable_page_table();
+    }
+    uint32_t rawmem_limit() const override { return 0; }
+};
+
+// A store at a loop bottom that unmasks a latched interrupt: the interrupt is
+// taken after the loop's back edge, with RETI at the loop top, as when the
+// epilog calls both helpers. (The block's own did_jump exit used to skip the
+// check; bcore's emu does not check between blocks.)
+static void test_interrupt_at_loop_bottom(int opt, bool table) {
+    CpuState cpu{};
+    CallingFlat mem(&cpu, table);
+    Core core(&cpu, &mem);
+    require(core.init(opt), "init");
+    cpu_state_init(&cpu);
+    mem.write16(0x100, 0x9200);  // [P0++] = R0
+    mem.write16(0x102, 0x2000);  // JUMP.S 0
+    evt_write(EVT_BASE + 4 * 15, 0x400);
+    evt_write(EVT_BASE + 4 * 7, 0x300);
+    // From reset into IVG15 with nesting enabled, IVG7 latched but masked.
+    cec_mmr_write(&cpu, CEC_MMR_BASE + 4, 1u << 15);
+    cec_raise(&cpu, 15);
+    cec_return_rti(&cpu);
+    cpu.did_jump = false;
+    cec_push_reti(&cpu);
+    cec_check_pending(&cpu);
+    cpu.did_jump = false;
+    cec_raise(&cpu, 7);
+    cpu.lt[0] = 0x100; cpu.lb[0] = 0x100; cpu.lc[0] = 2;
+    cpu.dpregs[8] = CEC_MMR_BASE + 4;           // P0 = &IMASK
+    cpu.dpregs[0] = (1u << 7) | (1u << 15);     // unmask IVG7
+    require(core.run(0x100), "loop block");
+    if (cpu.pc != 0x300 || cpu.reti != 0x100) {
+        fprintf(stderr, "FAIL: interrupt at loop bottom, O%d, table %d: pc 0x%x, reti 0x%x\n",
+                opt, table, cpu.pc, cpu.reti);
+        std::exit(1);
+    }
+}
+
+// A Memory that does not promise callbacks_preserve_registers() may change a
+// register in read32; the next instruction sees the new value.
+class RegisterWriter : public TwoPages {
+public:
+    CpuState* cpu;
+    RegisterWriter(CpuState* c, bool table) : TwoPages(table), cpu(c) {}
+    uint32_t read32(uint32_t a) const override {
+        if (a >= kData) cpu->dpregs[1] = 99;
+        return TwoPages::read32(a);
+    }
+};
+
+static void test_callback_writes_register(int opt, bool table) {
+    CpuState cpu{};
+    RegisterWriter mem(&cpu, table);
+    Core core(&cpu, &mem);
+    require(core.init(opt), "init");
+    cec_init(); evt_init();
+    mem.write16(0x100, 0x6009);  // R1 = 1
+    mem.write16(0x102, 0x9000);  // R0 = [P0++]
+    mem.write16(0x104, 0x3011);  // R2 = R1
+    mem.write16(0x106, 0x2000);  // JUMP.S 0
+    cpu.dpregs[8] = 0x1300;      // never in the table: always a call
+    require(core.run(0x100), "callback block");
+    if (cpu.dpregs[2] != 99) {
+        fprintf(stderr, "FAIL: callback register write, O%d, table %d: R2 = %u\n", opt, table, cpu.dpregs[2]);
+        std::exit(1);
+    }
+}
+
+// Blocks compiled before cpu_state_init() still find the page table and the
+// CEC's pending flag after it.
+static void test_reset_between_runs(int opt) {
+    CpuState cpu{};
+    TwoPages mem(true);
+    Core core(&cpu, &mem);
+    require(core.init(opt), "init");
+    cpu_state_init(&cpu);
+    mem.write16(0x100, 0x9200);  // [P0++] = R0
+    mem.write16(0x102, 0x2000);  // JUMP.S 0
+    for (int run = 0; run < 2; ++run) {
+        cpu_state_init(&cpu);
+        cpu.dpregs[0] = 0x55667788;
+        cpu.dpregs[8] = TwoPages::kData + 0x100;
+        require(core.run(0x100), "block after reset");
+        require(cpu.page_table == mem.pages.data(), "CpuState::page_table after reset");
+        uint32_t stored;
+        memcpy(&stored, &mem.bytes[TwoPages::kData + 0x100], 4);
+        require(stored == 0x55667788, "store after reset");
+    }
+}
+
 int main() {
+    for (int opt : {0, 2}) {
+        for (bool table : {false, true}) {
+            test_interrupt_at_loop_bottom(opt, table);
+            test_callback_writes_register(opt, table);
+        }
+        test_reset_between_runs(opt);
+    }
     int count = 0;
     for (int opt : {0, 2}) for (bool table : {false, true}) for (uint32_t page : {0u, 0x1000u})
     for (const Case& c : kCases) {
@@ -103,5 +206,6 @@ int main() {
         }
         ++count;
     }
-    printf("PASS: %d page-table cases (mapped/unmapped page, table on/off, O0/O2)\n", count);
+    printf("PASS: %d page-table cases (mapped/unmapped page, table on/off, O0/O2), "
+           "interrupt at a loop bottom, callback register write, reset between runs\n", count);
 }
