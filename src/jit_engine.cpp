@@ -206,6 +206,12 @@ void JitEngine::publishChain(uint32_t pc, BbFunc fn) {
     slot.pc = pc;
 }
 
+void JitEngine::setChainFilter(std::function<bool(uint32_t)> filter) {
+    chain_filter_ = std::move(filter);
+    if (chain_)
+        for (size_t i = 0; i < (size_t(1) << kChainBits); ++i) chain_[i] = {kChainEmpty, 0, nullptr};
+}
+
 BbFunc JitEngine::lookup(uint32_t pc) {
     const ChainSlot& slot = chain_[chainIndex(pc)];
     if (slot.pc == pc) return slot.fn;
