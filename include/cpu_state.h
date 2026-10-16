@@ -74,6 +74,32 @@ struct CpuState {
     // The CEC's interrupt-may-be-pending flag; set by Core likewise, read by
     // generated code before it calls cec_check_pending.
     const bool* cec_pending;
+
+    // Chaining: a block that ends may run the next one itself instead of
+    // returning to the host (Core::set_chaining). Core::run sets the table and
+    // clears the counts before every run; the host sets the budget.
+    //
+    // The JIT's direct-mapped table of compiled blocks (JitEngine::ChainSlot).
+    const void* chain_table;
+    // Packets the run may retire before it returns: a block that ends with
+    // chain_packets + packets at or past it returns to the host. 0 never
+    // chains. The CEC sets it to 0 on every interrupt entry, return,
+    // exception and halt, and so may the host's memory callbacks and other
+    // threads: anything after which the host has work returns to it.
+    uint32_t chain_budget;
+    // Packets retired by the blocks that already ran in this run; the block
+    // running counts its own in `packets`.
+    uint32_t chain_packets;
+    // Blocks that ran in this run after the first.
+    uint32_t chain_blocks;
+    // Set by a block compiled with Core::set_chain_dry when it would have
+    // chained; it returns instead.
+    uint8_t chain_would;
+    // CYCLES (cycles[1]:cycles[0]) when this run started. With
+    // Core::set_host_cycles a chained block that accesses CYCLES sets it to
+    // cycles_base + chain_packets first, as a host that writes CYCLES before
+    // every block would.
+    uint64_t cycles_base;
 };
 
 // ASTAT bit positions (from refs/bfin-sim.h)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -12,6 +13,7 @@
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 
+#include "chain_table.h"
 #include "cpu_state.h"
 #include "mem.h"
 
@@ -28,6 +30,7 @@ struct BBInfo {
 };
 
 class BBTranslator;
+
 
 class JitEngine {
 public:
@@ -50,6 +53,14 @@ public:
                    std::unique_ptr<llvm::LLVMContext> ctx,
                    uint32_t fallthrough_pc);
     BbFunc lookup(uint32_t pc);
+    // The chain table (CpuState::chain_table). A block is in it from when it
+    // is compiled, unless the filter rejects its PC; a block that loses its
+    // slot to another with the same index gets it back when the host looks
+    // it up. A new engine (Core::invalidate) starts with an empty table.
+    const ChainSlot* chainTable() const { return chain_.get(); }
+    // PCs the filter rejects are never in the table, so generated code never
+    // runs them itself: the host runs every block that starts there.
+    void setChainFilter(std::function<bool(uint32_t)> filter) { chain_filter_ = std::move(filter); }
     void set_executing(uint32_t pc) { executing_bb_pc_ = pc; }
     void clear_executing()          { executing_bb_pc_ = 0; }
 
@@ -74,6 +85,9 @@ public:
 private:
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::unordered_map<uint32_t, BBInfo> cache_;
+    std::unique_ptr<ChainSlot[]> chain_;
+    std::function<bool(uint32_t)> chain_filter_;
+    void publishChain(uint32_t pc, BbFunc fn);
     int opt_level_ = 2;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
     // Cached pass pipeline (built once in init(), reused across optimize_module() calls).

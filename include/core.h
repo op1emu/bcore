@@ -27,6 +27,11 @@ public:
     bool run(uint32_t pc);
     std::tuple<std::string, uint32_t> disassemble(uint32_t pc);
     void set_dump_ir(bool enable);
+    // PCs a chained block may run next (see CpuState::chain_budget); the
+    // host runs every block starting at a PC the filter rejects. Takes effect
+    // for blocks compiled or looked up from now on, and persists across
+    // invalidate(). The filter is called on the run() thread only.
+    void set_chain_filter(std::function<bool(uint32_t)> filter);
 
     // ---- JIT observability (contract in bcore_profile.h) ----
 
@@ -80,4 +85,5 @@ private:
     int opt_level_ = 2;
     int codegen_level_ = -1;
     bool dump_ir_ = false;
+    std::function<bool(uint32_t)> chain_filter_;
 };
