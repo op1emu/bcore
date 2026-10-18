@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
@@ -13,6 +14,7 @@
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
@@ -21,6 +23,27 @@
 #include "syscall_emu.h"
 #include "cec.h"
 #include "cpu_state.h"
+
+// A block function's entry count (addModule), and the count under which the
+// splitter calls a basic block cold: a path behind a rare branch (weighted
+// 1:2^20) counts 2^10 at most, one behind as many as 19 even branches still
+// 2^11. Process-wide LLVM options, set once; without them the splitter would
+// ask for a profile summary instead.
+static constexpr uint64_t kEntryCount = uint64_t(1) << 30;
+static constexpr const char* kColdCount = "2048";
+
+static void split_by_counts() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        auto& options = llvm::cl::getRegisteredOptions();
+        auto set = [&](const char* name, const char* value) {
+            auto it = options.find(name);
+            if (it != options.end()) it->second->addOccurrence(0, name, value);
+        };
+        set("mfs-psi-cutoff", "0");
+        set("mfs-count-threshold", kColdCount);
+    });
+}
 
 JitEngine::JitEngine() = default;
 JitEngine::~JitEngine() = default;
@@ -77,6 +100,15 @@ bool JitEngine::init(int opt_level, int codegen_level) {
     tuning.LoopInterleaving = opt_level >= 2;
     tuning.SLPVectorization = opt_level >= 2;
     pb_ = std::make_unique<llvm::PassBuilder>(pass_machine_.get(), tuning);
+
+    // The machine function splitter moves a block's cold basic blocks into a
+    // section of their own (.text.split.*), which the arena keeps apart from
+    // the hot code, so that hot paths lie densely next to each other. It acts
+    // on functions with profile counts: addModule gives every block one, and
+    // the lifter's branch weights (rarely() in lift_visitor.cpp) make its rare
+    // paths' counts fall under the threshold set here.
+    jtmb_or_err->getOptions().EnableMachineFunctionSplitter = true;
+    split_by_counts();
 
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(std::move(*jtmb_or_err));
@@ -182,6 +214,9 @@ void JitEngine::optimize_module(llvm::Module& mod) {
 bool JitEngine::addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
                           std::unique_ptr<llvm::LLVMContext> ctx,
                           uint32_t fallthrough_pc) {
+    // For the backend only, after the IR pipeline (see init()).
+    for (llvm::Function& function : *module)
+        if (!function.isDeclaration()) function.setEntryCount(kEntryCount);
     auto tsm = llvm::orc::ThreadSafeModule(std::move(module), std::move(ctx));
 
     if (auto err = jit_->addIRModule(std::move(tsm))) {
