@@ -27,34 +27,33 @@ std::shared_ptr<CodeArena> CodeArena::create() {
 }
 
 CodeArena::CodeArena(uint8_t* base, size_t size)
-    : base_(base), size_(size), code_{base, base + kHalf}, data_{base + kHalf, base + size} {}
+    : base_(base), size_(size),
+      hot_{base, base + kHalf / 4 * 3}, cold_{base + kHalf / 4 * 3, base + kHalf},
+      data_{base + kHalf, base + size} {}
 
 CodeArena::~CodeArena() { munmap(base_, size_); }
 
-uint8_t* CodeArena::allocate(bool code, uintptr_t size, unsigned alignment) {
-    Half& half = code ? code_ : data_;
+uint8_t* CodeArena::allocate(Region region, uintptr_t size, unsigned alignment) {
+    Range& range = region == Region::Hot ? hot_ : region == Region::Cold ? cold_ : data_;
     const uintptr_t align = alignment ? alignment : 1;
-    const uintptr_t at = (reinterpret_cast<uintptr_t>(half.next) + align - 1) & ~(align - 1);
-    if (at > reinterpret_cast<uintptr_t>(half.end) || size > reinterpret_cast<uintptr_t>(half.end) - at)
+    const uintptr_t at = (reinterpret_cast<uintptr_t>(range.next) + align - 1) & ~(align - 1);
+    if (at > reinterpret_cast<uintptr_t>(range.end) || size > reinterpret_cast<uintptr_t>(range.end) - at)
         return nullptr;
-    half.next = reinterpret_cast<uint8_t*>(at + size);
+    range.next = reinterpret_cast<uint8_t*>(at + size);
     return reinterpret_cast<uint8_t*>(at);
 }
 
-bool CodeArena::holdsCode(const void* p) const {
-    return p >= base_ && p < base_ + kHalf;
-}
-
 uint8_t* ArenaMemoryManager::allocateCodeSection(uintptr_t size, unsigned alignment, unsigned,
-                                                 llvm::StringRef) {
-    uint8_t* p = arena_->allocate(true, size, alignment);
+                                                 llvm::StringRef name) {
+    const bool cold = name.startswith(".text.split");
+    uint8_t* p = arena_->allocate(cold ? CodeArena::Region::Cold : CodeArena::Region::Hot, size, alignment);
     if (p) code_.emplace_back(p, size);
     return p;
 }
 
 uint8_t* ArenaMemoryManager::allocateDataSection(uintptr_t size, unsigned alignment, unsigned,
                                                  llvm::StringRef, bool) {
-    return arena_->allocate(false, size, alignment);
+    return arena_->allocate(CodeArena::Region::Data, size, alignment);
 }
 
 // Permissions stay as mapped; only the instruction cache (a no-op on x86).

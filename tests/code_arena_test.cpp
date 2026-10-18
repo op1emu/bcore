@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -35,24 +36,37 @@ static void run_all(Core& core, CpuState& cpu) {
     }
 }
 
-static void require_packed(const Core& core) {
-    std::vector<uintptr_t> addrs;
+// The code map lists a block's function and, where the machine function
+// splitter made one, its cold part (with profiling on; without, the
+// functions only). The functions lie together; cold parts lie apart from
+// them, in the arena's cold region.
+static void require_packed(const Core& core, int opt) {
+    std::map<uint32_t, std::vector<uintptr_t>> by_pc;
     core.forEachCompiledBlock([&](const BcoreBlockInfo& b) {
-        addrs.push_back(reinterpret_cast<uintptr_t>(b.host_addr));
+        by_pc[b.guest_pc].push_back(reinterpret_cast<uintptr_t>(b.host_addr));
     });
-    require(addrs.size() == size_t(kBlocks), "every block compiled");
+    require(by_pc.size() == size_t(kBlocks), "every block compiled");
     std::set<uintptr_t> pages;
     uintptr_t lo = UINTPTR_MAX, hi = 0;
     bool unaligned = false;
-    for (uintptr_t a : addrs) {
+    std::vector<uintptr_t> cold;
+    for (auto& [pc, addrs] : by_pc) {
+        require(addrs.size() <= 2, "a function and at most one cold part");
+        std::sort(addrs.begin(), addrs.end());
+        const uintptr_t a = addrs[0];
         pages.insert(a >> 12);
         lo = std::min(lo, a);
         hi = std::max(hi, a);
         unaligned |= (a & 0xfff) != 0;
+        if (addrs.size() == 2) cold.push_back(addrs[1]);
     }
     require(unaligned, "blocks do not all start a page");
-    require(pages.size() < addrs.size() / 4, "blocks share pages");
+    require(pages.size() < by_pc.size() / 4, "blocks share pages");
     require(hi - lo < (uintptr_t(1) << 20), "blocks lie together");
+    // A jump's rarely taken loop-bottom path is cold in every one of them;
+    // the backend splits from CodeGenOpt::Less up.
+    if (opt > 0 && core.profileHasBlockSizes()) require(cold.size() == size_t(kBlocks), "the splitter made cold parts");
+    for (uintptr_t c : cold) require(c - lo >= (uintptr_t(256) << 20), "cold parts lie apart");
 }
 
 static void test(int opt) {
@@ -63,12 +77,12 @@ static void test(int opt) {
     cec_init(); evt_init();
     write_blocks(mem);
     run_all(core, cpu);
-    require_packed(core);
+    require_packed(core, opt);
     run_all(core, cpu);  // compiled code runs again from the arena
 
     core.invalidate();
     run_all(core, cpu);
-    require_packed(core);
+    require_packed(core, opt);
 }
 
 int main() {

@@ -69,6 +69,13 @@ std::pair<uint64_t, std::vector<uint8_t>> ProfileState::takeObjectShape(uint32_t
     if (it == object_shapes.end()) return {0, {}};
     auto shape = std::move(it->second);
     object_shapes.erase(it);
+    // A split block's code is both parts: the function, then its cold part.
+    auto cold = cold_shapes.find(guest_pc);
+    if (cold != cold_shapes.end()) {
+        shape.first += cold->second.first;
+        shape.second.insert(shape.second.end(), cold->second.second.begin(), cold->second.second.end());
+        cold_shapes.erase(cold);
+    }
     return shape;
 }
 
@@ -102,11 +109,13 @@ void ProfileState::retire(uint64_t addr, const Block& b, uint64_t now) {
 
 namespace {
 
-// Parses "bb_0x%08x" (the name JitEngine gives every block function).
-// Returns false for any other symbol.
-bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc) {
+// Parses "bb_0x%08x" (the name JitEngine gives every block function), and
+// "bb_0x%08x.cold", the symbol the machine function splitter gives the
+// block's cold part (cold set). Returns false for any other symbol.
+bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc, bool& cold) {
     if (!name.startswith("bb_0x")) return false;
     llvm::StringRef hex = name.drop_front(5);
+    cold = hex.consume_back(".cold");
     if (hex.empty() || hex.size() > 8) return false;
     uint32_t pc = 0;
     const char* b = hex.data();
@@ -226,7 +235,8 @@ public:
             auto name_or = sym.getName();
             if (!name_or) { llvm::consumeError(name_or.takeError()); continue; }
             uint32_t guest_pc = 0;
-            if (!parse_bb_name(name_or.get(), guest_pc)) continue;
+            bool cold = false;
+            if (!parse_bb_name(name_or.get(), guest_pc, cold)) continue;
 
             auto sect_or = sym.getSection();
             auto addr_or = sym.getAddress();
@@ -248,7 +258,7 @@ public:
                 const uint64_t begin = monotonic_ns();
                 auto material = object_code_material(obj, sec, *addr_or - sec.getAddress(), size);
                 std::lock_guard<std::mutex> lock(state_.blocks_mutex);
-                state_.object_shapes[guest_pc] = {size, std::move(material)};
+                (cold ? state_.cold_shapes : state_.object_shapes)[guest_pc] = {size, std::move(material)};
                 state_.capture_ns += monotonic_ns() - begin;
             }
         }

@@ -168,7 +168,11 @@ static BcoreCompileMetrics compile_once(int opt_level, bool want = true) {
     require(m.ir_instructions > 0 && m.ir_blocks > 0, "IR counted");
     std::vector<BcoreBlockInfo> live;
     core.forEachCompiledBlock([&](const BcoreBlockInfo& b) { live.push_back(b); });
-    require(live.size() == 1 && m.object_bytes == live[0].host_size, "object bytes are the block's code size");
+    // One function, and its cold part where the splitter made one.
+    uint64_t code_size = 0;
+    for (const auto& b : live) code_size += b.host_size;
+    require(!live.empty() && live.size() <= 2 && m.object_bytes == code_size,
+            "object bytes are the block's code size");
     require(m.object_hash != 0, "code hashed");
     return m;
 #else

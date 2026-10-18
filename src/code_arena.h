@@ -16,8 +16,10 @@
 //
 // The first half of the reservation holds code, readable, writable and
 // executable for as long as the arena lives (no permission changes as blocks
-// are added, which would split its huge pages); the second half holds data.
-// Both are within 2 GiB of each other, as the small code model's PC-relative
+// are added): the blocks' hot code in its first three quarters, their cold
+// parts (the machine function splitter's .text.split.* sections, see
+// JitEngine::init) in the last, so that hot code lies densely. The second half
+// holds data. All of it is within 2 GiB, as the small code model's PC-relative
 // references between an object's sections need. Pages are touched, not
 // committed, as they fill.
 //
@@ -30,23 +32,23 @@ public:
     CodeArena(const CodeArena&) = delete;
     CodeArena& operator=(const CodeArena&) = delete;
 
-    // Size bytes aligned to alignment, or null when that half is full
+    enum class Region { Hot, Cold, Data };
+    // Size bytes aligned to alignment, or null when that region is full
     // (RuntimeDyld then stops the process: the boot to the main display
     // compiles about 40 MB of code).
-    uint8_t* allocate(bool code, uintptr_t size, unsigned alignment);
-    // Whether p is in the code half.
-    bool holdsCode(const void* p) const;
+    uint8_t* allocate(Region region, uintptr_t size, unsigned alignment);
 
 private:
-    struct Half {
+    struct Range {
         uint8_t* next;
         uint8_t* end;
     };
     CodeArena(uint8_t* base, size_t size);
     uint8_t* base_;
     size_t size_;
-    Half code_;
-    Half data_;
+    Range hot_;
+    Range cold_;
+    Range data_;
 };
 
 // The memory manager of one object, placing its sections in the arena. The

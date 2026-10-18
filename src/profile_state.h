@@ -69,6 +69,8 @@ struct ProfileState {
     // want_object_shapes is set (a sink asked for compile metrics).
     bool want_object_shapes = false;
     std::unordered_map<uint32_t, std::pair<uint64_t, std::vector<uint8_t>>> object_shapes;  // pc -> (bytes, material)
+    // The same for a block's cold part (bb_0x<pc>.cold), counted with it.
+    std::unordered_map<uint32_t, std::pair<uint64_t, std::vector<uint8_t>>> cold_shapes;
     uint64_t capture_ns = 0;  // time the listener spent copying material, inside materialize
     std::pair<uint64_t, std::vector<uint8_t>> takeObjectShape(uint32_t guest_pc);
 

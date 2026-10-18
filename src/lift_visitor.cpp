@@ -42,10 +42,19 @@ constexpr bool is_macmod_unsigned_acc(uint32_t m) {
 } // namespace
 
 // Branch weights for a branch to a path that rarely runs: an exit, a call
-// to a CEC helper, a misaligned target. MachineBlockPlacement then puts that
-// path after the function's hot code instead of inline with a jump over it.
+// to a CEC helper, a misaligned address or target, a guest access the host
+// handles. MachineBlockPlacement then puts that path after the function's hot
+// code instead of inline with a jump over it, and the machine function
+// splitter moves it out of the hot code altogether (JitEngine): its count
+// falls under the splitter's threshold, which a path behind any run of
+// unweighted (even) branches a block could hold does not.
+static constexpr uint32_t kRare = 1u << 20;
 static MDNode* rarely(LLVMContext& ctx) {
-    return MDBuilder(ctx).createBranchWeights(1, 1000);
+    return MDBuilder(ctx).createBranchWeights(1, kRare);
+}
+// The same, with the rare path second.
+static MDNode* usually(LLVMContext& ctx) {
+    return MDBuilder(ctx).createBranchWeights(kRare, 1);
 }
 
 // ---- Constructor ----
@@ -1208,9 +1217,8 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     auto* aligned = llvm::BasicBlock::Create(builder_.getContext(), "data_aligned", function);
     auto* bad = builder_.CreateICmpNE(
         builder_.CreateAnd(addr, builder_.getInt32(width - 1)), builder_.getInt32(0));
-    llvm::MDBuilder metadata(builder_.getContext());
     auto* from = builder_.GetInsertBlock();
-    builder_.CreateCondBr(bad, fault, aligned, metadata.createBranchWeights(1, 1000));
+    builder_.CreateCondBr(bad, fault, aligned, rarely(builder_.getContext()));
     builder_.SetInsertPoint(fault);
     const uint32_t packet_pc = current_pc - (parallel_slot_ == 1 ? 4 : parallel_slot_ == 2 ? 6 : 0);
     auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
@@ -1270,8 +1278,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* limit_c = builder_.getInt32(rawmem_limit_);
         auto* in_range = builder_.CreateICmpULT(addr, limit_c, "in_range");
         // Hint: fast path (addr in normal range) is overwhelmingly likely
-        llvm::MDBuilder mdb(builder_.getContext());
-        auto* likely_metadata = mdb.createBranchWeights(1000, 1);
+        auto* likely_metadata = usually(ctx);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(in_range, bb_fast, bb_slow, likely_metadata);
 
@@ -1311,10 +1318,9 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* bb_slow = llvm::BasicBlock::Create(ctx, "page_slow", fn_);
         auto* bb_done = llvm::BasicBlock::Create(ctx, "page_done", fn_);
         auto* page = emit_page_lookup(addr);
-        llvm::MDBuilder mdb(ctx);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
-                              mdb.createBranchWeights(1000, 1));
+                              usually(ctx));
 
         builder_.SetInsertPoint(bb_fast);
         auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
@@ -1372,8 +1378,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
 
         auto* limit_c = builder_.getInt32(rawmem_limit_);
         auto* in_range = builder_.CreateICmpULT(addr, limit_c, "in_range");
-        llvm::MDBuilder mdb(builder_.getContext());
-        auto* likely_metadata = mdb.createBranchWeights(1000, 1);
+        auto* likely_metadata = usually(ctx);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(in_range, bb_fast, bb_slow, likely_metadata);
 
@@ -1408,10 +1413,9 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* bb_slow = llvm::BasicBlock::Create(ctx, "page_wr_slow", fn_);
         auto* bb_done = llvm::BasicBlock::Create(ctx, "page_wr_done", fn_);
         auto* page = emit_page_lookup(addr);
-        llvm::MDBuilder mdb(ctx);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
-                              mdb.createBranchWeights(1000, 1));
+                              usually(ctx));
 
         builder_.SetInsertPoint(bb_fast);
         auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
