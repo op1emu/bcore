@@ -621,11 +621,17 @@ private:
     // A cache entry under did_jump's offset means did_jump is known to be
     // clear at that point (it is never a register value).
     static constexpr size_t kDidJumpClear = offsetof(CpuState, did_jump);
+    // One under halted's offset (never a register value either) means
+    // did_jump is known to be set: the instruction itself jumped.
+    static constexpr size_t kDidJumpSet = offsetof(CpuState, halted);
     bool did_jump_clear();
+    bool did_jump_set();
     void emit_set_did_jump();
     void emit_epilog_call(uint32_t insn_pc, uint32_t insn_len, llvm::Value* lb0, llvm::Value* lb1, bool check_cec);
     void emit_stop_chaining();
     void emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len);
+    void emit_epilog_jumped(uint32_t insn_pc);
+    void emit_hwloop_count_down(llvm::Value* at0, llvm::Value* at1, llvm::Value* lc0, llvm::Value* lc1);
     void emit_cec_check(bool exit_in_check);
     uint32_t fallthrough_pc_ = 0;
     std::vector<PendingExit> pending_exits_;
