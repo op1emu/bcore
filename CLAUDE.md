@@ -46,6 +46,7 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/memory.cpp`: Flat memory model (little-endian), extern "C" read/write wrappers for JIT
 - `src/lift_visitor.h/cpp`: LiftVisitor — plugs into decoder, emits LLVM IR per instruction (~24 implemented, rest are stubs)
 - `src/jit_engine.h/cpp`: LLJIT wrapper with explicit `absoluteSymbols` registration for all extern "C" helpers
+- `src/code_arena.h/cpp`: `CodeArena` (one reservation per JitEngine: hot code, cold parts split off by the machine function splitter, data) and the per-object `ArenaMemoryManager` that JitEngine's `RTDyldObjectLinkingLayer` uses instead of `SectionMemoryManager`
 - `src/bb_translator.h/cpp`: Basic-block translator — decodes instructions until terminator, produces one LLVM function per BB
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)
 - `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--count-packets`, `--chain`, `--opt-level`)
