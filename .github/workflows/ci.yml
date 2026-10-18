@@ -70,6 +70,9 @@ jobs:
       - name: Chain test
         run: ctest --test-dir build -R bcore-chain-test --output-on-failure
 
+      - name: Code arena test
+        run: ctest --test-dir build -R bcore-code-arena-test --output-on-failure
+
       # The same test with the instrumentation compiled out.
       - name: Observability API test (BCORE_ENABLE_PROFILE=OFF)
         run: |
@@ -79,8 +82,8 @@ jobs:
             -DBCORE_ENABLE_PROFILE=OFF \
             -DBCORE_BUILD_PROFILE_TESTS=ON \
             -DBCORE_BUILD_FAULT_TESTS=ON
-          cmake --build build-noprof -j$(nproc) --target bcore-profile-test bcore-chain-test
-          ctest --test-dir build-noprof -R 'bcore-profile-test|bcore-chain-test' --output-on-failure
+          cmake --build build-noprof -j$(nproc) --target bcore-profile-test bcore-chain-test bcore-code-arena-test
+          ctest --test-dir build-noprof -R 'bcore-profile-test|bcore-chain-test|bcore-code-arena-test' --output-on-failure
 
       # Plain `cmake -B build`: BCORE_ENABLE_PROFILE=ON, BCORE_PERF_JIT_EVENTS=OFF.
       # The main build above forces PERF_JIT_EVENTS=ON and the one before this
@@ -199,6 +202,16 @@ jobs:
           python3 tests/run_emu_test.py \
             --no-fail-fast \
             -O 1 -t 60 --page-table \
+            --ignore-list .github/emu-ignore.txt
+
+      # The same with chaining (op1emu's mode): blocks run the next block
+      # themselves, through native loops and the chain table.
+      - name: Run emulator tests (-O 1 --page-table --chain)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/run_emu_test.py \
+            --no-fail-fast \
+            -O 1 -t 60 --page-table --chain \
             --ignore-list .github/emu-ignore.txt
 
       # CpuState::packets against single-stepping (--max-steps 1), where every
