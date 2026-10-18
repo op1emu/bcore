@@ -56,6 +56,16 @@ Native code  ◄──► extern "C" helpers (mem_read/write, CEC, hwloop)
 | `include/core.h` | Public facade: `Core::init()`, `run(pc)`, `invalidate()`, `disassemble()` |
 | `tools/flat_memory.h` | Concrete `Memory`: vector-backed or `mmap`-at-0 (fastmem); write-notify for JIT invalidation |
 
+**Guest memory from generated code:** a load or store goes inline to the
+host page when `Memory::page_table()` maps it; anything else (MMRs, faults,
+unmapped space) calls `mem_read*`/`mem_write*`, which call the `Memory`'s
+virtual methods. A host whose `Memory::entries()` gives plain functions has
+those calls resolved to its functions instead, without the wrapper and the
+virtual call. Either way the call is declared `nounwind` and `willreturn` and
+carries no memory attribute: a host access may write `CpuState`
+(`chain_budget`, an exception's state) and guest RAM (a DMA it starts), so
+the optimizer keeps every load and store on its side of it.
+
 **Parallel instruction support:** bcore implements the Blackfin parallel-issue slot rules (Group A/B/C constraints and cross-slot conflict detection) and raises `VEC_ILGAL_I` on violations, matching hardware behavior.
 
 ---
