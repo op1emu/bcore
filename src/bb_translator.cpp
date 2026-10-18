@@ -163,6 +163,9 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
 }
 
 // Every return goes through one exit that may run the next block itself.
+// Nearly every exit does (the boot to op1emu's main display returns to the
+// host about once in 370 block ends), and a native loop runs again: the branches say so
+// (weights_usually, weights_loop), and the return goes after the hot code.
 // At each return cpu->pc is where the host would continue, so running that
 // block here is a host round trip without the host: allowed while the run's
 // budget lasts (the CEC, a halt, the host's memory callbacks and other
@@ -201,12 +204,12 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     auto* budget = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_budget)), "chain_budget");
     budget->setAtomic(AtomicOrdering::Monotonic);
     budget->setAlignment(Align(4));
-    b.CreateCondBr(b.CreateICmpULT(total, budget), pending, leave);
+    b.CreateCondBr(b.CreateICmpULT(total, budget), pending, leave, weights_usually(ctx));
 
     b.SetInsertPoint(pending);
     auto* flag = b.CreateLoad(ptr, field(b, cpu, offsetof(CpuState, cec_pending)), "cec_pending_flag");
     auto* is_pending = b.CreateICmpNE(b.CreateLoad(i8, flag, "cec_pending"), b.getInt8(0));
-    b.CreateCondBr(is_pending, leave, target);
+    b.CreateCondBr(is_pending, leave, target, weights_rarely(ctx));
 
     b.SetInsertPoint(target);
     auto* next = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, pc)), "next_pc");
@@ -219,11 +222,11 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
                                                     b.getInt64(sizeof(ChainSlot))), "chain_slot");
     auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
     auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
-    b.CreateCondBr(b.CreateICmpEQ(slot_pc, next), hit, leave);
+    b.CreateCondBr(b.CreateICmpEQ(slot_pc, next), hit, leave, weights_usually(ctx));
     auto* self = BasicBlock::Create(ctx, "chain_self", fn);
     auto* other = BasicBlock::Create(ctx, "chain_other", fn);
     b.SetInsertPoint(hit);
-    if (self_loop) b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other);
+    if (self_loop) b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
     else b.CreateBr(other);
 
     // What the host does before the next block: retire, then clear the
