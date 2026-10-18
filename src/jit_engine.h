@@ -30,7 +30,6 @@ struct BBInfo {
 };
 
 class BBTranslator;
-class CodeArena;
 
 
 class JitEngine {
@@ -86,8 +85,6 @@ public:
     }
 
 private:
-    // Shared with every object's memory manager, which keeps it mapped.
-    std::shared_ptr<CodeArena> arena_;
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::unordered_map<uint32_t, BBInfo> cache_;
     std::unique_ptr<ChainSlot[]> chain_;

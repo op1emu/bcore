@@ -113,16 +113,15 @@ bool JitEngine::init(int opt_level, int codegen_level) {
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(std::move(*jtmb_or_err));
     // LLJIT's default object layer (LLJIT::createObjectLinkingLayer), with
-    // every object's sections in one arena instead of pages of their own.
-    // Without the reservation, the default.
-    if ((arena_ = CodeArena::create())) {
-        builder.setObjectLinkingLayerCreator(
-            [arena = arena_](llvm::orc::ExecutionSession& es, const llvm::Triple&)
-                -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
-                return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
-                    es, [arena] { return std::make_unique<ArenaMemoryManager>(arena); });
-            });
-    }
+    // every object's sections placed in the engine's arenas instead of pages
+    // of their own (CodeArenaPool; an object no arena can take gets the
+    // default memory manager).
+    builder.setObjectLinkingLayerCreator(
+        [pool = std::make_shared<CodeArenaPool>()](llvm::orc::ExecutionSession& es, const llvm::Triple&)
+            -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+            return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+                es, [pool] { return std::make_unique<ArenaMemoryManager>(pool); });
+        });
     auto jit_or_err = builder.create();
     if (!jit_or_err) {
         llvm::errs() << "Failed to create LLJIT: " << jit_or_err.takeError() << "\n";
