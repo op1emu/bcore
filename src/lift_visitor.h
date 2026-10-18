@@ -17,6 +17,15 @@
 #include "cpu_state.h"
 #include "mem.h"
 
+// Branch weights for the generated code's branches whose way is known
+// (definitions in lift_visitor.cpp): to a path that rarely runs (first or
+// second successor), or along a loop that runs again. MachineBlockPlacement
+// lays code out by them, and the machine function splitter (JitEngine) moves
+// what they make cold out of the hot code.
+llvm::MDNode* weights_rarely(llvm::LLVMContext& ctx);
+llvm::MDNode* weights_usually(llvm::LLVMContext& ctx);
+llvm::MDNode* weights_loop(llvm::LLVMContext& ctx);
+
 class LiftVisitor {
 public:
     using return_type = bool;

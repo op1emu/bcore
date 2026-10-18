@@ -41,21 +41,18 @@ constexpr bool is_macmod_unsigned_acc(uint32_t m) {
 }
 } // namespace
 
-// Branch weights for a branch to a path that rarely runs: an exit, a call
-// to a CEC helper, a misaligned address or target, a guest access the host
-// handles. MachineBlockPlacement then puts that path after the function's hot
-// code instead of inline with a jump over it, and the machine function
-// splitter moves it out of the hot code altogether (JitEngine): its count
-// falls under the splitter's threshold, which a path behind any run of
-// unweighted (even) branches a block could hold does not.
+// A rare path runs once in 2^20 (rarely, usually): its count falls under the
+// machine function splitter's threshold (JitEngine), which a path behind any
+// run of unweighted (even) branches a block could hold does not. A loop runs
+// again 63 times in 64 (a hardware loop's back edge, the chain exit's native
+// loop): without that, the static estimate of 1 in 2 for each branch on the
+// way back made the loop look as if it hardly ever ran again, and with profile
+// counts MachineBlockPlacement laid its back edge out of line.
 static constexpr uint32_t kRare = 1u << 20;
-static MDNode* rarely(LLVMContext& ctx) {
-    return MDBuilder(ctx).createBranchWeights(1, kRare);
-}
-// The same, with the rare path second.
-static MDNode* usually(LLVMContext& ctx) {
-    return MDBuilder(ctx).createBranchWeights(kRare, 1);
-}
+static constexpr uint32_t kLoop = 64;
+MDNode* weights_rarely(LLVMContext& ctx) { return MDBuilder(ctx).createBranchWeights(1, kRare); }
+MDNode* weights_usually(LLVMContext& ctx) { return MDBuilder(ctx).createBranchWeights(kRare, 1); }
+MDNode* weights_loop(LLVMContext& ctx) { return MDBuilder(ctx).createBranchWeights(kLoop - 1, 1); }
 
 // ---- Constructor ----
 
@@ -378,7 +375,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
         auto* lsb       = builder_.CreateAnd(target, builder_.getInt32(1), "lsb");
         auto* is_odd    = builder_.CreateICmpNE(lsb, builder_.getInt32(0), "is_odd");
         auto* from = builder_.GetInsertBlock();
-        builder_.CreateCondBr(is_odd, bb_misalign, bb_aligned, rarely(ctx));
+        builder_.CreateCondBr(is_odd, bb_misalign, bb_aligned, weights_rarely(ctx));
 
         // Misaligned branch: raise alignment exception.
         builder_.SetInsertPoint(bb_misalign);
@@ -449,7 +446,7 @@ void LiftVisitor::emit_did_jump_exit(bool force) {
     auto* dj_val = builder_.CreateLoad(builder_.getInt8Ty(), dj_ptr, "dj");
     auto* dj_set = builder_.CreateICmpNE(dj_val, builder_.getInt8(0), "dj_set");
     auto* from = builder_.GetInsertBlock();
-    builder_.CreateCondBr(dj_set, bb_exit, bb_cont, rarely(ctx));
+    builder_.CreateCondBr(dj_set, bb_exit, bb_cont, weights_rarely(ctx));
 
     // On exit: cpu->pc is already set by the exception handler; just return.
     builder_.SetInsertPoint(bb_exit);
@@ -557,7 +554,7 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     auto* bb_next = BasicBlock::Create(ctx, "hwloop_next", fn);
     auto* bb_done = BasicBlock::Create(ctx, "hwloop_done", fn);
     auto* start = builder_.GetInsertBlock();
-    builder_.CreateCondBr(at_bottom, bb_step, bb_next);
+    builder_.CreateCondBr(at_bottom, bb_step, bb_next, weights_loop(ctx));  // a loop ends here
 
     builder_.SetInsertPoint(bb_step);
     auto field = [&](size_t offset) { return cpu_field_ptr(offset, i32); };
@@ -573,7 +570,8 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
                        builder_.CreateSelect(take0, lt0, builder_.getInt32(next_pc)), "hwloop_pc");
     builder_.CreateStore(target, field(offsetof(CpuState, pc)));
     emit_hwloop_count_down(at0, at1, lc0, lc1);
-    builder_.CreateCondBr(builder_.CreateICmpNE(target, builder_.getInt32(next_pc)), bb_back, bb_stay);
+    builder_.CreateCondBr(builder_.CreateICmpNE(target, builder_.getInt32(next_pc)), bb_back, bb_stay,
+                          weights_loop(ctx));
 
     // The back edge sets did_jump, as the helper did, and leaves.
     builder_.SetInsertPoint(bb_back);
@@ -641,7 +639,7 @@ void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
     auto* start = builder_.GetInsertBlock();
     const bool bottom = hint_ && (hint_->lb[0] == insn_pc || hint_->lb[1] == insn_pc);
     builder_.CreateCondBr(builder_.CreateOr(at0, at1, "at_lb"), bb_count, bb_done,
-                          bottom ? nullptr : rarely(ctx));
+                          bottom ? nullptr : weights_rarely(ctx));
 
     // Inline where a loop ends here at translation; elsewhere, where the path
     // almost never runs, the helper is less code to compile.
@@ -677,7 +675,7 @@ void LiftVisitor::emit_epilog_call(uint32_t insn_pc, uint32_t insn_len, Value* l
     auto* bb_next = BasicBlock::Create(ctx, "hwloop_next", fn);
     auto* bb_done = BasicBlock::Create(ctx, "hwloop_done", fn);
     auto* start = builder_.GetInsertBlock();
-    builder_.CreateCondBr(at_bottom, bb_step, bb_next, rarely(ctx));  // no loop ends here at translation
+    builder_.CreateCondBr(at_bottom, bb_step, bb_next, weights_rarely(ctx));  // no loop ends here at translation
 
     // At a loop bottom: step, check, then leave if either set did_jump.
     builder_.SetInsertPoint(bb_step);
@@ -714,7 +712,7 @@ void LiftVisitor::emit_cec_check(bool exit_in_check) {
     auto* bb_after = BasicBlock::Create(ctx, "cec_checked", fn);
     auto* before = builder_.GetInsertBlock();
     builder_.CreateCondBr(builder_.CreateICmpNE(pending, builder_.getInt8(0)), bb_check, bb_after,
-                          rarely(ctx));
+                          weights_rarely(ctx));
     builder_.SetInsertPoint(bb_check);
     call_extern("cec_check_pending",
                 llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getInt8PtrTy()}, false),
@@ -1218,7 +1216,7 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     auto* bad = builder_.CreateICmpNE(
         builder_.CreateAnd(addr, builder_.getInt32(width - 1)), builder_.getInt32(0));
     auto* from = builder_.GetInsertBlock();
-    builder_.CreateCondBr(bad, fault, aligned, rarely(builder_.getContext()));
+    builder_.CreateCondBr(bad, fault, aligned, weights_rarely(builder_.getContext()));
     builder_.SetInsertPoint(fault);
     const uint32_t packet_pc = current_pc - (parallel_slot_ == 1 ? 4 : parallel_slot_ == 2 ? 6 : 0);
     auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
@@ -1278,7 +1276,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* limit_c = builder_.getInt32(rawmem_limit_);
         auto* in_range = builder_.CreateICmpULT(addr, limit_c, "in_range");
         // Hint: fast path (addr in normal range) is overwhelmingly likely
-        auto* likely_metadata = usually(ctx);
+        auto* likely_metadata = weights_usually(ctx);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(in_range, bb_fast, bb_slow, likely_metadata);
 
@@ -1320,7 +1318,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* page = emit_page_lookup(addr);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
-                              usually(ctx));
+                              weights_usually(ctx));
 
         builder_.SetInsertPoint(bb_fast);
         auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
@@ -1378,7 +1376,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
 
         auto* limit_c = builder_.getInt32(rawmem_limit_);
         auto* in_range = builder_.CreateICmpULT(addr, limit_c, "in_range");
-        auto* likely_metadata = usually(ctx);
+        auto* likely_metadata = weights_usually(ctx);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(in_range, bb_fast, bb_slow, likely_metadata);
 
@@ -1415,7 +1413,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* page = emit_page_lookup(addr);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
-                              usually(ctx));
+                              weights_usually(ctx));
 
         builder_.SetInsertPoint(bb_fast);
         auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
