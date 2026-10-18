@@ -444,3 +444,45 @@ re-registers on every new engine.
 Relatedly: killing the profiled process with default SIGTERM handling
 truncates the jitdump stream (the listener flushes from its destructor).
 Hosts that stop runs via signals should convert them into a clean shutdown.
+
+## Where compiled code lies matters as much as what it is
+
+LLJIT's default object layer gives every object its own SectionMemoryManager,
+which maps each section separately, page-rounded. With one module per guest
+block, every block started at offset 0 of a page of its own (op1emu: 21,338
+blocks on 21,101 code pages): all block entries fell into the same L1I and L2
+sets, and the blocks outside loops spent a quarter of their cycles in
+instruction-cache data stalls. `CodeArena` packs them; that alone took only a
+few points off those stalls, because each block's function still carried its
+rare paths (slow guest accesses, did_jump exits, CEC calls) between its hot
+path and the next block's -- 56% of the bytes of one of the hottest blocks.
+
+What paid was telling LLVM which paths are rare. Unweighted, the per-packet
+loop-bottom and interrupt checks laid their call paths inline with a taken
+jump over them on every packet; with `!prof` weights (and `cold` on the rare
+helpers) MachineBlockPlacement moves them to the function's tail. The machine
+function splitter then moves them out of the function, into `.text.split.*`
+sections the arena keeps in a region of their own. The splitter needs profile
+counts and, by default, a profile summary: bcore gives every block function a
+synthetic entry count after the IR pipeline and sets `mfs-psi-cutoff=0` with
+an explicit `mfs-count-threshold`. Pick the rare weight so that a rare path's
+count stays below anything an ordinary path can reach: guest conditional
+branches are unweighted, so a path behind n of them counts entry/2^n (rare
+1:2^20, entry 2^30, threshold 2^11). The splitter does nothing at
+CodeGenOpt::None.
+
+An entry count changes more than the splitter: with profile data,
+MachineBlockPlacement trusts the static frequency estimate, which gives every
+unweighted branch 1 in 2. The FIR filler's native loop goes back through six
+such branches, so it looked as if it ran again once in 64 rather than 63 times
+in 64, and its back edge went out of line (three taken jumps per iteration,
++13% cycles in the loop). Weight the branches whose way is known -- loop
+bottoms, back edges, the chain exit -- before giving functions counts.
+
+Two things that did not matter: transparent huge pages for the arena (same
+cycles within noise; `icache_tag.stalls` are L1I tag misses, not iTLB walks),
+and the arena's RWX permissions versus per-object `mprotect`.
+
+One that cost compile time: inlining a hardware-loop count-down on every
+taken-branch exit grew the IR of branch-heavy blocks enough to make the ISA
+test `divq.s` 25% slower to compile; the rare path now calls the helper.
