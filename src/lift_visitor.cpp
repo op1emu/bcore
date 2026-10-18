@@ -161,12 +161,22 @@ void LiftVisitor::emit_stop_chaining() {
 void LiftVisitor::emit_set_did_jump() {
     auto* ptr = cpu_field_ptr(offsetof(CpuState, did_jump), builder_.getInt8Ty());
     builder_.CreateStore(builder_.getInt8(1), ptr);
-    if (auto* block = builder_.GetInsertBlock()) reg_cache_[block].erase(kDidJumpClear);
+    if (auto* block = builder_.GetInsertBlock()) {
+        reg_cache_[block].erase(kDidJumpClear);
+        reg_cache_[block][kDidJumpSet] = builder_.getInt8(1);
+    }
 }
 
 bool LiftVisitor::did_jump_clear() {
     auto* cache = reg_cache_here();
     return cache && cache->count(kDidJumpClear);
+}
+
+// Nothing in a block clears did_jump once set, and the helpers that keep the
+// cache (reg_cache_after_call) can only set it; any other call drops the mark.
+bool LiftVisitor::did_jump_set() {
+    auto* cache = reg_cache_here();
+    return cache && cache->count(kDidJumpSet);
 }
 
 static bool is_cycles(size_t offset) {
@@ -477,6 +487,10 @@ void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
         emit_epilog_clear(insn_pc, insn_len);
         return;
     }
+    if (did_jump_set()) {
+        emit_epilog_jumped(insn_pc);
+        return;
+    }
     // Delegate the full hw-loop probe to an extern "C" helper to keep IR compact.
     // bfin_hwloop_step():
     //   Phase A (when !did_jump): redirects cpu->pc via hw-loop back-edge rules.
@@ -534,7 +548,6 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     auto* lc0 = builder_.CreateLoad(i32, field(offsetof(CpuState, lc[0])), "lc0");
     auto* lc1 = builder_.CreateLoad(i32, field(offsetof(CpuState, lc[1])), "lc1");
     auto* one = builder_.getInt32(1);
-    auto* zero = builder_.getInt32(0);
     // Phase A.
     auto* take0 = builder_.CreateAnd(at0, builder_.CreateICmpUGT(lc0, one), "take0");
     auto* take1 = builder_.CreateAnd(at1, builder_.CreateICmpUGT(lc1, one), "take1");
@@ -543,15 +556,7 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     auto* target = builder_.CreateSelect(take1, lt1,
                        builder_.CreateSelect(take0, lt0, builder_.getInt32(next_pc)), "hwloop_pc");
     builder_.CreateStore(target, field(offsetof(CpuState, pc)));
-    // Phase B.
-    auto* dec1 = builder_.CreateAnd(at1, builder_.CreateICmpNE(lc1, zero), "dec1");
-    auto* lc1_new = builder_.CreateSelect(dec1, builder_.CreateSub(lc1, one), lc1, "lc1_new");
-    builder_.CreateStore(lc1_new, field(offsetof(CpuState, lc[1])));
-    auto* loop1_on = builder_.CreateAnd(dec1, builder_.CreateICmpNE(lc1_new, zero), "loop1_on");
-    auto* dec0 = builder_.CreateAnd(builder_.CreateAnd(at0, builder_.CreateICmpNE(lc0, zero)),
-                                    builder_.CreateNot(loop1_on), "dec0");
-    builder_.CreateStore(builder_.CreateSelect(dec0, builder_.CreateSub(lc0, one), lc0, "lc0_new"),
-                         field(offsetof(CpuState, lc[0])));
+    emit_hwloop_count_down(at0, at1, lc0, lc1);
     builder_.CreateCondBr(builder_.CreateICmpNE(target, builder_.getInt32(next_pc)), bb_back, bb_stay);
 
     // The back edge sets did_jump, as the helper did, and leaves.
@@ -578,6 +583,70 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     carry_reg_cache(start, bb_done);
     reg_cache_[bb_done].erase(offsetof(CpuState, lc[0]));
     reg_cache_[bb_done].erase(offsetof(CpuState, lc[1]));
+}
+
+// bfin_hwloop_step's phase B: count down loop 1 at its bottom and, unless
+// loop 1 goes on, loop 0 at its bottom. The caller drops lc[0] and lc[1] from
+// the register cache.
+void LiftVisitor::emit_hwloop_count_down(Value* at0, Value* at1, Value* lc0, Value* lc1) {
+    auto* i32 = builder_.getInt32Ty();
+    auto* one = builder_.getInt32(1);
+    auto* zero = builder_.getInt32(0);
+    auto* dec1 = builder_.CreateAnd(at1, builder_.CreateICmpNE(lc1, zero), "dec1");
+    auto* lc1_new = builder_.CreateSelect(dec1, builder_.CreateSub(lc1, one), lc1, "lc1_new");
+    builder_.CreateStore(lc1_new, cpu_field_ptr(offsetof(CpuState, lc[1]), i32));
+    auto* loop1_on = builder_.CreateAnd(dec1, builder_.CreateICmpNE(lc1_new, zero), "loop1_on");
+    auto* dec0 = builder_.CreateAnd(builder_.CreateAnd(at0, builder_.CreateICmpNE(lc0, zero)),
+                                    builder_.CreateNot(loop1_on), "dec0");
+    builder_.CreateStore(builder_.CreateSelect(dec0, builder_.CreateSub(lc0, one), lc0, "lc0_new"),
+                         cpu_field_ptr(offsetof(CpuState, lc[0]), i32));
+}
+
+// The epilog after an instruction that set did_jump itself (a jump, call,
+// return, LSETUP, halt or taken branch). bfin_hwloop_step's phase A does
+// nothing then (so its fallthrough argument is unused) and phase B acts only
+// at a loop bottom: the common path compares the bottoms and calls nothing
+// unless an interrupt is pending. As in emit_epilog_clear, the check follows
+// the step.
+void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
+    auto& ctx = builder_.getContext();
+    auto* fn = builder_.GetInsertBlock()->getParent();
+    auto* i32 = builder_.getInt32Ty();
+    const bool check_cec = check_cec_pending_;
+    check_cec_pending_ = false;
+
+    // Often cached: an LSETUP's own bottom is a constant, and the compare folds.
+    auto* lb0 = load_cpu_u32(offsetof(CpuState, lb[0]), "lb0");
+    auto* lb1 = load_cpu_u32(offsetof(CpuState, lb[1]), "lb1");
+    auto* at0 = builder_.CreateICmpEQ(lb0, builder_.getInt32(insn_pc), "at_lb0");
+    auto* at1 = builder_.CreateICmpEQ(lb1, builder_.getInt32(insn_pc), "at_lb1");
+    auto* bb_count = BasicBlock::Create(ctx, "hwloop_count", fn);
+    auto* bb_done = BasicBlock::Create(ctx, "hwloop_counted", fn);
+    auto* start = builder_.GetInsertBlock();
+    const bool bottom = hint_ && (hint_->lb[0] == insn_pc || hint_->lb[1] == insn_pc);
+    builder_.CreateCondBr(builder_.CreateOr(at0, at1, "at_lb"), bb_count, bb_done,
+                          bottom ? nullptr : MDBuilder(ctx).createBranchWeights(1, 1000));
+
+    // Inline where a loop ends here at translation; elsewhere, where the path
+    // almost never runs, the helper is less code to compile.
+    builder_.SetInsertPoint(bb_count);
+    if (bottom) {
+        auto* lc0 = builder_.CreateLoad(i32, cpu_field_ptr(offsetof(CpuState, lc[0]), i32), "lc0");
+        auto* lc1 = builder_.CreateLoad(i32, cpu_field_ptr(offsetof(CpuState, lc[1]), i32), "lc1");
+        emit_hwloop_count_down(at0, at1, lc0, lc1);
+    } else {
+        auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
+            {builder_.getInt8PtrTy(), i32, i32}, false);
+        call_extern("bfin_hwloop_step", ft,
+            {cpu_ptr_, builder_.getInt32(insn_pc), builder_.getInt32(insn_pc)});
+    }
+    builder_.CreateBr(bb_done);
+
+    builder_.SetInsertPoint(bb_done);
+    carry_reg_cache(start, bb_done);
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[0]));
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[1]));
+    if (check_cec) emit_cec_check(false);
 }
 
 // The same where no loop ends here when the block is translated: the step
@@ -1426,16 +1495,18 @@ bool LiftVisitor::decode_BRCC_BRF(uint16_t offset) {
     auto* taken_bb = BasicBlock::Create(module_->getContext(), "brcc_taken", parent_fn);
     auto* fallthru_bb = BasicBlock::Create(module_->getContext(), "brcc_fallthru", parent_fn);
 
+    auto* from = builder_.GetInsertBlock();
     builder_.CreateCondBr(cond, taken_bb, fallthru_bb);
 
     builder_.SetInsertPoint(taken_bb);
+    carry_reg_cache(from, taken_bb);  // for the epilog this exit runs (finalize_pending_exits)
     emit_jump_imm(target, "cond-jump");
     // Don't RetVoid yet — emit_epilog must run on this path too (counter decrement).
     pending_exits_.push_back({taken_bb});
     terminated_ = false;  // reset so fallthru path continues
 
     builder_.SetInsertPoint(fallthru_bb);
-    carry_reg_cache(taken_bb->getSinglePredecessor(), fallthru_bb);
+    carry_reg_cache(from, fallthru_bb);
     return true;
 }
 
@@ -1457,16 +1528,18 @@ bool LiftVisitor::decode_BRCC_BRT(uint16_t offset) {
     auto* taken_bb = BasicBlock::Create(module_->getContext(), "brt_taken", parent_fn);
     auto* fallthru_bb = BasicBlock::Create(module_->getContext(), "brt_fallthru", parent_fn);
 
+    auto* from = builder_.GetInsertBlock();
     builder_.CreateCondBr(cond, taken_bb, fallthru_bb);
 
     builder_.SetInsertPoint(taken_bb);
+    carry_reg_cache(from, taken_bb);  // for the epilog this exit runs (finalize_pending_exits)
     emit_jump_imm(target, "cond-jump");
     // Don't RetVoid yet — emit_epilog must run on this path too (counter decrement).
     pending_exits_.push_back({taken_bb});
     terminated_ = false;  // reset so fallthru path continues
 
     builder_.SetInsertPoint(fallthru_bb);
-    carry_reg_cache(taken_bb->getSinglePredecessor(), fallthru_bb);
+    carry_reg_cache(from, fallthru_bb);
     return true;
 }
 

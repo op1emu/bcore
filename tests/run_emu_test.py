@@ -138,6 +138,8 @@ def main() -> None:
                              "A warning is printed for any ignored test that passes.")
     parser.add_argument("--page-table", action="store_true",
                         help="run emu with --page-table (inline access through Memory::page_table())")
+    parser.add_argument("--chain", action="store_true",
+                        help="run emu with --chain (blocks run the next block themselves)")
     args = parser.parse_args()
 
     emu, elf_dir = get_project_paths()
@@ -187,7 +189,8 @@ def main() -> None:
     print(f"elfs:    {elf_dir}")
     print(f"tests:   {len(active_files)}  (+ {len(ignored_files)} ignored)")
     print(f"timeout: {args.timeout}s")
-    print(f"opt:     -O {args.opt_level}" + ("  --page-table" if args.page_table else ""))
+    print(f"opt:     -O {args.opt_level}" + ("  --page-table" if args.page_table else "")
+          + ("  --chain" if args.chain else ""))
     print()
 
     summary = Summary(total=len(active_files), ignored=len(ignored_files))
@@ -199,7 +202,8 @@ def main() -> None:
         try:
             proc = subprocess.run(
                 [str(emu), str(elf_path), "-O", str(args.opt_level)]
-                + (["--page-table"] if args.page_table else []),
+                + (["--page-table"] if args.page_table else [])
+                + (["--chain"] if args.chain else []),
                 capture_output=True,
                 text=True,
                 timeout=args.timeout,
