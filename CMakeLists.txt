@@ -215,5 +215,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     add_test(NAME bcore-chain-test COMMAND bcore-chain-test)
     add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
     target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
+    # It also builds an LLJIT of its own over the arena's memory managers.
+    target_include_directories(bcore-code-arena-test PRIVATE ${LLVM_INCLUDE_DIRS})
     add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
 endif()

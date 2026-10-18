@@ -1,10 +1,20 @@
 // Compiled blocks share one arena (CodeArena): their code lies next to each
 // other, not each at the start of pages of its own, and a new engine
-// (Core::invalidate) gets a new arena that works the same.
+// (Core::invalidate) gets a new arena that works the same. An object that no
+// longer fits goes whole into a new arena, and one no arena can take into a
+// memory manager of its own: a full arena never stops the process.
 #include "core.h"
 #include "../src/cec.h"
+#include "../src/code_arena.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
+
+#include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/Support/TargetSelect.h>
+#include <string>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -85,8 +95,86 @@ static void test(int opt) {
     require_packed(core, opt);
 }
 
+static constexpr size_t kHalf = size_t(256) << 10;  // hot 192 KiB, cold 64 KiB, data 256 KiB
+
+static uintptr_t addr(const void* p) { return reinterpret_cast<uintptr_t>(p); }
+
+// Objects of one shape, placed until two arenas are full and beyond: every
+// section is given, an object's sections lie in one arena, a new arena is
+// mapped when one is full, and past the pool's limit an object gets its own
+// manager. hot/cold/data are the bytes each object asks for in that region.
+static void exhaust(const char* what, uintptr_t hot, uintptr_t cold, uintptr_t data) {
+    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2);
+    std::vector<std::unique_ptr<ArenaMemoryManager>> objects;
+    size_t own = 0;
+    for (int i = 0; i < 64; ++i) {
+        auto mm = std::make_unique<ArenaMemoryManager>(pool);
+        mm->reserveAllocationSpace(hot + cold, 16, data, 16, 0, 1);
+        uint8_t* h = mm->allocateCodeSection(hot, 16, 1, ".text");
+        uint8_t* c = cold ? mm->allocateCodeSection(cold, 16, 2, ".text.split.f") : h;
+        uint8_t* d = data ? mm->allocateDataSection(data, 16, 3, ".rodata", true) : h;
+        require(h && c && d, what);
+        std::string error;
+        require(!mm->finalizeMemory(&error), what);
+        if (!mm->inArena()) { ++own; continue; }
+        const uintptr_t lo = std::min({addr(h), addr(c), addr(d)}), hi = std::max({addr(h), addr(c), addr(d)});
+        require(hi - lo < 2 * kHalf, what);  // one arena
+        objects.push_back(std::move(mm));
+    }
+    require(pool->arenas() == 2 && own > 0, what);
+}
+
+// An object larger than an empty arena never takes one.
+static void too_large() {
+    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2);
+    ArenaMemoryManager mm(pool);
+    mm.reserveAllocationSpace(kHalf, 16, 0, 1, 0, 1);
+    require(mm.allocateCodeSection(kHalf, 16, 1, ".text") && !mm.inArena() && pool->arenas() == 0,
+            "an object larger than an arena gets its own manager");
+}
+
+// The same through LLJIT: functions of ~3 KB each, compiled into arenas of
+// 192 KiB of hot code until two are full and past them, all still run.
+static void jit_exhaust() {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2);
+    auto jit = llvm::orc::LLJITBuilder()
+        .setObjectLinkingLayerCreator([pool](llvm::orc::ExecutionSession& es, const llvm::Triple&)
+                                          -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+            return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+                es, [pool] { return std::make_unique<ArenaMemoryManager>(pool); });
+        })
+        .create();
+    require(bool(jit), "LLJIT");
+    static volatile int32_t sink;
+    for (int i = 0; i < 200; ++i) {
+        auto ctx = std::make_unique<llvm::LLVMContext>();
+        auto mod = std::make_unique<llvm::Module>("m", *ctx);
+        mod->setDataLayout((*jit)->getDataLayout());
+        const std::string name = "f" + std::to_string(i);
+        auto* fn = llvm::Function::Create(
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx), {llvm::Type::getInt8PtrTy(*ctx)}, false),
+            llvm::Function::ExternalLinkage, name, mod.get());
+        llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
+        for (int k = 0; k < 300; ++k) b.CreateStore(b.getInt32(k), fn->getArg(0), /*isVolatile=*/true);
+        b.CreateRet(b.getInt32(i));
+        require(!(*jit)->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx))), "add module");
+        auto sym = (*jit)->lookup(name);
+        require(bool(sym), "lookup");
+        auto* f = reinterpret_cast<int32_t (*)(volatile int32_t*)>(sym->getValue());
+        require(f(&sink) == i && sink == 299, "a function placed anywhere runs");
+    }
+    require(pool->arenas() == 2, "two arenas, then managers of their own");
+}
+
 int main() {
     for (int opt = 0; opt <= 2; ++opt) test(opt);
+    exhaust("hot code fills an arena", 20 << 10, 0, 1 << 10);
+    exhaust("cold code fills an arena", 1 << 10, 20 << 10, 1 << 10);
+    exhaust("data fills an arena", 1 << 10, 0, 40 << 10);
+    too_large();
+    jit_exhaust();
     printf("code arena test passed\n");
     return 0;
 }
