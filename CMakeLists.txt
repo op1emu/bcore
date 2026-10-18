@@ -48,6 +48,7 @@ add_library(bfin-core STATIC
     src/core.cpp
     src/disasm_visitor.cpp
     src/lift_visitor.cpp
+    src/code_arena.cpp
     src/jit_engine.cpp
     src/bb_translator.cpp
     src/syscall_emu.cpp
@@ -212,4 +213,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     add_executable(bcore-chain-test tests/chain_test.cpp)
     target_link_libraries(bcore-chain-test PRIVATE bfin-core)
     add_test(NAME bcore-chain-test COMMAND bcore-chain-test)
+    add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
+    target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
+    add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
 endif()
