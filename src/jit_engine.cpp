@@ -17,6 +17,7 @@
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 
+#include "code_arena.h"
 #include "syscall_emu.h"
 #include "cec.h"
 #include "cpu_state.h"
@@ -77,9 +78,20 @@ bool JitEngine::init(int opt_level, int codegen_level) {
     tuning.SLPVectorization = opt_level >= 2;
     pb_ = std::make_unique<llvm::PassBuilder>(pass_machine_.get(), tuning);
 
-    auto jit_or_err = llvm::orc::LLJITBuilder()
-        .setJITTargetMachineBuilder(std::move(*jtmb_or_err))
-        .create();
+    llvm::orc::LLJITBuilder builder;
+    builder.setJITTargetMachineBuilder(std::move(*jtmb_or_err));
+    // LLJIT's default object layer (LLJIT::createObjectLinkingLayer), with
+    // every object's sections in one arena instead of pages of their own.
+    // Without the reservation, the default.
+    if ((arena_ = CodeArena::create())) {
+        builder.setObjectLinkingLayerCreator(
+            [arena = arena_](llvm::orc::ExecutionSession& es, const llvm::Triple&)
+                -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+                return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+                    es, [arena] { return std::make_unique<ArenaMemoryManager>(arena); });
+            });
+    }
+    auto jit_or_err = builder.create();
     if (!jit_or_err) {
         llvm::errs() << "Failed to create LLJIT: " << jit_or_err.takeError() << "\n";
         return false;
