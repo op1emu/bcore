@@ -41,6 +41,13 @@ constexpr bool is_macmod_unsigned_acc(uint32_t m) {
 }
 } // namespace
 
+// Branch weights for a branch to a path that rarely runs: an exit, a call
+// to a CEC helper, a misaligned target. MachineBlockPlacement then puts that
+// path after the function's hot code instead of inline with a jump over it.
+static MDNode* rarely(LLVMContext& ctx) {
+    return MDBuilder(ctx).createBranchWeights(1, 1000);
+}
+
 // ---- Constructor ----
 
 LiftVisitor::LiftVisitor(IRBuilder<>& builder, Value* cpu_ptr, Value* mem_ptr,
@@ -362,7 +369,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
         auto* lsb       = builder_.CreateAnd(target, builder_.getInt32(1), "lsb");
         auto* is_odd    = builder_.CreateICmpNE(lsb, builder_.getInt32(0), "is_odd");
         auto* from = builder_.GetInsertBlock();
-        builder_.CreateCondBr(is_odd, bb_misalign, bb_aligned);
+        builder_.CreateCondBr(is_odd, bb_misalign, bb_aligned, rarely(ctx));
 
         // Misaligned branch: raise alignment exception.
         builder_.SetInsertPoint(bb_misalign);
@@ -433,7 +440,7 @@ void LiftVisitor::emit_did_jump_exit(bool force) {
     auto* dj_val = builder_.CreateLoad(builder_.getInt8Ty(), dj_ptr, "dj");
     auto* dj_set = builder_.CreateICmpNE(dj_val, builder_.getInt8(0), "dj_set");
     auto* from = builder_.GetInsertBlock();
-    builder_.CreateCondBr(dj_set, bb_exit, bb_cont);
+    builder_.CreateCondBr(dj_set, bb_exit, bb_cont, rarely(ctx));
 
     // On exit: cpu->pc is already set by the exception handler; just return.
     builder_.SetInsertPoint(bb_exit);
@@ -625,7 +632,7 @@ void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
     auto* start = builder_.GetInsertBlock();
     const bool bottom = hint_ && (hint_->lb[0] == insn_pc || hint_->lb[1] == insn_pc);
     builder_.CreateCondBr(builder_.CreateOr(at0, at1, "at_lb"), bb_count, bb_done,
-                          bottom ? nullptr : MDBuilder(ctx).createBranchWeights(1, 1000));
+                          bottom ? nullptr : rarely(ctx));
 
     // Inline where a loop ends here at translation; elsewhere, where the path
     // almost never runs, the helper is less code to compile.
@@ -661,7 +668,7 @@ void LiftVisitor::emit_epilog_call(uint32_t insn_pc, uint32_t insn_len, Value* l
     auto* bb_next = BasicBlock::Create(ctx, "hwloop_next", fn);
     auto* bb_done = BasicBlock::Create(ctx, "hwloop_done", fn);
     auto* start = builder_.GetInsertBlock();
-    builder_.CreateCondBr(at_bottom, bb_step, bb_next);
+    builder_.CreateCondBr(at_bottom, bb_step, bb_next, rarely(ctx));  // no loop ends here at translation
 
     // At a loop bottom: step, check, then leave if either set did_jump.
     builder_.SetInsertPoint(bb_step);
@@ -697,7 +704,8 @@ void LiftVisitor::emit_cec_check(bool exit_in_check) {
     auto* bb_check = BasicBlock::Create(ctx, "cec_check", fn);
     auto* bb_after = BasicBlock::Create(ctx, "cec_checked", fn);
     auto* before = builder_.GetInsertBlock();
-    builder_.CreateCondBr(builder_.CreateICmpNE(pending, builder_.getInt8(0)), bb_check, bb_after);
+    builder_.CreateCondBr(builder_.CreateICmpNE(pending, builder_.getInt8(0)), bb_check, bb_after,
+                          rarely(ctx));
     builder_.SetInsertPoint(bb_check);
     call_extern("cec_check_pending",
                 llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getInt8PtrTy()}, false),
@@ -731,9 +739,20 @@ void LiftVisitor::finalize_pending_exits(uint32_t insn_pc, uint32_t insn_len) {
     }
 }
 
+// Helpers called only on paths that rarely run: cold, so that the paths
+// calling them are placed out of line (BranchProbabilityInfo's cold-call
+// heuristic) where no branch weight says so already.
+static bool rarely_called(const std::string& name) {
+    return name == "bfin_hwloop_step" || name == "cec_check_pending" || name == "cec_exception" ||
+           name == "cec_data_alignment" || name == "cec_raise" || name == "bfin_syscall" ||
+           name == "bfin_putchar";
+}
+
 Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
                                 ArrayRef<Value*> args) {
     auto* fn = module_->getOrInsertFunction(name, ft).getCallee();
+    if (rarely_called(name))
+        if (auto* f = dyn_cast<Function>(fn)) f->addFnAttr(Attribute::Cold);
     auto* call = builder_.CreateCall(ft, fn, args);
     reg_cache_after_call(name);
     return call;
