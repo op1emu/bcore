@@ -53,6 +53,16 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
     auto declare_extern = [&](const char* name, FunctionType* ft) {
         mod->getOrInsertFunction(name, ft);
     };
+    // A guest access returns, and unwinds nothing: what it raises it records
+    // in CpuState (did_jump), where the block looks after the call. It may
+    // read and write any memory, CpuState included (chain_budget, an
+    // exception's state, guest RAM a DMA moves), so it gets no memory
+    // attribute and stays a barrier for loads and stores around it.
+    auto declare_access = [&](const char* name, FunctionType* ft) {
+        auto* fn = cast<Function>(mod->getOrInsertFunction(name, ft).getCallee());
+        fn->addFnAttr(Attribute::NoUnwind);
+        fn->addFnAttr(Attribute::WillReturn);
+    };
 
     auto* void_ty = Type::getVoidTy(*ctx);
     auto* i32_ty = Type::getInt32Ty(*ctx);
@@ -60,12 +70,12 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
     auto* i16_ty = Type::getInt16Ty(*ctx);
 
     declare_extern("bfin_syscall", FunctionType::get(void_ty, {i8ptr, i8ptr}, false));
-    declare_extern("mem_read8", FunctionType::get(i8_ty, {i8ptr, i32_ty}, false));
-    declare_extern("mem_read16", FunctionType::get(i16_ty, {i8ptr, i32_ty}, false));
-    declare_extern("mem_read32", FunctionType::get(i32_ty, {i8ptr, i32_ty}, false));
-    declare_extern("mem_write8", FunctionType::get(void_ty, {i8ptr, i32_ty, i8_ty}, false));
-    declare_extern("mem_write16", FunctionType::get(void_ty, {i8ptr, i32_ty, i16_ty}, false));
-    declare_extern("mem_write32", FunctionType::get(void_ty, {i8ptr, i32_ty, i32_ty}, false));
+    declare_access("mem_read8", FunctionType::get(i8_ty, {i8ptr, i32_ty}, false));
+    declare_access("mem_read16", FunctionType::get(i16_ty, {i8ptr, i32_ty}, false));
+    declare_access("mem_read32", FunctionType::get(i32_ty, {i8ptr, i32_ty}, false));
+    declare_access("mem_write8", FunctionType::get(void_ty, {i8ptr, i32_ty, i8_ty}, false));
+    declare_access("mem_write16", FunctionType::get(void_ty, {i8ptr, i32_ty, i16_ty}, false));
+    declare_access("mem_write32", FunctionType::get(void_ty, {i8ptr, i32_ty, i32_ty}, false));
 
     LiftVisitor visitor(builder, cpu_ptr, mem_ptr, mod.get(),
                         mem_, unlimited_,

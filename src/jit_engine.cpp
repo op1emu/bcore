@@ -55,7 +55,7 @@ static llvm::JITEvaluatedSymbol sym_from_ptr(void* ptr) {
         llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable);
 }
 
-bool JitEngine::init(int opt_level, int codegen_level) {
+bool JitEngine::init(int opt_level, int codegen_level, const MemoryEntries* entries) {
     opt_level_ = opt_level;
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
@@ -142,12 +142,16 @@ bool JitEngine::init(int opt_level, int codegen_level) {
     llvm::orc::MangleAndInterner mangle(es, jit_->getDataLayout());
 
     llvm::orc::SymbolMap symbols;
-    symbols[mangle("mem_read8")]           = sym_from_ptr(reinterpret_cast<void*>(&mem_read8));
-    symbols[mangle("mem_read16")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read16));
-    symbols[mangle("mem_read32")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read32));
-    symbols[mangle("mem_write8")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_write8));
-    symbols[mangle("mem_write16")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write16));
-    symbols[mangle("mem_write32")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write32));
+    // The host's own entries when it gives them: the call then goes straight
+    // to the access instead of through mem_read*'s virtual call.
+    const MemoryEntries direct = {&mem_read8, &mem_read16, &mem_read32, &mem_write8, &mem_write16, &mem_write32};
+    const MemoryEntries& mem = entries ? *entries : direct;
+    symbols[mangle("mem_read8")]           = sym_from_ptr(reinterpret_cast<void*>(mem.read8));
+    symbols[mangle("mem_read16")]          = sym_from_ptr(reinterpret_cast<void*>(mem.read16));
+    symbols[mangle("mem_read32")]          = sym_from_ptr(reinterpret_cast<void*>(mem.read32));
+    symbols[mangle("mem_write8")]          = sym_from_ptr(reinterpret_cast<void*>(mem.write8));
+    symbols[mangle("mem_write16")]         = sym_from_ptr(reinterpret_cast<void*>(mem.write16));
+    symbols[mangle("mem_write32")]         = sym_from_ptr(reinterpret_cast<void*>(mem.write32));
     symbols[mangle("bfin_syscall")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_syscall));
     symbols[mangle("bfin_putchar")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_putchar));
     symbols[mangle("cec_data_alignment")]  = sym_from_ptr(reinterpret_cast<void*>(&cec_data_alignment));

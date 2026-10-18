@@ -2,6 +2,20 @@
 
 #include <cstdint>
 
+class Memory;
+
+// Functions generated code calls in place of mem_read*/mem_write* (see
+// Memory::entries()), with the same arguments: the Memory the block runs
+// with, the address and, for a store, the value.
+struct MemoryEntries {
+    uint8_t  (*read8)(Memory*, uint32_t);
+    uint16_t (*read16)(Memory*, uint32_t);
+    uint32_t (*read32)(Memory*, uint32_t);
+    void (*write8)(Memory*, uint32_t, uint8_t);
+    void (*write16)(Memory*, uint32_t, uint16_t);
+    void (*write32)(Memory*, uint32_t, uint32_t);
+};
+
 class Memory {
 public:
     virtual ~Memory() = default;
@@ -64,6 +78,13 @@ public:
     // values it loaded before an access instead of reloading them after it. The
     // JIT samples this when it translates a block, like page_table().
     virtual bool callbacks_preserve_registers() const { return false; }
+
+    // Functions that do what read*/write* do for this Memory, without the
+    // virtual call: generated code calls them directly where it would call
+    // mem_read*/mem_write*. Every entry must be set, and the functions must
+    // stay valid for the Memory's lifetime. Null (the default) keeps the
+    // virtual methods. Sampled once, when the Core initializes.
+    virtual const MemoryEntries* entries() const { return nullptr; }
 };
 
 // extern "C" wrappers for JIT-generated code

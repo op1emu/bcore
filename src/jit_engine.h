@@ -39,7 +39,8 @@ public:
 
     // opt_level: the IR pipeline, 0=None, 1=O1, 2=O2, 3=O3.
     // codegen_level: the backend on the same scale; <0 follows opt_level.
-    bool init(int opt_level = 2, int codegen_level = -1);
+    // entries, when not null, resolves mem_read*/mem_write* (Memory::entries()).
+    bool init(int opt_level = 2, int codegen_level = -1, const MemoryEntries* entries = nullptr);
     // Optimize a module in-place using the same pipeline level as init().
     // No-op when opt_level is 0. Core::run calls it on every translated module
     // before addModule; before that, only the IR-dump path did, so opt_level

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 static void require(bool ok, const char* why) {
@@ -46,6 +47,25 @@ public:
     void write8(uint32_t a, uint8_t v) override { count(a); bytes.at(a) = v; }
     void write16(uint32_t a, uint16_t v) override { count(a); memcpy(&bytes.at(a), &v, 2); }
     void write32(uint32_t a, uint32_t v) override { count(a); memcpy(&bytes.at(a), &v, 4); }
+};
+
+// TwoPages giving generated code its own entries (Memory::entries()): each
+// counts the call, then does what the virtual method does.
+class EntryPages : public TwoPages {
+public:
+    using TwoPages::TwoPages;
+    static inline int entry_calls = 0;
+    static EntryPages& self(Memory* m) { ++entry_calls; return *static_cast<EntryPages*>(m); }
+    static uint8_t r8(Memory* m, uint32_t a) { return self(m).TwoPages::read8(a); }
+    static uint16_t r16(Memory* m, uint32_t a) { return self(m).TwoPages::read16(a); }
+    static uint32_t r32(Memory* m, uint32_t a) { return self(m).TwoPages::read32(a); }
+    static void w8(Memory* m, uint32_t a, uint8_t v) { self(m).TwoPages::write8(a, v); }
+    static void w16(Memory* m, uint32_t a, uint16_t v) { self(m).TwoPages::write16(a, v); }
+    static void w32(Memory* m, uint32_t a, uint32_t v) { self(m).TwoPages::write32(a, v); }
+    const MemoryEntries* entries() const override {
+        static const MemoryEntries kEntries = {&r8, &r16, &r32, &w8, &w16, &w32};
+        return &kEntries;
+    }
 };
 
 struct Case {
@@ -172,8 +192,11 @@ int main() {
     }
     int count = 0;
     for (int opt : {0, 2}) for (bool table : {false, true}) for (uint32_t page : {0u, 0x1000u})
+    for (bool entries : {false, true})
     for (const Case& c : kCases) {
-        TwoPages mem(table);
+        std::unique_ptr<TwoPages> owned = entries ? std::make_unique<EntryPages>(table) : std::make_unique<TwoPages>(table);
+        TwoPages& mem = *owned;
+        EntryPages::entry_calls = 0;
         CpuState cpu{};
         Core core(&cpu, &mem);
         require(core.init(opt), "init");
@@ -192,6 +215,12 @@ int main() {
             fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d: %d calls\n", c.name, addr, table, opt, mem.data_calls);
             return 1;
         }
+        // The call goes to the entries when there are some, never around them.
+        if (EntryPages::entry_calls != (entries && !inline_access ? 1 : 0)) {
+            fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d, entries %d: %d entry calls\n", c.name, addr, table,
+                    opt, entries, EntryPages::entry_calls);
+            return 1;
+        }
         require(cpu.dpregs[8] == addr + c.width, "post-increment");
         uint32_t stored;
         memcpy(&stored, &mem.bytes[addr], 4);
@@ -207,5 +236,5 @@ int main() {
         ++count;
     }
     printf("PASS: %d page-table cases (mapped/unmapped page, table on/off, O0/O2), "
-           "interrupt at a loop bottom, callback register write, reset between runs\n", count);
+           "with and without Memory::entries(), interrupt at a loop bottom, callback register write, reset between runs\n", count);
 }

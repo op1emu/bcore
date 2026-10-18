@@ -35,7 +35,7 @@ bool Core::init(int opt_level, int codegen_level) {
     codegen_level_ = codegen_level;
 
     jit_ = std::make_shared<JitEngine>();
-    if (!jit_->init(opt_level_, codegen_level_))
+    if (!jit_->init(opt_level_, codegen_level_, mem_->entries()))
         return false;
     jit_->setChainFilter(chain_filter_);
     attachProfiler();
@@ -214,7 +214,7 @@ void Core::invalidate() {
     jit_ = std::make_shared<JitEngine>();
     // Init cannot fail here unless it failed in Core::init already (same host,
     // same levels); if it ever does, stop rather than dereference a null LLJIT.
-    if (!jit_->init(opt_level_, codegen_level_))
+    if (!jit_->init(opt_level_, codegen_level_, mem_->entries()))
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
     applyModuleTarget();
