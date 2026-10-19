@@ -45,6 +45,9 @@ public:
     // before addModule; before that, only the IR-dump path did, so opt_level
     // never reached executed code.
     void optimize_module(llvm::Module& mod);
+    // A pass pipeline (PassBuilder text) optimize_module runs after the
+    // default one; empty for none. False, and unchanged, if it does not parse.
+    bool set_post_pipeline(const std::string& pipeline);
     // The layout and triple LLJIT compiles for. A module carrying exactly these
     // passes addIRModule's check; any other non-default layout is an error.
     std::string dataLayout() const { return jit_->getDataLayout().getStringRepresentation(); }
@@ -98,4 +101,5 @@ private:
     // pass_machine_ outlives pb_, which holds it.
     std::unique_ptr<llvm::TargetMachine> pass_machine_;
     std::unique_ptr<llvm::PassBuilder> pb_;
+    std::string post_pipeline_;
 };

@@ -207,7 +207,21 @@ void JitEngine::optimize_module(llvm::Module& mod) {
     // Rebuild per-module pipeline each call (analysis managers are fresh).
     // passBuilder itself is reused across calls (avoids plugin registration overhead).
     llvm::ModulePassManager mpm = pb_->buildPerModuleDefaultPipeline(lvl);
+    if (!post_pipeline_.empty())
+        llvm::cantFail(pb_->parsePassPipeline(mpm, post_pipeline_));  // checked by set_post_pipeline
     mpm.run(mod, mam);
+}
+
+bool JitEngine::set_post_pipeline(const std::string& pipeline) {
+    if (!pipeline.empty()) {
+        llvm::ModulePassManager check;
+        if (auto err = pb_->parsePassPipeline(check, pipeline)) {
+            llvm::consumeError(std::move(err));
+            return false;
+        }
+    }
+    post_pipeline_ = pipeline;
+    return true;
 }
 
 bool JitEngine::addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
