@@ -223,6 +223,11 @@ bool Core::run(uint32_t pc) {
         // way, so the run goes on until no block misses. Each PC misses at
         // most once (its guarded compilation is replaced).
         cpu_->lb_guard_miss = 0;
+        // No packet of the block retired, and a chained block leaves the
+        // index of its own last packet behind (BBTranslator's chain exit):
+        // the host's callbacks during the compilation (the code fetches)
+        // read the run's packets as chain_packets plus this.
+        cpu_->packets = 0;
 #if BCORE_ENABLE_PROFILE
         profile_->stats.lb_guard_misses++;
 #endif
