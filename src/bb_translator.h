@@ -60,6 +60,8 @@ public:
     // only if the filter accepts its PC when it is translated.
     void set_chain_filter(std::function<bool(uint32_t)> filter) { chain_filter_ = std::move(filter); }
     void set_host_cycles(bool host_cycles) { host_cycles_ = host_cycles; }
+    // See Core::set_count_chained.
+    void set_count_chained(bool count) { count_chained_ = count; }
     // See Core::set_lazy_state.
     void set_lazy_state(bool lazy) { lazy_state_ = lazy; }
 
@@ -84,6 +86,7 @@ private:
     bool chain_dry_ = false;
     std::function<bool(uint32_t)> chain_filter_;
     bool host_cycles_ = false;
+    bool count_chained_ = true;
     bool lazy_state_ = true;
     std::string data_layout_;
     std::string target_triple_;

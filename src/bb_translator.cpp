@@ -317,8 +317,10 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         b.CreateStore(total, field(b, cpu, offsetof(CpuState, chain_packets)));
         b.CreateStore(b.getInt32(0), field(b, cpu, offsetof(CpuState, packets)));
         b.CreateStore(b.getInt8(0), field(b, cpu, offsetof(CpuState, did_jump)));
-        auto* blocks_ptr = field(b, cpu, offsetof(CpuState, chain_blocks));
-        b.CreateStore(b.CreateAdd(b.CreateLoad(i32, blocks_ptr), b.getInt32(1)), blocks_ptr);
+        if (count_chained_) {
+            auto* blocks_ptr = field(b, cpu, offsetof(CpuState, chain_blocks));
+            b.CreateStore(b.CreateAdd(b.CreateLoad(i32, blocks_ptr), b.getInt32(1)), blocks_ptr);
+        }
         return true;
     };
     auto slot_of = [&](Value* pc) {

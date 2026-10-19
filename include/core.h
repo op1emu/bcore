@@ -48,6 +48,10 @@ public:
     // CpuState::cycles_base plus the packets chained before it, as such a
     // host would have. Off by default (bcore's emu leaves CYCLES alone).
     void set_host_cycles(bool host_cycles);
+    // Whether blocks compiled from now on count CpuState::chain_blocks (on
+    // by default). Off, a run leaves it 0: one memory increment less per
+    // block run, for a host that does not count block runs.
+    void set_count_chained(bool count);
     // Blocks compiled from now on store pc, insn_len and packets only where
     // a helper call, a return or a load can read them (on by default; off
     // stores them at every packet, as before). Either way every reader sees
@@ -119,6 +123,7 @@ private:
     bool chaining_ = false;
     bool chain_dry_ = false;
     bool host_cycles_ = false;
+    bool count_chained_ = true;
     bool lazy_state_ = true;
     std::string post_pipeline_ = kDefaultPostPipeline;
 };

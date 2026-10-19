@@ -56,6 +56,7 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_chaining(chaining_, chain_dry_);
     translator_->set_chain_filter(chain_filter_);
     translator_->set_host_cycles(host_cycles_);
+    translator_->set_count_chained(count_chained_);
     translator_->set_lazy_state(lazy_state_);
     applyModuleTarget();
 
@@ -288,6 +289,11 @@ void Core::set_chaining(bool chaining, bool dry) {
     chaining_ = chaining;
     chain_dry_ = dry;
     if (translator_) translator_->set_chaining(chaining_, chain_dry_);
+}
+
+void Core::set_count_chained(bool count) {
+    count_chained_ = count;
+    if (translator_) translator_->set_count_chained(count_chained_);
 }
 
 void Core::set_host_cycles(bool host_cycles) {
