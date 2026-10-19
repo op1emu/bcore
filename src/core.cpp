@@ -209,7 +209,7 @@ bool Core::run(uint32_t pc) {
     cpu_->pc = pc;
     cpu_->packets = 0;
     jit_->set_executing(pc);
-    fn(cpu_, mem_);
+    jit_->enter(fn, cpu_, mem_);
     jit_->clear_executing();
     while (cpu_->lb_guard_miss) {
         // A block met a loop bottom where its compilation expected none
@@ -229,7 +229,7 @@ bool Core::run(uint32_t pc) {
         if (!careful)
             return false;
         jit_->set_executing(at);
-        careful(cpu_, mem_);
+        jit_->enter(careful, cpu_, mem_);
         jit_->clear_executing();
     }
 #if BCORE_ENABLE_PROFILE
