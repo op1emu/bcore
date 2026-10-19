@@ -92,8 +92,9 @@ void cec_mmr_write(CpuState* cpu, uint32_t addr, uint32_t val) {
     case CEC_IDX_IMASK:
         // Only maskable bits are writable; unmaskable bits are preserved.
         s_cec_mmr[idx] = (val & CEC_MASKABLE_B) | (s_cec_mmr[idx] & CEC_UNMASKABLE_B);
-        // Pending check
+        // Pending check, by the host after this block (see cec_raise).
         bcore_cec_pending = true;
+        cpu->chain_budget = 0;
         break;
     case CEC_IDX_IPEND:
         // Read-only from software perspective — silently ignore.
@@ -340,6 +341,13 @@ extern "C" void cec_raise(CpuState* cpu, uint32_t ivg) {
     // This matches the reference's cec_latch() pattern.
     ilat() |= (1u << ivg);
     bcore_cec_pending = true;
+    // Generated code checks a pending interrupt only after the instructions
+    // that may enable one it can take at once (STI, [--SP] = RETI, a store);
+    // anything else that makes one pending -- this, which the host's
+    // interrupt lines latch through too, and an IMASK write -- ends the run,
+    // so a chained block never runs past it (the host checks before the
+    // next run).
+    cpu->chain_budget = 0;
 }
 
 // ── Return instructions ───────────────────────────────────────────────────────

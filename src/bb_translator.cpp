@@ -255,8 +255,8 @@ static Value* stored_before(Instruction* at, Value* cpu, size_t offset) {
 // code. At each return cpu->pc is where the host would continue, so running
 // that block here is a host round trip without the host: allowed while the
 // run's budget lasts (the CEC, a halt, the host's memory callbacks and other
-// threads set it to 0 when the host has work), no interrupt may be pending
-// (the host would call cec_check_pending), and the block is compiled and in
+// threads set it to 0 when the host has work, and so does whatever leaves an
+// interrupt pending for the host to check), and the block is compiled and in
 // the chain table, which holds no block the host's filter rejects.
 //
 // Each return gets its own exit, with the pc and packet index its path stored
@@ -280,19 +280,20 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     auto* i32 = b.getInt32Ty();
     auto* ptr = b.getInt8PtrTy();
 
-    // The chain table and the CEC's pending flag do not change while a block
-    // runs (the host compiles and publishes between runs): loaded once.
+    // The chain table does not change while a block runs (the host compiles
+    // and publishes between runs): loaded once.
     auto& entry = fn->getEntryBlock();
     IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
     auto* table = at_entry.CreateLoad(ptr, field(at_entry, cpu, offsetof(CpuState, chain_table)), "chain_table");
-    auto* pending_flag = at_entry.CreateLoad(ptr, field(at_entry, cpu, offsetof(CpuState, cec_pending)), "cec_pending_flag");
 
     auto* leave = BasicBlock::Create(ctx, "chain_leave", fn);
     b.SetInsertPoint(leave);
     b.CreateRetVoid();
 
-    // The budget and pending tests every exit makes: on to `go` with the run's
-    // packets including this block's, or leave.
+    // The budget test every exit makes: on to `go` with the run's packets
+    // including this block's, or leave. No exit finds an interrupt pending:
+    // generated code checks one after every instruction that may enable it,
+    // and whatever else makes one pending sets the budget to 0 (cec_raise).
     auto admit = [&](Value* packets, BasicBlock* go) {
         auto* done = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_packets)), "chain_packets");
         auto* total = b.CreateAdd(done, packets, "chain_total");
@@ -301,11 +302,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         auto* budget = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_budget)), "chain_budget");
         budget->setAtomic(AtomicOrdering::Monotonic);
         budget->setAlignment(Align(4));
-        auto* pending = BasicBlock::Create(ctx, "chain_pending", fn);
-        b.CreateCondBr(b.CreateICmpULT(total, budget), pending, leave, weights_usually(ctx));
-        b.SetInsertPoint(pending);
-        auto* is_pending = b.CreateICmpNE(b.CreateLoad(i8, pending_flag, "cec_pending"), b.getInt8(0));
-        b.CreateCondBr(is_pending, leave, go, weights_rarely(ctx));
+        b.CreateCondBr(b.CreateICmpULT(total, budget), go, leave, weights_usually(ctx));
         return total;
     };
     // What the host does before the next block: retire, then clear the
