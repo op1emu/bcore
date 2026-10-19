@@ -87,6 +87,9 @@ public:
 
 private:
     void applyModuleTarget();
+    // Translates, optimizes and adds the block at pc (careful: see
+    // BBTranslator::translate); null if that fails.
+    void (*compile(uint32_t pc, bool careful))(CpuState*, Memory*);
     // (Re)registers the code-map listener on jit_. Called by init/invalidate.
     void attachProfiler();
 

@@ -118,6 +118,8 @@ void LiftVisitor::carry_reg_cache(BasicBlock* from, BasicBlock* to) {
 }
 
 void LiftVisitor::emit_cpu_store(size_t offset, Value* val) {
+    if (offset == offsetof(CpuState, lb[0])) lb_steady_[0] = false;
+    if (offset == offsetof(CpuState, lb[1])) lb_steady_[1] = false;
     auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
     builder_.CreateStore(val, ptr);
     if (!reg_cacheable(offset)) return;
@@ -142,12 +144,21 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
     if (name == "bfin_putchar" || name == "cec_is_user_mode")
         return;
     if (name.rfind("mem_read", 0) == 0 || name.rfind("mem_write", 0) == 0) {
-        if (!mem_keeps_regs_) cache->clear();
+        if (!mem_keeps_regs_) {
+            cache->clear();
+            lb_steady_[0] = lb_steady_[1] = false;
+        }
         cache->erase(kDidJumpClear);
         return;
     }
     if (name == "cec_check_pending") {
         cache->erase(kDidJumpClear);
+        return;
+    }
+    // These two raise an exception: the block always returns right after
+    // them, so nothing later sees what they changed.
+    if (name == "cec_exception" || name == "cec_data_alignment") {
+        cache->clear();
         return;
     }
     if (name == "bfin_hwloop_step") {
@@ -157,6 +168,14 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
         return;
     }
     cache->clear();
+    lb_steady_[0] = lb_steady_[1] = false;
+}
+
+bool LiftVisitor::lb_absent(uint32_t insn_pc) {
+    if (careful_ || !hint_ || !lb_steady_[0] || !lb_steady_[1]) return false;
+    if (hint_->lb[0] == insn_pc || hint_->lb[1] == insn_pc) return false;
+    lb_guard_used_ = true;
+    return true;
 }
 
 // After a memory access diamond: the fast path touches only guest RAM, the
@@ -542,6 +561,12 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     auto* lb0 = load_cpu_u32(offsetof(CpuState, lb[0]), "lb0");
     auto* lb1 = load_cpu_u32(offsetof(CpuState, lb[1]), "lb1");
     if (!hint_ || (hint_->lb[0] != insn_pc && hint_->lb[1] != insn_pc)) {
+        if (lb_absent(insn_pc)) {
+            // No loop ends here: on to the next instruction.
+            store_cpu_u32(offsetof(CpuState, pc), builder_.getInt32(next_pc));
+            if (check_cec) emit_cec_check(true);
+            return;
+        }
         emit_epilog_call(insn_pc, insn_len, lb0, lb1, check_cec);
         return;
     }
@@ -628,6 +653,12 @@ void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
     auto* i32 = builder_.getInt32Ty();
     const bool check_cec = check_cec_pending_;
     check_cec_pending_ = false;
+    const bool bottom = hint_ && (hint_->lb[0] == insn_pc || hint_->lb[1] == insn_pc);
+    if (!bottom && lb_absent(insn_pc)) {
+        // No loop ends here: nothing to count down.
+        if (check_cec) emit_cec_check(false);
+        return;
+    }
 
     // Often cached: an LSETUP's own bottom is a constant, and the compare folds.
     auto* lb0 = load_cpu_u32(offsetof(CpuState, lb[0]), "lb0");
@@ -637,7 +668,6 @@ void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
     auto* bb_count = BasicBlock::Create(ctx, "hwloop_count", fn);
     auto* bb_done = BasicBlock::Create(ctx, "hwloop_counted", fn);
     auto* start = builder_.GetInsertBlock();
-    const bool bottom = hint_ && (hint_->lb[0] == insn_pc || hint_->lb[1] == insn_pc);
     builder_.CreateCondBr(builder_.CreateOr(at0, at1, "at_lb"), bb_count, bb_done,
                           bottom ? nullptr : weights_rarely(ctx));
 

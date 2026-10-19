@@ -22,7 +22,7 @@ BBTranslator::BBTranslator(Memory* mem,
                            bool unlimited, bool fastmem, uint64_t fast_base)
     : mem_(mem), unlimited_(unlimited), fastmem_(fastmem), fast_base_(fast_base) {}
 
-BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
+BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, bool careful) {
     auto ctx = std::make_unique<LLVMContext>();
     auto mod = std::make_unique<Module>("bb_module", *ctx);
     // Before the first instruction is built: IRBuilder takes load/store
@@ -35,7 +35,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
 
     // Create function: void bb_0x<pc>(CpuState*, Memory*)
     char fname[32];
-    snprintf(fname, sizeof(fname), "bb_0x%08x", pc);
+    snprintf(fname, sizeof(fname), careful ? "bb_0x%08x.careful" : "bb_0x%08x", pc);
 
     auto* i8ptr = Type::getInt8PtrTy(*ctx);
     auto* ft = FunctionType::get(Type::getVoidTy(*ctx), {i8ptr, i8ptr}, false);
@@ -72,6 +72,11 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
                         mem_, unlimited_,
                         fastmem_, fast_base_, mem_->rawmem_limit());
     visitor.set_hint(hint);
+    visitor.set_careful(careful);
+    // What the entry guard compares the loop bottoms with: the hint's, as the
+    // lifter saw them.
+    const uint32_t hint_lb[2] = {hint ? hint->lb[0] : 0, hint ? hint->lb[1] : 0};
+    uint32_t last_pc = pc;
 
     uint32_t cur_pc = pc;
     BasicBlock* first_entry = nullptr;  // the first packet's entry
@@ -80,6 +85,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
 
     while (max_insns-- > 0 && !visitor.is_terminated()) {
         uint32_t insn_pc = cur_pc;
+        last_pc = insn_pc;
         auto& ctx = builder.getContext();
         char label_name[32];
         snprintf(label_name, sizeof(label_name), "insn_0x%08x_entry", insn_pc);
@@ -119,6 +125,8 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
             builder.CreateRetVoid();
     }
 
+    BasicBlock* lb_guard = visitor.lb_guard_used()
+        ? emit_lb_guard(builder, fn, cpu_ptr, first_entry, pc, last_pc, hint_lb) : nullptr;
     // Before the chain exit turns the returns into branches to it.
     if (lazy_state_) sink_packet_state(*fn, cpu_ptr);
     if (host_cycles_ && visitor.accesses_cycles()) emit_host_cycles(builder, cpu_ptr, first_entry);
@@ -126,7 +134,11 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
     // start, or the start of a hardware loop now. Elsewhere a jump to itself
     // chains through the table, as to any block.
     const bool self_loop = visitor.jumps_to(pc) || (hint && (hint->lt[0] == pc || hint->lt[1] == pc));
-    if (chaining_ && unlimited_) emit_chain_exit(builder, fn, cpu_ptr, mem_ptr, pc, self_loop ? first_entry : nullptr);
+    // A native loop that may have moved a loop bottom passes the guard again.
+    BasicBlock* loop_top = lb_guard && !visitor.lb_steady() ? lb_guard : first_entry;
+    if (chaining_ && unlimited_)
+        emit_chain_exit(builder, fn, cpu_ptr, mem_ptr, pc, self_loop ? loop_top : nullptr,
+                        lb_guard ? lb_guard_miss_block(lb_guard) : nullptr);
 
     // Verify the module
     std::string err_str;
@@ -165,6 +177,45 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
     b.CreateStore(hi, field(b, cpu, offsetof(CpuState, cycles[2])));
 }
 
+// The guard a block needs when packets the hint puts at no loop bottom skip
+// the bottom compare (LiftVisitor::lb_absent): at entry, each of LB0 and LB1
+// is the hint's or lies outside [first_pc, last_pc], so no such packet is a
+// bottom. Otherwise the block sets CpuState::lb_guard_miss and returns to
+// Core::run before its first packet, not through the chain exit: pc is its
+// own, nothing retired, and the run's chain state is as the block found it,
+// so Core::run compiles it again careful and runs that in its place. Returns
+// the guard's block.
+BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu, BasicBlock* first_entry,
+                                        uint32_t first_pc, uint32_t last_pc, const uint32_t hint_lb[2]) {
+    auto& ctx = fn->getContext();
+    auto& entry = fn->getEntryBlock();
+    auto* guard = BasicBlock::Create(ctx, "lb_guard", fn, first_entry);
+    auto* miss = BasicBlock::Create(ctx, "lb_guard_miss", fn);
+    auto* br = cast<BranchInst>(entry.getTerminator());
+    br->setSuccessor(0, guard);
+
+    b.SetInsertPoint(guard);
+    auto* i32 = b.getInt32Ty();
+    Value* ok = b.getTrue();
+    for (int i = 0; i < 2; ++i) {
+        auto* lb = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, lb[0]) + 4 * i), "guard_lb");
+        auto* hinted = b.CreateICmpEQ(lb, b.getInt32(hint_lb[i]));
+        auto* outside = b.CreateICmpUGT(b.CreateSub(lb, b.getInt32(first_pc)), b.getInt32(last_pc - first_pc));
+        ok = b.CreateAnd(ok, b.CreateOr(hinted, outside));
+    }
+    b.CreateCondBr(ok, first_entry, miss, weights_usually(ctx));
+
+    b.SetInsertPoint(miss);
+    b.CreateStore(b.getInt8(1), field(b, cpu, offsetof(CpuState, lb_guard_miss)));
+    b.CreateRetVoid();
+    return guard;
+}
+
+// The guard's other successor: where it misses.
+BasicBlock* BBTranslator::lb_guard_miss_block(BasicBlock* guard) {
+    return cast<BranchInst>(guard->getTerminator())->getSuccessor(1);
+}
+
 // Every return goes through one exit that may run the next block itself.
 // Nearly every exit does (the boot to op1emu's main display returns to the
 // host about once in 370 block ends), and a native loop runs again: the branches say so
@@ -178,10 +229,11 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
 // is this one and self_loop is its first packet, a branch there runs it (a
 // native loop); otherwise a musttail call does.
 void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* mem,
-                                   uint32_t entry_pc, BasicBlock* self_loop) {
+                                   uint32_t entry_pc, BasicBlock* self_loop, BasicBlock* direct) {
     std::vector<ReturnInst*> returns;
     for (auto& block : *fn)
-        if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator())) returns.push_back(ret);
+        if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator()); ret && &block != direct)
+            returns.push_back(ret);
     if (returns.empty()) return;
 
     auto& ctx = fn->getContext();

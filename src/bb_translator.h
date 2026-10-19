@@ -31,7 +31,10 @@ public:
                  bool fastmem = false, uint64_t fast_base = 0);
 
     // hint: the guest state now, for heuristics only (LiftVisitor::set_hint).
-    BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr);
+    // careful: the block compares the loop bottoms at every packet, with no
+    // entry guard (LiftVisitor::set_careful); its function is
+    // bb_0x<pc>.careful.
+    BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr, bool careful = false);
     // Upper bound on packets per block (default and maximum 256). Limited
     // mode sets it to the step budget, since a run never executes more:
     // translating the rest of the block would only be compiled again from
@@ -58,8 +61,13 @@ public:
 
 private:
     void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
+    llvm::BasicBlock* emit_lb_guard(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu,
+                                    llvm::BasicBlock* first_entry, uint32_t first_pc, uint32_t last_pc,
+                                    const uint32_t hint_lb[2]);
+    // direct: a block whose return stays a return.
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* mem,
-                         uint32_t entry_pc, llvm::BasicBlock* self_loop);
+                         uint32_t entry_pc, llvm::BasicBlock* self_loop, llvm::BasicBlock* direct);
+    static llvm::BasicBlock* lb_guard_miss_block(llvm::BasicBlock* guard);
 
     Memory* mem_;
     bool unlimited_;

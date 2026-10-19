@@ -147,6 +147,9 @@ struct BcoreStats {
     uint64_t cache_hits         = 0;
     uint64_t cache_misses       = 0;
     uint64_t translate_ns_total = 0;
+    // Blocks compiled again careful after their loop-bottom entry guard
+    // failed (CpuState::lb_guard_miss); each is also in blocks_translated.
+    uint64_t lb_guard_misses    = 0;
     // Interrupts and exceptions dispatched per IVG level (0 = EMU, 1 = RST,
     // 2 = NMI, 3 = EVX, ... 15 = IVG15), counted where the CEC sets the
     // IPEND bit. Guest behavior, unlike the block counters above: with the

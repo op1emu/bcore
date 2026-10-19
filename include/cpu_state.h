@@ -60,11 +60,13 @@ struct CpuState {
     bool halted;
     int exit_code;
     uint32_t steps_remaining; // 0 = unlimited; N > 0 = decrement per instruction
-    // Packets the last Core::run entered: each packet's entry stores its
-    // 1-based index in the block, so an early exit (a taken conditional
-    // branch, a hardware-loop back edge, an exception) leaves the exact count
-    // rather than the block's static length. A packet that raises an
-    // exception is counted.
+    // Packets the last Core::run entered: the 1-based index in the block of
+    // the packet running, so an early exit (a taken conditional branch, a
+    // hardware-loop back edge, an exception) leaves the exact count rather
+    // than the block's static length. A packet that raises an exception is
+    // counted. Like pc and insn_len, generated code writes it only where it
+    // can be read: before a helper call and before the block returns
+    // (Core::set_lazy_state).
     uint32_t packets;
     // Memory::page_table() of the Memory this state runs with, or null; set
     // by Core before every block it runs. Generated code loads it from here
@@ -95,6 +97,11 @@ struct CpuState {
     // Set by a block compiled with Core::set_chain_dry when it would have
     // chained; it returns instead.
     uint8_t chain_would;
+    // Set by a block whose entry guard found a hardware loop ending inside
+    // it at a packet it was compiled to expect none at (BBTranslator's
+    // lb_guard): the block returns without running a packet, and Core::run
+    // compiles it again, careful at every packet.
+    uint8_t lb_guard_miss;
     // CYCLES (cycles[1]:cycles[0]) when this run started. With
     // Core::set_host_cycles a chained block that accesses CYCLES sets it to
     // cycles_base + chain_packets first, as a host that writes CYCLES before

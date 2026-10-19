@@ -67,120 +67,126 @@ void Core::applyModuleTarget() {
     translator_->setModuleTarget(jit_->dataLayout(), jit_->targetTriple());
 }
 
+BbFunc Core::compile(uint32_t pc, bool careful) {
+    // The translation below inlines accesses through this table if there
+    // is one; the code finds it in CpuState (see Memory::page_table()).
+    if (uint8_t* const* table = mem_->page_table())
+        page_table_ = table;
+#if BCORE_ENABLE_PROFILE
+    BcoreEventSink* sink = profile_->sink;
+    profile_->stats.cache_misses++;
+    // Asked before timing starts: the sink's answer is no part of the
+    // translation.
+    const bool want_metrics = sink && sink->wantsCompileMetrics();
+    const bool want_ir = sink && sink->wantsIrDump(pc);
+    if (sink) sink->onTranslateBegin(pc);
+    const uint64_t t0 = bcore_profile::monotonic_ns();
+    // Balances onTranslateBegin when anything below throws (a host
+    // Memory may: decoding reads guest memory through it). The exception
+    // still propagates.
+    struct FailOnUnwind {
+        BcoreEventSink* sink;
+        uint32_t pc;
+        uint64_t t0;
+        bool armed = true;
+        ~FailOnUnwind() {
+            if (armed && sink) sink->onTranslateFailure(pc, bcore_profile::monotonic_ns() - t0);
+        }
+    } fail_on_unwind{sink, pc, t0};
+#endif
+    auto result = translator_->translate(pc, cpu_, careful);
+#if BCORE_ENABLE_PROFILE
+    // Stage callbacks fire only after the translation is timed, so
+    // nothing the sink does lands inside a stage or in translate_ns.
+    const uint64_t lift_end = bcore_profile::monotonic_ns();
+    uint64_t optimize_end = 0;
+    // Printed between stages and taken out of the elapsed time.
+    std::string lifted_ir, optimized_ir;
+    uint64_t dump_ns = 0;
+    auto print = [&](std::string& out) {
+        const uint64_t begin = bcore_profile::monotonic_ns();
+        llvm::raw_string_ostream stream(out);
+        result.module->print(stream, nullptr);
+        stream.flush();
+        dump_ns += bcore_profile::monotonic_ns() - begin;
+    };
+    if (want_ir) print(lifted_ir);
+    const uint64_t optimize_begin = bcore_profile::monotonic_ns();
+#endif
+    // The IR pipeline, once per module and before any dump, so a dump shows
+    // the IR that is compiled. It used to run only inside the dump branch:
+    // from the initial commit on, a nonzero opt_level changed the printed IR
+    // and never the executed code.
+    if (opt_level_ != 0) {
+        jit_->optimize_module(*result.module);
+#if BCORE_ENABLE_PROFILE
+        optimize_end = bcore_profile::monotonic_ns();
+        if (want_ir) print(optimized_ir);
+#endif
+    }
+    if (dump_ir_) {
+        llvm::errs() << "=== IR BB @ " << llvm::format_hex(pc, 10) << " ===\n";
+        result.module->print(llvm::errs(), nullptr);
+        llvm::errs() << "=== end IR ===\n";
+    }
+#if BCORE_ENABLE_PROFILE
+    BcoreCompileMetrics metrics;
+    if (want_metrics) {
+        // The module as compiled; addModule() takes it. Between stages.
+        const uint64_t count_begin = bcore_profile::monotonic_ns();
+        for (const llvm::Function& function : *result.module) {
+            for (const llvm::BasicBlock& block : function) {
+                ++metrics.ir_blocks;
+                metrics.ir_instructions += block.size();
+            }
+        }
+        metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
+        metrics.terminator = result.exit_kind;
+    }
+    profile_->want_object_shapes = want_metrics;
+    profile_->capture_ns = 0;
+    const uint64_t materialize_begin = bcore_profile::monotonic_ns();
+#endif
+    BbFunc fn = nullptr;
+    if (jit_->addModule(pc,
+                        std::move(result.module),
+                        std::move(result.context),
+                        result.fallthrough_pc, careful))
+        fn = jit_->lookup(pc);
+#if BCORE_ENABLE_PROFILE
+    const uint64_t t1 = bcore_profile::monotonic_ns();
+    fail_on_unwind.armed = false;
+    if (want_metrics) metrics.collect_ns += profile_->capture_ns;
+    const uint64_t elapsed = t1 - t0 - metrics.collect_ns - dump_ns;
+    profile_->stats.translate_ns_total += elapsed;
+    if (fn) profile_->stats.blocks_translated++;
+    if (sink) {
+        sink->onCompileStage(pc, "lift", t0, lift_end, true);
+        if (optimize_end) sink->onCompileStage(pc, "ir-optimize", optimize_begin, optimize_end, true);
+        sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
+        if (want_ir) {
+            sink->onIrDump(pc, "lifted", lifted_ir);
+            if (optimize_end) sink->onIrDump(pc, "optimized", optimized_ir);
+        }
+        if (fn && want_metrics) {
+            auto [bytes, material] = profile_->takeObjectShape(pc);
+            metrics.object_bytes = bytes;
+            const uint64_t hash_begin = bcore_profile::monotonic_ns();
+            metrics.object_hash = bcore_profile::hash_material(material);
+            metrics.collect_ns += bcore_profile::monotonic_ns() - hash_begin;
+            sink->onCompileMetrics(pc, metrics);
+        }
+        if (fn) sink->onTranslateEnd(pc, elapsed);
+        else sink->onTranslateFailure(pc, elapsed);
+    }
+#endif
+    return fn;
+}
+
 bool Core::run(uint32_t pc) {
     BbFunc fn = jit_->lookup(pc);
     if (!fn) {
-        // The translation below inlines accesses through this table if there
-        // is one; the code finds it in CpuState (see Memory::page_table()).
-        if (uint8_t* const* table = mem_->page_table())
-            page_table_ = table;
-#if BCORE_ENABLE_PROFILE
-        BcoreEventSink* sink = profile_->sink;
-        profile_->stats.cache_misses++;
-        // Asked before timing starts: the sink's answer is no part of the
-        // translation.
-        const bool want_metrics = sink && sink->wantsCompileMetrics();
-        const bool want_ir = sink && sink->wantsIrDump(pc);
-        if (sink) sink->onTranslateBegin(pc);
-        const uint64_t t0 = bcore_profile::monotonic_ns();
-        // Balances onTranslateBegin when anything below throws (a host
-        // Memory may: decoding reads guest memory through it). The exception
-        // still propagates.
-        struct FailOnUnwind {
-            BcoreEventSink* sink;
-            uint32_t pc;
-            uint64_t t0;
-            bool armed = true;
-            ~FailOnUnwind() {
-                if (armed && sink) sink->onTranslateFailure(pc, bcore_profile::monotonic_ns() - t0);
-            }
-        } fail_on_unwind{sink, pc, t0};
-#endif
-        auto result = translator_->translate(pc, cpu_);
-#if BCORE_ENABLE_PROFILE
-        // Stage callbacks fire only after the translation is timed, so
-        // nothing the sink does lands inside a stage or in translate_ns.
-        const uint64_t lift_end = bcore_profile::monotonic_ns();
-        uint64_t optimize_end = 0;
-        // Printed between stages and taken out of the elapsed time.
-        std::string lifted_ir, optimized_ir;
-        uint64_t dump_ns = 0;
-        auto print = [&](std::string& out) {
-            const uint64_t begin = bcore_profile::monotonic_ns();
-            llvm::raw_string_ostream stream(out);
-            result.module->print(stream, nullptr);
-            stream.flush();
-            dump_ns += bcore_profile::monotonic_ns() - begin;
-        };
-        if (want_ir) print(lifted_ir);
-        const uint64_t optimize_begin = bcore_profile::monotonic_ns();
-#endif
-        // The IR pipeline, once per module and before any dump, so a dump shows
-        // the IR that is compiled. It used to run only inside the dump branch:
-        // from the initial commit on, a nonzero opt_level changed the printed IR
-        // and never the executed code.
-        if (opt_level_ != 0) {
-            jit_->optimize_module(*result.module);
-#if BCORE_ENABLE_PROFILE
-            optimize_end = bcore_profile::monotonic_ns();
-            if (want_ir) print(optimized_ir);
-#endif
-        }
-        if (dump_ir_) {
-            llvm::errs() << "=== IR BB @ " << llvm::format_hex(pc, 10) << " ===\n";
-            result.module->print(llvm::errs(), nullptr);
-            llvm::errs() << "=== end IR ===\n";
-        }
-#if BCORE_ENABLE_PROFILE
-        BcoreCompileMetrics metrics;
-        if (want_metrics) {
-            // The module as compiled; addModule() takes it. Between stages.
-            const uint64_t count_begin = bcore_profile::monotonic_ns();
-            for (const llvm::Function& function : *result.module) {
-                for (const llvm::BasicBlock& block : function) {
-                    ++metrics.ir_blocks;
-                    metrics.ir_instructions += block.size();
-                }
-            }
-            metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
-            metrics.terminator = result.exit_kind;
-        }
-        profile_->want_object_shapes = want_metrics;
-        profile_->capture_ns = 0;
-        const uint64_t materialize_begin = bcore_profile::monotonic_ns();
-#endif
-        if (jit_->addModule(pc,
-                            std::move(result.module),
-                            std::move(result.context),
-                            result.fallthrough_pc))
-            fn = jit_->lookup(pc);
-#if BCORE_ENABLE_PROFILE
-        const uint64_t t1 = bcore_profile::monotonic_ns();
-        fail_on_unwind.armed = false;
-        if (want_metrics) metrics.collect_ns += profile_->capture_ns;
-        const uint64_t elapsed = t1 - t0 - metrics.collect_ns - dump_ns;
-        profile_->stats.translate_ns_total += elapsed;
-        if (fn) profile_->stats.blocks_translated++;
-        if (sink) {
-            sink->onCompileStage(pc, "lift", t0, lift_end, true);
-            if (optimize_end) sink->onCompileStage(pc, "ir-optimize", optimize_begin, optimize_end, true);
-            sink->onCompileStage(pc, "materialize", materialize_begin, t1, fn != nullptr);
-            if (want_ir) {
-                sink->onIrDump(pc, "lifted", lifted_ir);
-                if (optimize_end) sink->onIrDump(pc, "optimized", optimized_ir);
-            }
-            if (fn && want_metrics) {
-                auto [bytes, material] = profile_->takeObjectShape(pc);
-                metrics.object_bytes = bytes;
-                const uint64_t hash_begin = bcore_profile::monotonic_ns();
-                metrics.object_hash = bcore_profile::hash_material(material);
-                metrics.collect_ns += bcore_profile::monotonic_ns() - hash_begin;
-                sink->onCompileMetrics(pc, metrics);
-            }
-            if (fn) sink->onTranslateEnd(pc, elapsed);
-            else sink->onTranslateFailure(pc, elapsed);
-        }
-#endif
+        fn = compile(pc, false);
         if (!fn)
             return false;
     }
@@ -205,6 +211,24 @@ bool Core::run(uint32_t pc) {
     jit_->set_executing(pc);
     fn(cpu_, mem_);
     jit_->clear_executing();
+    if (cpu_->lb_guard_miss) {
+        // A block met a loop bottom where its compilation expected none
+        // (BBTranslator's lb_guard) and returned before its first packet, at
+        // its own PC, with the run's chain state as it found it: from now on
+        // that PC runs a careful compilation, which takes its place in this
+        // run too. A careful block has no guard.
+        cpu_->lb_guard_miss = 0;
+#if BCORE_ENABLE_PROFILE
+        profile_->stats.lb_guard_misses++;
+#endif
+        const uint32_t at = cpu_->pc;
+        BbFunc careful = compile(at, true);
+        if (!careful)
+            return false;
+        jit_->set_executing(at);
+        careful(cpu_, mem_);
+        jit_->clear_executing();
+    }
 #if BCORE_ENABLE_PROFILE
     profile_->stats.blocks_executed += 1 + cpu_->chain_blocks;
 #endif

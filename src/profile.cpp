@@ -109,13 +109,15 @@ void ProfileState::retire(uint64_t addr, const Block& b, uint64_t now) {
 
 namespace {
 
-// Parses "bb_0x%08x" (the name JitEngine gives every block function), and
-// "bb_0x%08x.cold", the symbol the machine function splitter gives the
-// block's cold part (cold set). Returns false for any other symbol.
+// Parses "bb_0x%08x" (the name JitEngine gives every block function),
+// "bb_0x%08x.careful" (a block compiled again after its loop-bottom guard
+// failed) and either with ".cold", the symbol the machine function splitter
+// gives the block's cold part (cold set). Returns false for any other symbol.
 bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc, bool& cold) {
     if (!name.startswith("bb_0x")) return false;
     llvm::StringRef hex = name.drop_front(5);
     cold = hex.consume_back(".cold");
+    hex.consume_back(".careful");
     if (hex.empty() || hex.size() > 8) return false;
     uint32_t pc = 0;
     const char* b = hex.data();
