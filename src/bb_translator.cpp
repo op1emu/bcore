@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <optional>
 #include <vector>
 
 #include "chain_table.h"
@@ -248,6 +249,68 @@ static Value* stored_before(Instruction* at, Value* cpu, size_t offset) {
     return nullptr;
 }
 
+// The packet state a return's path stores last, in the straight-line tail
+// that leads only to it: a chained block needs none of it, so the exit stores
+// it only where it returns. kTail* index offsets and values.
+enum { kTailPc, kTailInsnLen, kTailPackets, kTailDidJump, kTailFields };
+static constexpr size_t kTailOffset[kTailFields] = {offsetof(CpuState, pc), offsetof(CpuState, insn_len),
+                                                    offsetof(CpuState, packets), offsetof(CpuState, did_jump)};
+struct Tail {
+    Value* value[kTailFields] = {};
+    bool any() const { return value[0] || value[1] || value[2] || value[3]; }
+};
+
+static int tail_field(std::optional<size_t> offset) {
+    if (offset)
+        for (int f = 0; f < kTailFields; ++f)
+            if (*offset == kTailOffset[f]) return f;
+    return -1;
+}
+
+// Removes the last store to each tail field before ret, if nothing reads it
+// before ret: within ret's block and the predecessors before it that have
+// no other successor, back to a helper call or a store at an offset not
+// known. Returns the values they stored.
+static Tail sink_tail(ReturnInst* ret, Value* cpu) {
+    StoreInst* found[kTailFields] = {};
+    bool read[kTailFields] = {};
+    BasicBlock* block = ret->getParent();
+    BasicBlock::iterator it(ret);
+    for (bool more = true; more;) {
+        while (it != block->begin()) {
+            --it;
+            if (auto* store = dyn_cast<StoreInst>(&*it)) {
+                auto offset = cpu_field_offset(store->getPointerOperand(), cpu);
+                if (!offset && getUnderlyingObject(store->getPointerOperand()) == cpu) { more = false; break; }
+                const int f = tail_field(offset);
+                if (f >= 0 && !found[f] && !read[f]) found[f] = store;
+                continue;
+            }
+            if (auto* load = dyn_cast<LoadInst>(&*it)) {
+                const int f = tail_field(cpu_field_offset(load->getPointerOperand(), cpu));
+                if (f >= 0 && !found[f]) read[f] = true;
+                continue;
+            }
+            auto* call = dyn_cast<CallInst>(&*it);
+            if (call && !isa<IntrinsicInst>(call)) { more = false; break; }
+        }
+        if (!more) break;
+        BasicBlock* pred = block->getSinglePredecessor();
+        if (!pred || pred->getSingleSuccessor() != block) break;
+        block = pred;
+        it = block->end();
+    }
+    Tail tail;
+    for (int f = 0; f < kTailFields; ++f) {
+        if (!found[f]) continue;
+        tail.value[f] = found[f]->getValueOperand();
+        auto* ptr = dyn_cast<Instruction>(found[f]->getPointerOperand());
+        found[f]->eraseFromParent();
+        if (ptr && ptr->use_empty()) ptr->eraseFromParent();
+    }
+    return tail;
+}
+
 // Every return becomes an exit that may run the next block itself. Nearly
 // every exit does (the boot to op1emu's main display returns to the host
 // about once in 480 block ends), and a native loop runs again: the branches
@@ -291,10 +354,10 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     b.CreateRetVoid();
 
     // The budget test every exit makes: on to `go` with the run's packets
-    // including this block's, or leave. No exit finds an interrupt pending:
+    // including this block's, or to `out`. No exit finds an interrupt pending:
     // generated code checks one after every instruction that may enable it,
     // and whatever else makes one pending sets the budget to 0 (cec_raise).
-    auto admit = [&](Value* packets, BasicBlock* go) {
+    auto admit = [&](Value* packets, BasicBlock* go, BasicBlock* out) {
         auto* done = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_packets)), "chain_packets");
         auto* total = b.CreateAdd(done, packets, "chain_total");
         // Atomic: another thread may set it to 0, and a native loop with no
@@ -302,20 +365,37 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         auto* budget = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_budget)), "chain_budget");
         budget->setAtomic(AtomicOrdering::Monotonic);
         budget->setAlignment(Align(4));
-        b.CreateCondBr(b.CreateICmpULT(total, budget), go, leave, weights_usually(ctx));
+        b.CreateCondBr(b.CreateICmpULT(total, budget), go, out, weights_usually(ctx));
         return total;
     };
-    // What the host does before the next block: retire, then clear the
-    // packet index and did_jump (Core::run). False in dry mode, where the
-    // block returns instead.
-    auto chain = [&](Value* total) {
+    // The tail stores a return skipped (sink_tail), where the block returns.
+    auto store_tail = [&](const Tail& tail) {
+        for (int f = 0; f < kTailFields; ++f)
+            if (tail.value[f]) b.CreateStore(tail.value[f], field(b, cpu, kTailOffset[f]));
+    };
+    auto leave_for = [&](const Tail& tail) {
+        if (!tail.any()) return leave;
+        auto* block = BasicBlock::Create(ctx, "chain_leave", fn);
+        IRBuilder<>::InsertPointGuard guard(b);
+        b.SetInsertPoint(block);
+        store_tail(tail);
+        b.CreateRetVoid();
+        return block;
+    };
+    // What the host does before the next block: retire, then clear did_jump
+    // (Core::run), with pc in place. False in dry mode, where the block
+    // returns instead. The packet index stays: a block stores its own before
+    // anything reads it, but where its loop-bottom guard misses, and then
+    // Core::run runs the block compiled again careful, which does the same.
+    auto chain = [&](Value* total, const Tail& tail, Value* next) {
         if (chain_dry_) {
+            store_tail(tail);
             b.CreateStore(b.getInt8(1), field(b, cpu, offsetof(CpuState, chain_would)));
             b.CreateRetVoid();
             return false;
         }
+        if (tail.value[kTailPc]) b.CreateStore(next, field(b, cpu, offsetof(CpuState, pc)));
         b.CreateStore(total, field(b, cpu, offsetof(CpuState, chain_packets)));
-        b.CreateStore(b.getInt32(0), field(b, cpu, offsetof(CpuState, packets)));
         b.CreateStore(b.getInt8(0), field(b, cpu, offsetof(CpuState, did_jump)));
         if (count_chained_) {
             auto* blocks_ptr = field(b, cpu, offsetof(CpuState, chain_blocks));
@@ -329,12 +409,12 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
                                                   b.getInt64(sizeof(ChainSlot))), "chain_slot");
     };
     // The slot's block runs next if the slot holds pc.
-    auto call_slot = [&](Value* slot, Value* pc, Value* total) {
+    auto call_slot = [&](Value* slot, Value* pc, Value* total, const Tail& tail, BasicBlock* out) {
         auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
         auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
-        b.CreateCondBr(b.CreateICmpEQ(slot_pc, pc), hit, leave, weights_usually(ctx));
+        b.CreateCondBr(b.CreateICmpEQ(slot_pc, pc), hit, out, weights_usually(ctx));
         b.SetInsertPoint(hit);
-        if (!chain(total)) return;
+        if (!chain(total, tail, pc)) return;
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});
         call->setCallingConv(CallingConv::GHC);
@@ -342,54 +422,78 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         b.CreateRetVoid();
     };
 
-    BasicBlock* shared = nullptr;
-    PHINode* shared_pc = nullptr;
-    PHINode* shared_packets = nullptr;
+    // The returns whose next PC is known only at run time, with what they
+    // need: a PHI per value, the tail's fields loaded where a return did not
+    // skip their stores.
+    struct Shared { ReturnInst* ret; Value* next; Value* packets; Tail tail; };
+    std::vector<Shared> shared;
     for (auto* ret : returns) {
-        BasicBlock* from = ret->getParent();
         Value* next = stored_before(ret, cpu, offsetof(CpuState, pc));
         Value* packets = stored_before(ret, cpu, offsetof(CpuState, packets));
+        const Tail tail = sink_tail(ret, cpu);
         b.SetInsertPoint(ret);
         if (!next) next = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, pc)), "next_pc");
         if (!packets) packets = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, packets)), "packets");
         auto* known = dyn_cast<ConstantInt>(next);
         if (!known) {
-            if (!shared) {
-                shared = BasicBlock::Create(ctx, "chain_exit", fn);
-                IRBuilder<> at(shared);
-                shared_pc = at.CreatePHI(i32, returns.size(), "next_pc");
-                shared_packets = at.CreatePHI(i32, returns.size(), "packets");
-            }
-            shared_pc->addIncoming(next, from);
-            shared_packets->addIncoming(packets, from);
-            b.CreateBr(shared);
-            ret->eraseFromParent();
+            shared.push_back({ret, next, packets, tail});
             continue;
         }
         auto* go = BasicBlock::Create(ctx, "chain_go", fn);
-        auto* total = admit(packets, go);
+        BasicBlock* out = leave_for(tail);
+        b.SetInsertPoint(ret);
+        auto* total = admit(packets, go, out);
         ret->eraseFromParent();
         b.SetInsertPoint(go);
         if (self_loop && known->getZExtValue() == entry_pc) {
-            if (chain(total)) b.CreateBr(self_loop);
+            if (chain(total, tail, known)) b.CreateBr(self_loop);
         } else {
-            call_slot(slot_of(known), known, total);
+            call_slot(slot_of(known), known, total, tail, out);
         }
     }
-    if (!shared) return;
+    if (shared.empty()) return;
 
-    b.SetInsertPoint(shared);
+    auto* exit = BasicBlock::Create(ctx, "chain_exit", fn);
+    IRBuilder<> at(exit);
+    auto* next = at.CreatePHI(i32, shared.size(), "next_pc");
+    auto* packets = at.CreatePHI(i32, shared.size(), "packets");
+    Tail tail;
+    PHINode* phis[kTailFields] = {};
+    for (int f = 0; f < kTailFields; ++f)
+        for (auto& from : shared)
+            if (from.tail.value[f]) {
+                phis[f] = at.CreatePHI(f == kTailDidJump ? i8 : i32, shared.size(), "tail");
+                tail.value[f] = phis[f];
+                break;
+            }
+    for (auto& from : shared) {
+        b.SetInsertPoint(from.ret);
+        next->addIncoming(from.next, from.ret->getParent());
+        packets->addIncoming(from.packets, from.ret->getParent());
+        for (int f = 0; f < kTailFields; ++f) {
+            if (!phis[f]) continue;
+            Value* value = from.tail.value[f];
+            if (!value) value = b.CreateLoad(phis[f]->getType(), field(b, cpu, kTailOffset[f]));
+            phis[f]->addIncoming(value, from.ret->getParent());
+        }
+        b.CreateBr(exit);
+        from.ret->eraseFromParent();
+    }
+
+    b.SetInsertPoint(exit);
     auto* go = BasicBlock::Create(ctx, "chain_lookup", fn);
-    auto* total = admit(shared_packets, go);
+    BasicBlock* out = leave_for(tail);
+    b.SetInsertPoint(exit);
+    auto* total = admit(packets, go, out);
     b.SetInsertPoint(go);
     if (self_loop) {
         // A hardware loop's back edge to the block's start, mostly.
         auto* self = BasicBlock::Create(ctx, "chain_self", fn);
         auto* other = BasicBlock::Create(ctx, "chain_other", fn);
-        b.CreateCondBr(b.CreateICmpEQ(shared_pc, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
+        b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
         b.SetInsertPoint(self);
-        if (chain(total)) b.CreateBr(self_loop);
+        if (chain(total, tail, next)) b.CreateBr(self_loop);
         b.SetInsertPoint(other);
     }
-    call_slot(slot_of(shared_pc), shared_pc, total);
+    call_slot(slot_of(next), next, total, tail, out);
 }
