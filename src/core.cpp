@@ -211,12 +211,15 @@ bool Core::run(uint32_t pc) {
     jit_->set_executing(pc);
     fn(cpu_, mem_);
     jit_->clear_executing();
-    if (cpu_->lb_guard_miss) {
+    while (cpu_->lb_guard_miss) {
         // A block met a loop bottom where its compilation expected none
         // (BBTranslator's lb_guard) and returned before its first packet, at
         // its own PC, with the run's chain state as it found it: from now on
         // that PC runs a careful compilation, which takes its place in this
-        // run too. A careful block has no guard.
+        // run too. A careful block has no guard, but it may chain into
+        // another block whose guard misses: that one returns here the same
+        // way, so the run goes on until no block misses. Each PC misses at
+        // most once (its guarded compilation is replaced).
         cpu_->lb_guard_miss = 0;
 #if BCORE_ENABLE_PROFILE
         profile_->stats.lb_guard_misses++;

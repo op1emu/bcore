@@ -3,7 +3,7 @@
 // lb_guard). Run later with a loop bottom inside it, it must behave exactly
 // as a block compiled with that bottom known: the guard misses, Core::run
 // compiles the block again careful and runs that in its place, in the same
-// run, once.
+// run, once -- also when that careful block chains into another that misses.
 #include "core.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
@@ -59,6 +59,70 @@ static Outcome run(int opt, bool chained, uint32_t compiled_lb, int bottom, uint
     return out;
 }
 
+// Two blocks that jump to each other, both compiled with no loop inside
+// them, then run chained (a nonzero budget) with LB0 in one and LB1 in the
+// other: the first misses, its careful compilation chains into the second,
+// which misses too. The run must carry on through both, as blocks compiled
+// with those bottoms known do, and leave no miss behind: a later run from
+// another PC must work. (Found in review: Core::run handled one miss.)
+struct PairOutcome { uint32_t pc, r0, lc0, lc1, packets, chain_packets, chain_blocks; bool ok; uint64_t misses; };
+
+static PairOutcome run_pair(int opt, bool hinted) {
+    CpuState cpu{};
+    FlatMemory mem(0, 0x1000, &cpu);
+    mem.write16(0x200, 0x6408); mem.write16(0x202, 0x207f);  // R0 += 1; JUMP.S 0x300
+    mem.write16(0x300, 0x6408); mem.write16(0x302, 0x2f7f);  // R0 += 1; JUMP.S 0x200
+    mem.write16(0x400, 0x6408); mem.write16(0x402, 0x2eff);  // R0 += 1; JUMP.S 0x200
+    Core core(&cpu, &mem);
+    core.set_chaining(true, false);
+    require(core.init(opt), "init");
+    cec_init(); evt_init();
+    cpu.lb[0] = hinted ? 0x200 : kElsewhere;
+    cpu.lb[1] = hinted ? 0x300 : kElsewhere;
+    cpu.chain_budget = 0;
+    require(core.run(0x200) && core.run(0x300) && core.run(0x400), "compile");
+
+    cpu = {};
+    cpu.lb[0] = 0x200; cpu.lb[1] = 0x300;
+    cpu.lt[0] = cpu.lt[1] = 0x800;
+    cpu.lc[0] = cpu.lc[1] = 1;
+    cpu.chain_budget = 8;
+    PairOutcome out{};
+    out.ok = core.run(0x200);
+    out.pc = cpu.pc; out.r0 = cpu.dpregs[0]; out.lc0 = cpu.lc[0]; out.lc1 = cpu.lc[1];
+    out.packets = cpu.packets; out.chain_packets = cpu.chain_packets; out.chain_blocks = cpu.chain_blocks;
+    require(!cpu.lb_guard_miss, "a miss was left behind");
+    cpu.chain_budget = 0;
+    cpu.did_jump = false;
+    out.ok = out.ok && core.run(0x400);  // the host may go anywhere next (an interrupt, say)
+    out.r0 = cpu.dpregs[0];
+    out.misses = core.stats().lb_guard_misses;
+    return out;
+}
+
+static unsigned test_pair() {
+    unsigned cases = 0;
+    for (int opt : {0, 1, 2, 3}) {
+        const PairOutcome want = run_pair(opt, true);
+        const PairOutcome got = run_pair(opt, false);
+        require(want.ok && got.ok, "a run failed");
+        if (got.pc != want.pc || got.r0 != want.r0 || got.lc0 != want.lc0 || got.lc1 != want.lc1 ||
+            got.packets != want.packets || got.chain_packets != want.chain_packets ||
+            got.chain_blocks != want.chain_blocks) {
+            fprintf(stderr, "FAIL: -O%d chained pair: pc %x r0 %u lc %u,%u packets %u chain %u/%u, "
+                            "expected pc %x r0 %u lc %u,%u packets %u chain %u/%u\n",
+                    opt, got.pc, got.r0, got.lc0, got.lc1, got.packets, got.chain_packets, got.chain_blocks,
+                    want.pc, want.r0, want.lc0, want.lc1, want.packets, want.chain_packets, want.chain_blocks);
+            std::exit(1);
+        }
+#if BCORE_ENABLE_PROFILE
+        require(want.misses == 0 && got.misses == 2, "the pair missed other than once each");
+#endif
+        ++cases;
+    }
+    return cases;
+}
+
 int main() {
     unsigned cases = 0;
     for (int opt : {0, 1, 2})
@@ -81,6 +145,7 @@ int main() {
 #endif
                     ++cases;
                 }
+    cases += test_pair();
     printf("lb guard test passed (%u cases)\n", cases);
     return 0;
 }
