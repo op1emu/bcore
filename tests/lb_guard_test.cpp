@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <utility>
 
 static void require(bool ok, const char* why) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -123,8 +124,54 @@ static unsigned test_pair() {
     return cases;
 }
 
+// The guard misses in a block chained to: while Core::run compiles it again,
+// the host's callbacks (its code fetches) see the run's packets so far, as
+// chain_packets + packets, with nothing of the block that missed counted.
+struct FetchClock : FlatMemory {
+    CpuState* cpu;
+    uint32_t watch = 0;
+    mutable bool seen = false;
+    mutable uint32_t retired = 0;
+    explicit FetchClock(CpuState* c) : FlatMemory(0, 0x1000, c), cpu(c) {}
+    uint32_t rawmem_limit() const override { return 0; }
+    uint16_t read16(uint32_t addr) const override {
+        if (watch && addr == watch && !seen) {
+            seen = true;
+            retired = cpu->chain_packets + cpu->packets;
+        }
+        return FlatMemory::read16(addr);
+    }
+};
+
+static void test_fetch_during_careful(int opt) {
+    CpuState cpu{};
+    FetchClock mem(&cpu);
+    Core core(&cpu, &mem);
+    core.set_chaining(true);
+    require(core.init(opt), "init");
+    cec_init(); evt_init();
+    // R0 += 1; R0 = [P0]; JUMP.S 0x200, then R1 += 1; RTS
+    for (auto [pc, op] : {std::pair{0x100u, 0x6408}, {0x102u, 0x9100}, {0x104u, 0x207e},
+                          {0x200u, 0x6409}, {0x202u, 0x0010}})
+        mem.write16(pc, uint16_t(op));
+    cpu.lb[0] = cpu.lb[1] = kElsewhere;
+    cpu.rets = kElsewhere;
+    cpu.chain_budget = 0;
+    require(core.run(0x100) && core.run(0x200), "compile");
+    // A loop now ends at 0x200: its guard misses when 0x100 chains to it.
+    cpu.dpregs[8] = 0x900;
+    cpu.lt[0] = kElsewhere; cpu.lb[0] = 0x200; cpu.lc[0] = 1;
+    cpu.rets = kElsewhere;
+    mem.watch = 0x200;
+    cpu.chain_budget = 8;
+    require(core.run(0x100) && mem.seen, "careful compilation fetched the block");
+    require(mem.retired == 3, "the fetch saw the three packets the run retired before the miss");
+    require(cpu.chain_packets + cpu.packets == 5 && cpu.pc == kElsewhere, "then the careful block ran");
+}
+
 int main() {
     unsigned cases = 0;
+    for (int opt : {0, 1, 2, 3}) test_fetch_during_careful(opt);
     for (int opt : {0, 1, 2})
         for (bool chained : {false, true})
             for (int bottom = 0; bottom < kAdds; ++bottom)

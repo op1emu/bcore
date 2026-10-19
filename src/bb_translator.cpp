@@ -386,7 +386,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     // (Core::run), with pc in place. False in dry mode, where the block
     // returns instead. The packet index stays: a block stores its own before
     // anything reads it, but where its loop-bottom guard misses, and then
-    // Core::run runs the block compiled again careful, which does the same.
+    // Core::run clears it before it compiles the block again careful.
     // did_jump_clear: did_jump is clear in memory, as where the tail held the
     // path's store of it (every path's, for the shared exit). A block starts
     // with it clear, and on a path that goes on past a jump or a helper that
