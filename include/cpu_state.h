@@ -94,7 +94,8 @@ struct CpuState {
     // Packets retired by the blocks that already ran in this run; the block
     // running counts its own in `packets`.
     uint32_t chain_packets;
-    // Blocks that ran in this run after the first.
+    // Blocks that ran in this run after the first (0 if not counted,
+    // Core::set_count_chained).
     uint32_t chain_blocks;
     // Set by a block compiled with Core::set_chain_dry when it would have
     // chained; it returns instead.

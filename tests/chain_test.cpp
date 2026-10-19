@@ -84,6 +84,17 @@ static void test_budget(int opt) {
     require(c.run(0x100, 8) == 8 && c.cpu.dpregs[0] == 9 && c.cpu.pc == 0x100, "budget 8: four blocks");
 }
 
+// Not counting chained blocks changes nothing else.
+static void test_uncounted(int opt) {
+    Chained c(opt);
+    c.core.set_count_chained(false);
+    c.code(0x200, {kIncR0, 0x207f});  // R0 += 1; JUMP.S 0x300
+    c.code(0x300, {kIncR0, 0x2f7f});  // R0 += 1; JUMP.S 0x200
+    c.run(0x200, 0);
+    c.run(0x300, 0);
+    require(c.run(0x200, 100) == 100 && c.cpu.dpregs[0] == 52 && c.cpu.chain_blocks == 0, "uncounted chain");
+}
+
 // Two blocks run each other through the table once both are compiled.
 static void test_table_chain(int opt) {
     Chained c(opt);
@@ -224,6 +235,7 @@ int main() {
         test_filtered_self(opt);
         test_refilter(opt);
         test_refilter_self(opt);
+        test_uncounted(opt);
         test_pending_from_device(opt);
         test_pending(opt);
         test_host_cycles(opt);
