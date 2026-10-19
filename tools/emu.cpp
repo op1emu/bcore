@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
     bool page_table = false;
     bool count_packets = false;
     bool chain = false;
+    bool lazy_state = true;
     uint64_t max_steps = 0; // 0 = unlimited
     int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
     const char* elf_path = nullptr;
@@ -54,13 +55,15 @@ int main(int argc, char** argv) {
             count_packets = true;
         } else if (strcmp(argv[i], "--chain") == 0) {
             chain = true;
+        } else if (strcmp(argv[i], "--no-lazy-state") == 0) {
+            lazy_state = false;
         } else {
             elf_path = argv[i];
         }
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -179,6 +182,7 @@ int main(int argc, char** argv) {
     if (dump_ir) core.set_dump_ir(true);
     // Blocks run the next one themselves until a CEC event or a halt.
     core.set_chaining(chain);
+    core.set_lazy_state(lazy_state);
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
         return 1;

@@ -14,6 +14,7 @@
 
 #include "decoder.h"
 #include "lift_visitor.h"
+#include "packet_state.h"
 
 using namespace llvm;
 
@@ -118,6 +119,8 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint) {
             builder.CreateRetVoid();
     }
 
+    // Before the chain exit turns the returns into branches to it.
+    if (lazy_state_) sink_packet_state(*fn, cpu_ptr);
     if (host_cycles_ && visitor.accesses_cycles()) emit_host_cycles(builder, cpu_ptr, first_entry);
     // A native loop where the block may well branch to itself: a jump to its
     // start, or the start of a hardware loop now. Elsewhere a jump to itself

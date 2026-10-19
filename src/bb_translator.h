@@ -53,6 +53,8 @@ public:
     // See Core::set_chaining, set_chain_dry and set_host_cycles.
     void set_chaining(bool chaining, bool dry) { chaining_ = chaining; chain_dry_ = dry; }
     void set_host_cycles(bool host_cycles) { host_cycles_ = host_cycles; }
+    // See Core::set_lazy_state.
+    void set_lazy_state(bool lazy) { lazy_state_ = lazy; }
 
 private:
     void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
@@ -69,6 +71,7 @@ private:
     bool chaining_ = false;
     bool chain_dry_ = false;
     bool host_cycles_ = false;
+    bool lazy_state_ = true;
     std::string data_layout_;
     std::string target_triple_;
 };

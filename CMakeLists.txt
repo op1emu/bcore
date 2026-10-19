@@ -51,6 +51,7 @@ add_library(bfin-core STATIC
     src/code_arena.cpp
     src/jit_engine.cpp
     src/bb_translator.cpp
+    src/packet_state.cpp
     src/syscall_emu.cpp
     src/cec.cpp
     src/evt.cpp
@@ -216,6 +217,9 @@ if(BCORE_BUILD_FAULT_TESTS)
     add_executable(bcore-hwloop-jump-test tests/hwloop_jump_test.cpp)
     target_link_libraries(bcore-hwloop-jump-test PRIVATE bfin-core)
     add_test(NAME bcore-hwloop-jump-test COMMAND bcore-hwloop-jump-test)
+    add_executable(bcore-lazy-state-test tests/lazy_state_test.cpp)
+    target_link_libraries(bcore-lazy-state-test PRIVATE bfin-core)
+    add_test(NAME bcore-lazy-state-test COMMAND bcore-lazy-state-test)
     add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
     target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
     # It also builds an LLJIT of its own over the arena's memory managers.

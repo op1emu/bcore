@@ -46,6 +46,11 @@ public:
     // CpuState::cycles_base plus the packets chained before it, as such a
     // host would have. Off by default (bcore's emu leaves CYCLES alone).
     void set_host_cycles(bool host_cycles);
+    // Blocks compiled from now on store pc, insn_len and packets only where
+    // a helper call, a return or a load can read them (on by default; off
+    // stores them at every packet, as before). Either way every reader sees
+    // the same values.
+    void set_lazy_state(bool lazy);
 
     // ---- JIT observability (contract in bcore_profile.h) ----
 
@@ -103,4 +108,5 @@ private:
     bool chaining_ = false;
     bool chain_dry_ = false;
     bool host_cycles_ = false;
+    bool lazy_state_ = true;
 };
