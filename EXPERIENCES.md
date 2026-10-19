@@ -486,3 +486,39 @@ and the arena's RWX permissions versus per-object `mprotect`.
 One that cost compile time: inlining a hardware-loop count-down on every
 taken-branch exit grew the IR of branch-heavy blocks enough to make the ISA
 test `divq.s` 25% slower to compile; the rare path now calls the helper.
+
+## What a chained block transition costs, and where it went
+
+A block that runs the next one itself (a musttail call through the chain
+table) used to pay, per transition: the six callee-saved pushes and pops of
+the C convention, reloads of the pc and packet index its own path had just
+stored, a computed table index even for a constant successor, a load of the
+CEC's pending flag, and stores of insn_len, the packet index and did_jump
+that the next block overwrote before anything read them -- about 45 machine
+instructions, a third of the generated code's instructions outside loops in
+the boot to op1emu's main display.
+
+- Blocks are `ghccc`: the GHC convention saves no register for its caller,
+  and `musttail` between two `ghccc` functions of the same type works in
+  LLVM 15 (one `push`/`pop` stays, for stack alignment before helper calls).
+  The host enters through one JIT-compiled C-ABI trampoline
+  (`JitEngine::enter`), which saves the callee-saved registers once per run.
+- Each return gets its own exit, with the values its path stored found by
+  walking back through the block and its single predecessors. A constant
+  successor reads its slot at a constant offset; a constant jump to the
+  block's own start is a branch. The exit with a run-time PC must keep the
+  native-loop branch too: a hardware loop's back edge goes through it (the
+  first version without it cost 7% more instructions in the boot).
+- No pending-interrupt test at exits: every instruction that may enable an
+  interrupt is followed by a check, and the other ways to leave one pending
+  (`cec_raise`, an IMASK write) set the chain budget to 0.
+- The stores that end a return's path (pc, insn_len, packet index, did_jump)
+  are made only where the block returns. Skipping the did_jump clear on the
+  chain is right only where every path into that exit stored did_jump itself:
+  `bfin_hwloop_step` sets it on a back edge with no store in the IR, and a
+  shared exit that mixed both made the ISA test `c_mmr_loop` hang.
+
+Together, host instructions in execution 62.99G -> 58.49G (-7.1%) with the
+workload identical; cycles fell most in the blocks outside loops (-14%).
+Whether the native loop may run is now decided at translation time from the
+chain filter, so setting a filter drops the blocks already compiled.
