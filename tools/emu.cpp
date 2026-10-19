@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
     bool count_packets = false;
     bool chain = false;
     bool lazy_state = true;
+    const char* post_pipeline = nullptr;
     uint64_t max_steps = 0; // 0 = unlimited
     int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
     const char* elf_path = nullptr;
@@ -57,13 +58,15 @@ int main(int argc, char** argv) {
             chain = true;
         } else if (strcmp(argv[i], "--no-lazy-state") == 0) {
             lazy_state = false;
+        } else if (strcmp(argv[i], "--post-pipeline") == 0 && i + 1 < argc) {
+            post_pipeline = argv[++i];
         } else {
             elf_path = argv[i];
         }
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -185,6 +188,10 @@ int main(int argc, char** argv) {
     core.set_lazy_state(lazy_state);
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
+        return 1;
+    }
+    if (post_pipeline && !core.set_post_pipeline(post_pipeline)) {
+        fprintf(stderr, "error: --post-pipeline does not parse: %s\n", post_pipeline);
         return 1;
     }
 

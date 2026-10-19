@@ -35,7 +35,7 @@ bool Core::init(int opt_level, int codegen_level) {
     codegen_level_ = codegen_level;
 
     jit_ = std::make_shared<JitEngine>();
-    if (!jit_->init(opt_level_, codegen_level_))
+    if (!jit_->init(opt_level_, codegen_level_) || !jit_->set_post_pipeline(post_pipeline_))
         return false;
     jit_->setChainFilter(chain_filter_);
     attachProfiler();
@@ -239,7 +239,7 @@ void Core::invalidate() {
     jit_ = std::make_shared<JitEngine>();
     // Init cannot fail here unless it failed in Core::init already (same host,
     // same levels); if it ever does, stop rather than dereference a null LLJIT.
-    if (!jit_->init(opt_level_, codegen_level_))
+    if (!jit_->init(opt_level_, codegen_level_) || !jit_->set_post_pipeline(post_pipeline_))
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
     applyModuleTarget();
@@ -284,6 +284,19 @@ void Core::set_chaining(bool chaining, bool dry) {
 void Core::set_host_cycles(bool host_cycles) {
     host_cycles_ = host_cycles;
     if (translator_) translator_->set_host_cycles(host_cycles_);
+}
+
+// The default IR pipeline at O1 has no dead store elimination: a flag or
+// register the next instruction overwrites stays stored. Measured on the boot
+// to op1emu's main display: -0.25% host instructions in generated code with
+// DSE; adding early-cse<memssa> and gvn bought 0.06% more for 13% more
+// compile time, type-based alias tags on CpuState and guest RAM nothing.
+const char* const Core::kDefaultPostPipeline = "function(dse)";
+
+bool Core::set_post_pipeline(const std::string& pipeline) {
+    if (!jit_ || !jit_->set_post_pipeline(pipeline)) return false;
+    post_pipeline_ = pipeline;
+    return true;
 }
 
 void Core::set_lazy_state(bool lazy) {

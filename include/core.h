@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <tuple>
 
 #include "bcore_profile.h"
@@ -51,6 +52,12 @@ public:
     // stores them at every packet, as before). Either way every reader sees
     // the same values.
     void set_lazy_state(bool lazy);
+    // Passes (PassBuilder text) run on every block after the default IR
+    // pipeline, from the next compilation on; empty for none. The default is
+    // kDefaultPostPipeline. False, and unchanged, if it does not parse or init
+    // has not run.
+    bool set_post_pipeline(const std::string& pipeline);
+    static const char* const kDefaultPostPipeline;
 
     // ---- JIT observability (contract in bcore_profile.h) ----
 
@@ -112,4 +119,5 @@ private:
     bool chain_dry_ = false;
     bool host_cycles_ = false;
     bool lazy_state_ = true;
+    std::string post_pipeline_ = kDefaultPostPipeline;
 };
