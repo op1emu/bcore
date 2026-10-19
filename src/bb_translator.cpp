@@ -11,6 +11,8 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/Analysis/ValueTracking.h>
 
 #include "decoder.h"
 #include "lift_visitor.h"
@@ -132,9 +134,11 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
     if (lazy_state_) sink_packet_state(*fn, cpu_ptr);
     if (host_cycles_ && visitor.accesses_cycles()) emit_host_cycles(builder, cpu_ptr, first_entry);
     // A native loop where the block may well branch to itself: a jump to its
-    // start, or the start of a hardware loop now. Elsewhere a jump to itself
-    // chains through the table, as to any block.
-    const bool self_loop = visitor.jumps_to(pc) || (hint && (hint->lt[0] == pc || hint->lt[1] == pc));
+    // start, or the start of a hardware loop now, unless the filter rejects
+    // the block. Elsewhere a jump to itself chains through the table, as to
+    // any block.
+    const bool self_loop = (visitor.jumps_to(pc) || (hint && (hint->lt[0] == pc || hint->lt[1] == pc))) &&
+                           (!chain_filter_ || chain_filter_(pc));
     // A native loop that may have moved a loop bottom passes the guard again.
     BasicBlock* loop_top = lb_guard && !visitor.lb_steady() ? lb_guard : first_entry;
     if (chaining_ && unlimited_)
@@ -217,18 +221,52 @@ BasicBlock* BBTranslator::lb_guard_miss_block(BasicBlock* guard) {
     return cast<BranchInst>(guard->getTerminator())->getSuccessor(1);
 }
 
-// Every return goes through one exit that may run the next block itself.
-// Nearly every exit does (the boot to op1emu's main display returns to the
-// host about once in 370 block ends), and a native loop runs again: the branches say so
-// (weights_usually, weights_loop), and the return goes after the hot code.
-// At each return cpu->pc is where the host would continue, so running that
-// block here is a host round trip without the host: allowed while the run's
-// budget lasts (the CEC, a halt, the host's memory callbacks and other
+// What the last store to cpu+offset before `at` wrote, looking back through
+// single predecessors; null when a helper call (which may write the field), a
+// store at an offset not known or a merge comes first. Guest memory never
+// overlaps CpuState, so other stores are passed over.
+static Value* stored_before(Instruction* at, Value* cpu, size_t offset) {
+    BasicBlock* block = at->getParent();
+    BasicBlock::iterator it(at);
+    for (int blocks = 0; blocks < 64; ++blocks) {
+        while (it != block->begin()) {
+            --it;
+            if (auto* store = dyn_cast<StoreInst>(&*it)) {
+                Value* ptr = store->getPointerOperand();
+                auto at_offset = cpu_field_offset(ptr, cpu);
+                if (at_offset && *at_offset == offset) return store->getValueOperand();
+                if (!at_offset && getUnderlyingObject(ptr) == cpu) return nullptr;
+                continue;
+            }
+            auto* call = dyn_cast<CallInst>(&*it);
+            if (call && !isa<IntrinsicInst>(call)) return nullptr;
+        }
+        block = block->getSinglePredecessor();
+        if (!block) return nullptr;
+        it = block->end();
+    }
+    return nullptr;
+}
+
+// Every return becomes an exit that may run the next block itself. Nearly
+// every exit does (the boot to op1emu's main display returns to the host
+// about once in 480 block ends), and a native loop runs again: the branches
+// say so (weights_usually, weights_loop), and the return goes after the hot
+// code. At each return cpu->pc is where the host would continue, so running
+// that block here is a host round trip without the host: allowed while the
+// run's budget lasts (the CEC, a halt, the host's memory callbacks and other
 // threads set it to 0 when the host has work), no interrupt may be pending
 // (the host would call cec_check_pending), and the block is compiled and in
-// the chain table, which holds no block the host's filter rejects. When it
-// is this one and self_loop is its first packet, a branch there runs it (a
-// native loop); otherwise a musttail call does.
+// the chain table, which holds no block the host's filter rejects.
+//
+// Each return gets its own exit, with the pc and packet index its path stored
+// (stored_before) rather than loads of them. Where the next PC is a constant
+// the exit reads that PC's slot at a constant offset in the table, and where
+// it is this block's own PC and self_loop is set (its first packet; set only
+// when the filter accepts this PC) a branch there runs it again: a native
+// loop, with no table. Other exits share one that branches there too when
+// the PC is this block's (a hardware loop's back edge) and otherwise looks
+// it up in the table.
 void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* mem,
                                    uint32_t entry_pc, BasicBlock* self_loop, BasicBlock* direct) {
     std::vector<ReturnInst*> returns;
@@ -241,54 +279,39 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     auto* i8 = b.getInt8Ty();
     auto* i32 = b.getInt32Ty();
     auto* ptr = b.getInt8PtrTy();
-    auto* exit = BasicBlock::Create(ctx, "chain_exit", fn);
-    auto* pending = BasicBlock::Create(ctx, "chain_pending", fn);
-    auto* target = BasicBlock::Create(ctx, "chain_target", fn);
-    auto* lookup = BasicBlock::Create(ctx, "chain_lookup", fn);
+
+    // The chain table and the CEC's pending flag do not change while a block
+    // runs (the host compiles and publishes between runs): loaded once.
+    auto& entry = fn->getEntryBlock();
+    IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
+    auto* table = at_entry.CreateLoad(ptr, field(at_entry, cpu, offsetof(CpuState, chain_table)), "chain_table");
+    auto* pending_flag = at_entry.CreateLoad(ptr, field(at_entry, cpu, offsetof(CpuState, cec_pending)), "cec_pending_flag");
+
     auto* leave = BasicBlock::Create(ctx, "chain_leave", fn);
-    for (auto* ret : returns) {
-        BranchInst::Create(exit, ret);
-        ret->eraseFromParent();
-    }
+    b.SetInsertPoint(leave);
+    b.CreateRetVoid();
 
-    b.SetInsertPoint(exit);
-    auto* packets = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, packets)), "packets");
-    auto* done = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_packets)), "chain_packets");
-    auto* total = b.CreateAdd(done, packets, "chain_total");
-    // Atomic: another thread may set it to 0, and a native loop with no call
-    // in it would otherwise read it once.
-    auto* budget = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_budget)), "chain_budget");
-    budget->setAtomic(AtomicOrdering::Monotonic);
-    budget->setAlignment(Align(4));
-    b.CreateCondBr(b.CreateICmpULT(total, budget), pending, leave, weights_usually(ctx));
-
-    b.SetInsertPoint(pending);
-    auto* flag = b.CreateLoad(ptr, field(b, cpu, offsetof(CpuState, cec_pending)), "cec_pending_flag");
-    auto* is_pending = b.CreateICmpNE(b.CreateLoad(i8, flag, "cec_pending"), b.getInt8(0));
-    b.CreateCondBr(is_pending, leave, target, weights_rarely(ctx));
-
-    b.SetInsertPoint(target);
-    auto* next = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, pc)), "next_pc");
-    b.CreateBr(lookup);
-
-    b.SetInsertPoint(lookup);
-    auto* table = b.CreateLoad(ptr, field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
-    auto* index = b.CreateAnd(b.CreateLShr(next, 1), b.getInt32((1u << kChainBits) - 1));
-    auto* slot = b.CreateGEP(i8, table, b.CreateMul(b.CreateZExt(index, b.getInt64Ty()),
-                                                    b.getInt64(sizeof(ChainSlot))), "chain_slot");
-    auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
-    auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
-    b.CreateCondBr(b.CreateICmpEQ(slot_pc, next), hit, leave, weights_usually(ctx));
-    auto* self = BasicBlock::Create(ctx, "chain_self", fn);
-    auto* other = BasicBlock::Create(ctx, "chain_other", fn);
-    b.SetInsertPoint(hit);
-    if (self_loop) b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
-    else b.CreateBr(other);
-
+    // The budget and pending tests every exit makes: on to `go` with the run's
+    // packets including this block's, or leave.
+    auto admit = [&](Value* packets, BasicBlock* go) {
+        auto* done = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_packets)), "chain_packets");
+        auto* total = b.CreateAdd(done, packets, "chain_total");
+        // Atomic: another thread may set it to 0, and a native loop with no
+        // call in it would otherwise read it once.
+        auto* budget = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_budget)), "chain_budget");
+        budget->setAtomic(AtomicOrdering::Monotonic);
+        budget->setAlignment(Align(4));
+        auto* pending = BasicBlock::Create(ctx, "chain_pending", fn);
+        b.CreateCondBr(b.CreateICmpULT(total, budget), pending, leave, weights_usually(ctx));
+        b.SetInsertPoint(pending);
+        auto* is_pending = b.CreateICmpNE(b.CreateLoad(i8, pending_flag, "cec_pending"), b.getInt8(0));
+        b.CreateCondBr(is_pending, leave, go, weights_rarely(ctx));
+        return total;
+    };
     // What the host does before the next block: retire, then clear the
-    // packet index and did_jump (Core::run).
-    auto chain = [&](BasicBlock* at) {
-        b.SetInsertPoint(at);
+    // packet index and did_jump (Core::run). False in dry mode, where the
+    // block returns instead.
+    auto chain = [&](Value* total) {
         if (chain_dry_) {
             b.CreateStore(b.getInt8(1), field(b, cpu, offsetof(CpuState, chain_would)));
             b.CreateRetVoid();
@@ -301,16 +324,73 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         b.CreateStore(b.CreateAdd(b.CreateLoad(i32, blocks_ptr), b.getInt32(1)), blocks_ptr);
         return true;
     };
-    if (self_loop && chain(self)) b.CreateBr(self_loop);
-    if (!self_loop) self->eraseFromParent();
-    if (chain(other)) {
+    auto slot_of = [&](Value* pc) {
+        auto* index = b.CreateAnd(b.CreateLShr(pc, 1), b.getInt32((1u << kChainBits) - 1));
+        return b.CreateGEP(i8, table, b.CreateMul(b.CreateZExt(index, b.getInt64Ty()),
+                                                  b.getInt64(sizeof(ChainSlot))), "chain_slot");
+    };
+    // The slot's block runs next if the slot holds pc.
+    auto call_slot = [&](Value* slot, Value* pc, Value* total) {
+        auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
+        auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
+        b.CreateCondBr(b.CreateICmpEQ(slot_pc, pc), hit, leave, weights_usually(ctx));
+        b.SetInsertPoint(hit);
+        if (!chain(total)) return;
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});
         call->setCallingConv(CallingConv::GHC);
         call->setTailCallKind(CallInst::TCK_MustTail);
         b.CreateRetVoid();
-    }
+    };
 
-    b.SetInsertPoint(leave);
-    b.CreateRetVoid();
+    BasicBlock* shared = nullptr;
+    PHINode* shared_pc = nullptr;
+    PHINode* shared_packets = nullptr;
+    for (auto* ret : returns) {
+        BasicBlock* from = ret->getParent();
+        Value* next = stored_before(ret, cpu, offsetof(CpuState, pc));
+        Value* packets = stored_before(ret, cpu, offsetof(CpuState, packets));
+        b.SetInsertPoint(ret);
+        if (!next) next = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, pc)), "next_pc");
+        if (!packets) packets = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, packets)), "packets");
+        auto* known = dyn_cast<ConstantInt>(next);
+        if (!known) {
+            if (!shared) {
+                shared = BasicBlock::Create(ctx, "chain_exit", fn);
+                IRBuilder<> at(shared);
+                shared_pc = at.CreatePHI(i32, returns.size(), "next_pc");
+                shared_packets = at.CreatePHI(i32, returns.size(), "packets");
+            }
+            shared_pc->addIncoming(next, from);
+            shared_packets->addIncoming(packets, from);
+            b.CreateBr(shared);
+            ret->eraseFromParent();
+            continue;
+        }
+        auto* go = BasicBlock::Create(ctx, "chain_go", fn);
+        auto* total = admit(packets, go);
+        ret->eraseFromParent();
+        b.SetInsertPoint(go);
+        if (self_loop && known->getZExtValue() == entry_pc) {
+            if (chain(total)) b.CreateBr(self_loop);
+        } else {
+            call_slot(slot_of(known), known, total);
+        }
+    }
+    if (!shared) return;
+
+    b.SetInsertPoint(shared);
+    auto* go = BasicBlock::Create(ctx, "chain_lookup", fn);
+    auto* total = admit(shared_packets, go);
+    b.SetInsertPoint(go);
+    if (self_loop) {
+        // A hardware loop's back edge to the block's start, mostly.
+        auto* self = BasicBlock::Create(ctx, "chain_self", fn);
+        auto* other = BasicBlock::Create(ctx, "chain_other", fn);
+        b.CreateCondBr(b.CreateICmpEQ(shared_pc, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
+        b.SetInsertPoint(self);
+        if (chain(total)) b.CreateBr(self_loop);
+        b.SetInsertPoint(other);
+    }
+    call_slot(slot_of(shared_pc), shared_pc, total);
 }

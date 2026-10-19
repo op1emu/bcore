@@ -54,6 +54,7 @@ bool Core::init(int opt_level, int codegen_level) {
     if (cpu_->steps_remaining)
         translator_->set_max_packets(cpu_->steps_remaining);
     translator_->set_chaining(chaining_, chain_dry_);
+    translator_->set_chain_filter(chain_filter_);
     translator_->set_host_cycles(host_cycles_);
     translator_->set_lazy_state(lazy_state_);
     applyModuleTarget();
@@ -275,7 +276,12 @@ std::tuple<std::string, uint32_t> Core::disassemble(uint32_t pc) {
 
 void Core::set_chain_filter(std::function<bool(uint32_t)> filter) {
     chain_filter_ = std::move(filter);
-    if (jit_) jit_->setChainFilter(chain_filter_);
+    if (translator_) translator_->set_chain_filter(chain_filter_);
+    if (!jit_) return;
+    jit_->setChainFilter(chain_filter_);
+    // A compiled block's native loop holds the answer the old filter gave
+    // for its PC when it was translated (BBTranslator::set_chain_filter).
+    if (!jit_->empty()) invalidate();
 }
 
 void Core::set_chaining(bool chaining, bool dry) {

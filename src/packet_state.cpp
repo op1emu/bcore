@@ -26,21 +26,8 @@ enum Field { kPc, kInsnLen, kPackets, kFields };
 constexpr size_t kOffset[kFields] = {offsetof(CpuState, pc), offsetof(CpuState, insn_len),
                                      offsetof(CpuState, packets)};
 
-// The CpuState offset ptr addresses, if it is cpu plus a constant.
-std::optional<size_t> cpu_offset(Value* ptr, Value* cpu) {
-    ptr = ptr->stripPointerCasts();
-    if (ptr == cpu) return 0;
-    auto* gep = dyn_cast<GEPOperator>(ptr);
-    if (!gep || gep->getPointerOperand()->stripPointerCasts() != cpu || gep->getNumIndices() != 1 ||
-        !gep->getSourceElementType()->isIntegerTy(8))
-        return std::nullopt;
-    auto* index = dyn_cast<ConstantInt>(gep->getOperand(1));
-    if (!index) return std::nullopt;
-    return size_t(index->getZExtValue());
-}
-
 std::optional<Field> field_at(Value* ptr, Value* cpu) {
-    auto offset = cpu_offset(ptr, cpu);
+    auto offset = cpu_field_offset(ptr, cpu);
     if (!offset) return std::nullopt;
     for (int f = 0; f < kFields; ++f)
         if (*offset == kOffset[f]) return Field(f);
@@ -170,7 +157,7 @@ std::optional<std::pair<BasicBlock*, BasicBlock*>> StateSink::did_jump_test(Basi
     auto* zero = dyn_cast<ConstantInt>(cmp->getOperand(1));
     auto* load = dyn_cast<LoadInst>(cmp->getOperand(0));
     if (!zero || !zero->isZero() || !load) return std::nullopt;
-    auto offset = cpu_offset(load->getPointerOperand(), cpu_);
+    auto offset = cpu_field_offset(load->getPointerOperand(), cpu_);
     if (!offset || *offset != offsetof(CpuState, did_jump)) return std::nullopt;
     return std::make_pair(br->getSuccessor(0), br->getSuccessor(1));
 }
@@ -191,7 +178,7 @@ void StateSink::transfer(BasicBlock& block, std::vector<Set>& state, bool record
     const bool dj_exit = is_did_jump_exit(block);
     for (auto& inst : block) {
         if (auto* store = dyn_cast<StoreInst>(&inst)) {
-            auto offset = cpu_offset(store->getPointerOperand(), cpu_);
+            auto offset = cpu_field_offset(store->getPointerOperand(), cpu_);
             // Setting did_jump promises pc is in memory.
             if (offset && *offset == offsetof(CpuState, did_jump) && record)
                 readers_[kPc].push_back({&inst, state[kPc]});
@@ -333,6 +320,18 @@ void StateSink::rewrite() {
 }
 
 }  // namespace
+
+std::optional<size_t> cpu_field_offset(Value* ptr, Value* cpu) {
+    ptr = ptr->stripPointerCasts();
+    if (ptr == cpu) return 0;
+    auto* gep = dyn_cast<GEPOperator>(ptr);
+    if (!gep || gep->getPointerOperand()->stripPointerCasts() != cpu || gep->getNumIndices() != 1 ||
+        !gep->getSourceElementType()->isIntegerTy(8))
+        return std::nullopt;
+    auto* index = dyn_cast<ConstantInt>(gep->getOperand(1));
+    if (!index) return std::nullopt;
+    return size_t(index->getZExtValue());
+}
 
 void sink_packet_state(Function& fn, Value* cpu) {
     StateSink(fn, cpu).run();
