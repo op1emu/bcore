@@ -11,6 +11,7 @@
 #include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
@@ -178,6 +179,38 @@ bool JitEngine::init(int opt_level, int codegen_level) {
         return false;
     }
 
+    return defineEnter();
+}
+
+// void bcore_enter(fn, cpu, mem) { fn(cpu, mem); } with fn in the GHC
+// convention: the only C-ABI frame a run of chained blocks has.
+bool JitEngine::defineEnter() {
+    auto ctx = std::make_unique<llvm::LLVMContext>();
+    auto mod = std::make_unique<llvm::Module>("bcore_enter", *ctx);
+    mod->setDataLayout(jit_->getDataLayout());
+    mod->setTargetTriple(jit_->getTargetTriple().str());
+    auto* ptr = llvm::Type::getInt8PtrTy(*ctx);
+    auto* void_ty = llvm::Type::getVoidTy(*ctx);
+    auto* block_ty = llvm::FunctionType::get(void_ty, {ptr, ptr}, false);
+    auto* fn = llvm::Function::Create(llvm::FunctionType::get(void_ty, {ptr, ptr, ptr}, false),
+                                      llvm::Function::ExternalLinkage, "bcore_enter", mod.get());
+    llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
+    auto args = fn->arg_begin();
+    llvm::Value* block = &*args++;
+    llvm::Value* cpu = &*args++;
+    llvm::Value* mem = &*args;
+    b.CreateCall(block_ty, block, {cpu, mem})->setCallingConv(llvm::CallingConv::GHC);
+    b.CreateRetVoid();
+    if (auto err = jit_->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx)))) {
+        llvm::errs() << "Failed to add bcore_enter: " << err << "\n";
+        return false;
+    }
+    auto sym = jit_->lookup("bcore_enter");
+    if (!sym) {
+        llvm::errs() << "Failed to lookup bcore_enter: " << sym.takeError() << "\n";
+        return false;
+    }
+    enter_ = reinterpret_cast<EnterFunc>(sym->getValue());
     return true;
 }
 

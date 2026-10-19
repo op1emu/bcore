@@ -19,8 +19,14 @@
 
 namespace llvm { class TargetMachine; class JITEventListener; }
 
-// Function signature for JIT'd basic block functions
+// A JIT'd block: void bb_0x<pc>(CpuState*, Memory*) in the GHC calling
+// convention, which saves no register for its caller, so a block that runs
+// the next one itself (a musttail call, see CpuState::chain_table) restores
+// nothing first. C++ cannot call one directly: JitEngine::enter() does.
 using BbFunc = void (*)(CpuState*, Memory*);
+// The C-ABI function enter() calls: it calls the block, saving the
+// registers the C calling convention keeps for its caller once per entry.
+using EnterFunc = void (*)(BbFunc, CpuState*, Memory*);
 
 struct BBInfo {
     BbFunc fn = nullptr;
@@ -58,6 +64,8 @@ public:
                    std::unique_ptr<llvm::LLVMContext> ctx,
                    uint32_t fallthrough_pc, bool careful = false);
     BbFunc lookup(uint32_t pc);
+    // Runs fn (from lookup()) on cpu and mem.
+    void enter(BbFunc fn, CpuState* cpu, Memory* mem) const { enter_(fn, cpu, mem); }
     // The chain table (CpuState::chain_table). A block is in it from when it
     // is compiled, unless the filter rejects its PC; a block that loses its
     // slot to another with the same index gets it back when the host looks
@@ -95,6 +103,8 @@ private:
     std::unique_ptr<ChainSlot[]> chain_;
     std::function<bool(uint32_t)> chain_filter_;
     void publishChain(uint32_t pc, BbFunc fn);
+    bool defineEnter();
+    EnterFunc enter_ = nullptr;
     int opt_level_ = 2;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
     // Cached pass pipeline (built once in init(), reused across optimize_module() calls).

@@ -40,6 +40,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
     auto* i8ptr = Type::getInt8PtrTy(*ctx);
     auto* ft = FunctionType::get(Type::getVoidTy(*ctx), {i8ptr, i8ptr}, false);
     auto* fn = Function::Create(ft, Function::ExternalLinkage, fname, mod.get());
+    fn->setCallingConv(CallingConv::GHC);  // see BbFunc
 
     auto* entry = BasicBlock::Create(*ctx, "entry", fn);
     IRBuilder<> builder(entry);
@@ -305,6 +306,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     if (chain(other)) {
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});
+        call->setCallingConv(CallingConv::GHC);
         call->setTailCallKind(CallInst::TCK_MustTail);
         b.CreateRetVoid();
     }
