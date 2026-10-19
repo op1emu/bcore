@@ -55,6 +55,7 @@ bool Core::init(int opt_level, int codegen_level) {
         translator_->set_max_packets(cpu_->steps_remaining);
     translator_->set_chaining(chaining_, chain_dry_);
     translator_->set_host_cycles(host_cycles_);
+    translator_->set_lazy_state(lazy_state_);
     applyModuleTarget();
 
     return true;
@@ -259,6 +260,11 @@ void Core::set_chaining(bool chaining, bool dry) {
 void Core::set_host_cycles(bool host_cycles) {
     host_cycles_ = host_cycles;
     if (translator_) translator_->set_host_cycles(host_cycles_);
+}
+
+void Core::set_lazy_state(bool lazy) {
+    lazy_state_ = lazy;
+    if (translator_) translator_->set_lazy_state(lazy_state_);
 }
 
 void Core::set_dump_ir(bool enable) {
