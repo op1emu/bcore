@@ -212,7 +212,7 @@ void JitEngine::optimize_module(llvm::Module& mod) {
 
 bool JitEngine::addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
                           std::unique_ptr<llvm::LLVMContext> ctx,
-                          uint32_t fallthrough_pc) {
+                          uint32_t fallthrough_pc, bool careful) {
     // For the backend only, after the IR pipeline (see init()).
     for (llvm::Function& function : *module)
         if (!function.isDeclaration()) function.setEntryCount(kEntryCount);
@@ -226,7 +226,7 @@ bool JitEngine::addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
 
     // Look up the function
     char name[32];
-    snprintf(name, sizeof(name), "bb_0x%08x", pc);
+    snprintf(name, sizeof(name), careful ? "bb_0x%08x.careful" : "bb_0x%08x", pc);
 
     auto sym = jit_->lookup(name);
     if (!sym) {

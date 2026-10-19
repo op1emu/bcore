@@ -62,6 +62,17 @@ public:
     // step inline at a bottom the loop registers name now (a call
     // elsewhere). Null for none.
     void set_hint(const CpuState* hint) { hint_ = hint; }
+    // Careful: every packet compares the loop bottoms with its own PC, as a
+    // block needs once its entry guard has failed (BBTranslator). Otherwise a
+    // packet the hint puts at no loop bottom compares nothing while both
+    // bottoms are as they were at the block's entry, and the block then needs
+    // the guard (lb_guard_used): at entry, each bottom is the hint's or lies
+    // outside the block.
+    void set_careful(bool careful) { careful_ = careful; }
+    bool lb_guard_used() const { return lb_guard_used_; }
+    // Whether nothing in the block can have changed either loop bottom: a
+    // native loop back to its start needs the guard again otherwise.
+    bool lb_steady() const { return lb_steady_[0] && lb_steady_[1]; }
     // Whether a jump in the block has a constant target at this PC.
     bool jumps_to(uint32_t pc) const { return const_targets_.count(pc) != 0; }
     void set_fallthrough_pc(uint32_t pc) { fallthrough_pc_ = pc; }
@@ -609,6 +620,12 @@ private:
     bool fastmem_ = false;
     bool accesses_cycles_ = false;
     const CpuState* hint_ = nullptr;
+    bool careful_ = false;
+    bool lb_guard_used_ = false;
+    bool lb_steady_[2] = {true, true};
+    // At insn_pc no loop can end, given the entry guard; notes that the block
+    // relies on it.
+    bool lb_absent(uint32_t insn_pc);
     std::set<uint32_t> const_targets_;
     bool check_did_jump_ = false;  // whether to check did_jump flag at end of block and exit if set
     bool check_cec_pending_ = false;  // whether to check cec_pending flag at end of block and exit if set

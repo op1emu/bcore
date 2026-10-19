@@ -49,9 +49,11 @@ public:
     // passes addIRModule's check; any other non-default layout is an error.
     std::string dataLayout() const { return jit_->getDataLayout().getStringRepresentation(); }
     std::string targetTriple() const { return jit_->getTargetTriple().str(); }
+    // careful: the module's function is bb_0x<pc>.careful
+    // (BBTranslator::translate), and replaces the one compiled for pc.
     bool addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
                    std::unique_ptr<llvm::LLVMContext> ctx,
-                   uint32_t fallthrough_pc);
+                   uint32_t fallthrough_pc, bool careful = false);
     BbFunc lookup(uint32_t pc);
     // The chain table (CpuState::chain_table). A block is in it from when it
     // is compiled, unless the filter rejects its PC; a block that loses its
