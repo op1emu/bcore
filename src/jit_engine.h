@@ -64,6 +64,7 @@ public:
                    std::unique_ptr<llvm::LLVMContext> ctx,
                    uint32_t fallthrough_pc, bool careful = false);
     BbFunc lookup(uint32_t pc);
+    bool empty() const { return cache_.empty(); }
     // Runs fn (from lookup()) on cpu and mem.
     void enter(BbFunc fn, CpuState* cpu, Memory* mem) const { enter_(fn, cpu, mem); }
     // The chain table (CpuState::chain_table). A block is in it from when it

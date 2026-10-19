@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <optional>
+
 namespace llvm {
 class Function;
 class Value;
@@ -30,3 +33,7 @@ class Value;
 // Runs on the lifted function before the chain exit is built, so every
 // return is still a ReturnInst.
 void sink_packet_state(llvm::Function& fn, llvm::Value* cpu);
+
+// The CpuState offset ptr addresses, if it is cpu plus a constant (the
+// single-index i8 GEP generated code uses for every field).
+std::optional<size_t> cpu_field_offset(llvm::Value* ptr, llvm::Value* cpu);

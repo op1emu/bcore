@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,6 +56,9 @@ public:
     }
     // See Core::set_chaining, set_chain_dry and set_host_cycles.
     void set_chaining(bool chaining, bool dry) { chaining_ = chaining; chain_dry_ = dry; }
+    // See Core::set_chain_filter: a block runs itself again in a native loop
+    // only if the filter accepts its PC when it is translated.
+    void set_chain_filter(std::function<bool(uint32_t)> filter) { chain_filter_ = std::move(filter); }
     void set_host_cycles(bool host_cycles) { host_cycles_ = host_cycles; }
     // See Core::set_lazy_state.
     void set_lazy_state(bool lazy) { lazy_state_ = lazy; }
@@ -78,6 +82,7 @@ private:
     uint64_t fast_base_ = 0;
     bool chaining_ = false;
     bool chain_dry_ = false;
+    std::function<bool(uint32_t)> chain_filter_;
     bool host_cycles_ = false;
     bool lazy_state_ = true;
     std::string data_layout_;
