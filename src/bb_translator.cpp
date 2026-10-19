@@ -387,7 +387,12 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     // returns instead. The packet index stays: a block stores its own before
     // anything reads it, but where its loop-bottom guard misses, and then
     // Core::run runs the block compiled again careful, which does the same.
-    auto chain = [&](Value* total, const Tail& tail, Value* next) {
+    // did_jump_clear: did_jump is clear in memory, as where the tail held the
+    // path's store of it (every path's, for the shared exit). A block starts
+    // with it clear, and on a path that goes on past a jump or a helper that
+    // set it no packet runs (the lifter leaves at once); a path whose helper
+    // set it last (bfin_hwloop_step's back edge) has no such store.
+    auto chain = [&](Value* total, const Tail& tail, Value* next, bool did_jump_clear) {
         if (chain_dry_) {
             store_tail(tail);
             b.CreateStore(b.getInt8(1), field(b, cpu, offsetof(CpuState, chain_would)));
@@ -396,7 +401,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         }
         if (tail.value[kTailPc]) b.CreateStore(next, field(b, cpu, offsetof(CpuState, pc)));
         b.CreateStore(total, field(b, cpu, offsetof(CpuState, chain_packets)));
-        b.CreateStore(b.getInt8(0), field(b, cpu, offsetof(CpuState, did_jump)));
+        if (!did_jump_clear) b.CreateStore(b.getInt8(0), field(b, cpu, offsetof(CpuState, did_jump)));
         if (count_chained_) {
             auto* blocks_ptr = field(b, cpu, offsetof(CpuState, chain_blocks));
             b.CreateStore(b.CreateAdd(b.CreateLoad(i32, blocks_ptr), b.getInt32(1)), blocks_ptr);
@@ -409,12 +414,13 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
                                                   b.getInt64(sizeof(ChainSlot))), "chain_slot");
     };
     // The slot's block runs next if the slot holds pc.
-    auto call_slot = [&](Value* slot, Value* pc, Value* total, const Tail& tail, BasicBlock* out) {
+    auto call_slot = [&](Value* slot, Value* pc, Value* total, const Tail& tail, BasicBlock* out,
+                         bool did_jump_clear) {
         auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
         auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
         b.CreateCondBr(b.CreateICmpEQ(slot_pc, pc), hit, out, weights_usually(ctx));
         b.SetInsertPoint(hit);
-        if (!chain(total, tail, pc)) return;
+        if (!chain(total, tail, pc, did_jump_clear)) return;
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});
         call->setCallingConv(CallingConv::GHC);
@@ -445,10 +451,11 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         auto* total = admit(packets, go, out);
         ret->eraseFromParent();
         b.SetInsertPoint(go);
+        const bool clear = tail.value[kTailDidJump];
         if (self_loop && known->getZExtValue() == entry_pc) {
-            if (chain(total, tail, known)) b.CreateBr(self_loop);
+            if (chain(total, tail, known, clear)) b.CreateBr(self_loop);
         } else {
-            call_slot(slot_of(known), known, total, tail, out);
+            call_slot(slot_of(known), known, total, tail, out, clear);
         }
     }
     if (shared.empty()) return;
@@ -480,6 +487,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         from.ret->eraseFromParent();
     }
 
+    bool clear = true;
+    for (auto& from : shared) clear = clear && from.tail.value[kTailDidJump];
     b.SetInsertPoint(exit);
     auto* go = BasicBlock::Create(ctx, "chain_lookup", fn);
     BasicBlock* out = leave_for(tail);
@@ -492,8 +501,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         auto* other = BasicBlock::Create(ctx, "chain_other", fn);
         b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
         b.SetInsertPoint(self);
-        if (chain(total, tail, next)) b.CreateBr(self_loop);
+        if (chain(total, tail, next, clear)) b.CreateBr(self_loop);
         b.SetInsertPoint(other);
     }
-    call_slot(slot_of(next), next, total, tail, out);
+    call_slot(slot_of(next), next, total, tail, out, clear);
 }

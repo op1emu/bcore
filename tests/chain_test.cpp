@@ -95,6 +95,26 @@ static void test_uncounted(int opt) {
     require(c.run(0x200, 100) == 100 && c.cpu.dpregs[0] == 52 && c.cpu.chain_blocks == 0, "uncounted chain");
 }
 
+// A hardware loop's back edge the helper takes (bfin_hwloop_step, after a
+// CLI, sets did_jump itself) shares its exit with the DBGA's failure path,
+// whose store of did_jump that exit makes only where it returns: chaining
+// on, the loop must still see did_jump clear in its next iteration.
+static uint32_t helper_back_edge(int opt, uint32_t budget) {
+    Chained c(opt);
+    // R0 += 1; CLI R2 (loop bottom); DBGA (R3.L, 0); RTS
+    c.code(0x100, {kIncR0, 0x0032, 0xf003, 0x0000, 0x0010});
+    c.cpu.lt[0] = 0x100; c.cpu.lb[0] = 0x102; c.cpu.lc[0] = 4;
+    c.cpu.rets = 0x800;
+    c.cpu.pc = 0x100;
+    while (c.cpu.pc != 0x800 && !c.cpu.halted) c.run(c.cpu.pc, budget);
+    require(c.cpu.dpregs[0] == 4 && c.cpu.lc[0] == 0 && !c.cpu.halted, "four iterations, then RTS");
+    return c.cpu.dpregs[0];
+}
+
+static void test_helper_back_edge(int opt) {
+    require(helper_back_edge(opt, 0) == helper_back_edge(opt, 100), "chained as unchained");
+}
+
 // Two blocks run each other through the table once both are compiled.
 static void test_table_chain(int opt) {
     Chained c(opt);
@@ -236,6 +256,7 @@ int main() {
         test_refilter(opt);
         test_refilter_self(opt);
         test_uncounted(opt);
+        test_helper_back_edge(opt);
         test_pending_from_device(opt);
         test_pending(opt);
         test_host_cycles(opt);
