@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <utility>
 
 static void require(bool ok, const char* why) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -156,6 +157,44 @@ static void test_pending(int opt) {
     require(c.run(0x400, 100) == 2 && c.cpu.chain_blocks == 0 && c.cpu.pc == 0x404, "pending after RAISE");
 }
 
+// An interrupt a device latches while a block reads it ends the run: the
+// block chains no further, and the host takes the interrupt before the next.
+struct LatchingMemory : FlatMemory {
+    static constexpr uint32_t kDevice = 0x20000;  // past the memory: every access calls back
+    bool armed = false;
+    LatchingMemory(CpuState* cpu) : FlatMemory(0, 0x10000, cpu), cpu_(cpu) {}
+    uint32_t read32(uint32_t addr) const override {
+        if (addr != kDevice) return FlatMemory::read32(addr);
+        if (armed) cec_raise(cpu_, 14);
+        return 0;
+    }
+    CpuState* cpu_;
+};
+
+static void test_pending_from_device(int opt) {
+    CpuState cpu{};
+    LatchingMemory mem(&cpu);
+    Core core(&cpu, &mem);
+    core.set_chaining(true);
+    require(core.init(opt), "init");
+    cec_init(); evt_init();
+    for (auto [pc, op] : {std::pair{0x100u, 0x9100}, {0x102u, 0x207f},  // R0 = [P0]; JUMP.S 0x200
+                          {0x200u, 0x6409}, {0x202u, 0x2f7f}})          // R1 += 1; JUMP.S 0x100
+        mem.write16(pc, uint16_t(op));
+    cpu.dpregs[8] = LatchingMemory::kDevice;  // P0
+    auto run = [&](uint32_t pc, uint32_t budget) {
+        cpu.chain_budget = budget;
+        require(core.run(pc), "run");
+    };
+    run(0x100, 0);
+    run(0x200, 0);
+    run(0x100, 100);
+    require(cpu.chain_blocks > 0, "chains while nothing latches");
+    mem.armed = true;
+    run(0x100, 100);
+    require(cpu.chain_blocks == 0 && cpu.pc == 0x200, "a latched interrupt ends the run");
+}
+
 // A chained block that reads CYCLES sees the cycles the blocks before it
 // retired, as with a host that writes CYCLES before every block.
 static void test_host_cycles(int opt) {
@@ -185,6 +224,7 @@ int main() {
         test_filtered_self(opt);
         test_refilter(opt);
         test_refilter_self(opt);
+        test_pending_from_device(opt);
         test_pending(opt);
         test_host_cycles(opt);
         test_dry(opt);

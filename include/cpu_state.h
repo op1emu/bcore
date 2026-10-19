@@ -86,8 +86,10 @@ struct CpuState {
     // Packets the run may retire before it returns: a block that ends with
     // chain_packets + packets at or past it returns to the host. 0 never
     // chains. The CEC sets it to 0 on every interrupt entry, return,
-    // exception and halt, and so may the host's memory callbacks and other
-    // threads: anything after which the host has work returns to it.
+    // exception and halt, and when a RAISE (cec_raise) or an IMASK write
+    // leaves an interrupt pending, and so may the host's memory callbacks
+    // and other threads: anything after which the host has work returns to
+    // it.
     uint32_t chain_budget;
     // Packets retired by the blocks that already ran in this run; the block
     // running counts its own in `packets`.
