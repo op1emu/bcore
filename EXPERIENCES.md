@@ -522,3 +522,71 @@ Together, host instructions in execution 62.99G -> 58.49G (-7.1%) with the
 workload identical; cycles fell most in the blocks outside loops (-14%).
 Whether the native loop may run is now decided at translation time from the
 chain filter, so setting a filter drops the blocks already compiled.
+
+## Loops as compilation units (loop blocks, proven copies, speculative sums)
+
+A block that runs itself again (a hardware loop's top, a jump to its start)
+is lifted a second time as a loop block: the visitor's cpu pointer is an
+alloca shadow that SROA turns into SSA values, so the loop's registers stay
+in host registers across its back edge. Every helper call is bracketed by
+placeholder calls the translator expands afterwards into copies of the
+fields that are dirty there (a forward dataflow over the lifted function),
+and every exit copies the dirty fields out. Lessons:
+
+- Keep only what the loop touches in the shadow. With every register in it,
+  the loop carried ~30 PHIs across the back edge and spilled; copying only
+  dirty fields at syncs, and shadowing only fields the loop's packets reach,
+  cut that to the dozen the loop really changes.
+- The memory callbacks never change the registers unless they raise an
+  exception, which sets did_jump and leaves the block: sync in only on that
+  path. Syncing in unconditionally after every slow access made every value
+  a merge of the fast and slow paths again.
+- The accumulator needs a whole i64 copy in the shadow (past CpuState): split
+  into ax/aw fields, each iteration rebuilt it from two PHIs with shl/ashr/or
+  and LLVM never saw one value. Keep both fields in the shadow together, or
+  the copy goes stale when only one is written.
+- Stores of a parallel packet are deferred to its end; so must the whole
+  accumulator's be, or its latch value is the merge of the field stores and
+  not the MAC's result.
+- The chain budget: compare with the budget read once at entry, then test
+  the reloaded one against 0. The same test (the budget only ever drops to
+  0), but SCEV counts the loop by the first half.
+- `(s + 2^31) <u 2^32 ? sext(trunc s) : clamp` is the W32 window test in a
+  form LLVM knows yields an i32; the reference form (shift by 31, compare
+  with 0 and 0x1ffffffff, mask, re-extend) costs ~10 more instructions per
+  MAC in every block, loop or not.
+- Write the doubled W32 product of two signed halves in i32 (`mul nsw` of
+  two sext16): computed in i64 and truncated, the vectorizer kept <8 x i64>
+  multiplies.
+
+Guest memory in loop blocks goes through two readnone calls
+(`bcore.guest.ptr`, `bcore.guest.aligned`). `GuestLoopVersioning` proves
+each affine access's range once at the loop's entry (one mapped page,
+aligned) and copies the loop with direct accesses; whatever is left is
+lowered to the page table afterwards. A speculative native load before the
+guard exists would be UB (and poison could delete the guard), hence the
+abstract calls. The proven pointer must be base + an i64 AddRec expanded in
+the loop *before* it is cloned: a 32-bit `addr - page_va` zero-extended is
+not affine to SCEV (no nuw proof), and LoopVectorize then saw no consecutive
+access. The expander may hoist an invariant offset out of the loop, so the
+clone map can miss it.
+
+`SatReductionSpeculation` gives a W32 MAC loop a copy without clamps, run
+for m-1 iterations with each term rotated one iteration earlier (the
+software-pipelined loads feed the next iteration's MAC: the copy uses the
+values iteration j leaves for j+1, the term of iteration 0 peeled before
+it), so that every PHI but the sums is an induction. Its i32 sum is exact
+where |a0| + m·max|x| ≤ INT32_MAX; the loop then resumes at iteration m,
+every other PHI rebuilt there (inductions by SCEV, the rest by cloning the
+loop's slice one iteration back). LoopVectorize refuses a loop with any
+live-out that is not a reduction or induction, which is why the rebuild
+happens outside the copy. LLVM 15 has no saturating RecurKind.
+- An IRBuilder at the end of a block has no instruction to give
+  SCEVExpander as an insertion point: put a temporary terminator there.
+- `cloneLoopWithPreheader` does not add the exit PHIs' entries: add them at
+  once, and call removePredecessor where the copy's exits go, so the IR is
+  valid on every path out of the transform.
+
+Measured (boot to op1emu's main frame, workload and digests identical with
+and without loop blocks, and dry): host instructions in execution 57.8G ->
+19.8G; the firmware's FIR loop (0x01a5e27e) 1.73 s -> 0.12 s.
