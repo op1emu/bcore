@@ -51,6 +51,7 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)
 - `src/guest_memory.h/cpp`: a loop block's guest memory said abstractly (`bcore.guest.ptr`, `bcore.guest.aligned`), `GuestLoopVersioning` (SCEV ranges proven at loop entry, a copy with direct RAM access) and `lower_guest_memory`
 - `src/guest_speculation.h/cpp`: `SatReductionSpeculation`, a speculative unclamped copy of W32 saturating MAC loops for LoopVectorize, checked by |a0| + m·max|x| ≤ INT32_MAX at its end
+- `src/steady_skip.h/cpp`: `SteadyLoopSkip` (Core::set_steady_skip), a latch test that the iteration just run changed nothing but the loop's affine counters and made no read the host could not promise would repeat (`CpuState::unstable_reads`); the loop then goes to its last counted iteration (`evaluateAtIteration`)
 - `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--count-packets`, `--chain`, `--opt-level`)
 
 ## Common Development Tasks

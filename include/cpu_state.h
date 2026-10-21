@@ -113,6 +113,15 @@ struct CpuState {
     // and returned. The core waits for a wakeup there: the host lets guest
     // time pass to its next event before the next run. Core::run clears it.
     uint8_t idle;
+    // Memory read callbacks whose value or effect the host could not promise
+    // would be the same if repeated before the run ends (a FIFO pop, a value
+    // from the time): it counts them (Core::set_steady_skip). A loop whose
+    // iteration made reads but left this unchanged read nothing that could
+    // differ in the next one.
+    uint64_t unstable_reads;
+    // Steady iterations a loop would have skipped (Core::set_steady_skip's
+    // dry mode), counted by generated code; the host reads and clears it.
+    uint64_t steady_iterations;
     // CYCLES (cycles[1]:cycles[0]) when this run started. With
     // Core::set_host_cycles a chained block that accesses CYCLES sets it to
     // cycles_base + chain_packets first, as a host that writes CYCLES before

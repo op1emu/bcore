@@ -90,6 +90,7 @@ public:
 
 private:
     void note(char op, uint32_t a) const {
+        if (a >= kDevice && op == 'r') ++cpu_->unstable_reads;
         if (a >= kDevice)
             const_cast<RecordingMemory*>(this)->seen.push_back(
                 {op, a, cpu_->pc, cpu_->insn_len, cpu_->packets, cpu_->chain_packets});
@@ -199,7 +200,7 @@ struct Outcome {
 };
 
 static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, bool pages, bool loops,
-                   bool clobber = false) {
+                   bool clobber = false, int steady = 0) {
     CpuState cpu{};
     RecordingMemory mem(&cpu, pages, clobber);
     load(mem, p);
@@ -209,6 +210,7 @@ static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, boo
     Core core(&cpu, &mem);
     core.set_chaining(chained, false);
     core.set_loop_blocks(loops);
+    core.set_steady_skip(steady);
     require(core.init(opt), "init");
 
     // Supervisor at IVG15, interrupts enabled, as in the firmware.
@@ -375,7 +377,10 @@ int main() {
                     for (uint32_t budget : {0u, 1u, 7u, 64u, 1000u}) {
                         if (!chained && budget) continue;
                         const Outcome want = run(p, opt, chained, budget, pages, false);
-                        const Outcome got = run(p, opt, chained, budget, pages, true);
+                        // Every other program with SteadyLoopSkip too, which
+                        // must change nothing: a device read is a recorded
+                        // access, so the recorder counts every one unstable.
+                        const Outcome got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0);
                         if (!(want == got)) {
                             fprintf(stderr, "FAIL: program %d (%s, lc %u) -O%d%s%s budget %u: %zu/%zu runs, "
                                             "%zu/%zu accesses, pc %x/%x\n",

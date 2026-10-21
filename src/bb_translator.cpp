@@ -220,7 +220,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
                         lb_guard ? lb_guard_miss_block(lb_guard) : nullptr, first_entry,
                         &visitor.steady_back_edges());
     if (loop) {
-        if (!expand_loop_syncs(fn, cast<AllocaInst>(state), cpu_ptr)) {
+        if (!expand_loop_syncs(fn, cast<AllocaInst>(state), cpu_ptr, steady_skip_)) {
             mod.reset();  // before its context
             return {nullptr, std::move(ctx), visitor.fallthrough_pc(), "packet-cap"};
         }
@@ -259,7 +259,7 @@ static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
 //
 // False, changing nothing, where the shadow is used other than through loads
 // and stores at constant offsets: the block is then compiled plain.
-bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* real) {
+bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* real, bool steady_skip) {
     using Bytes = std::bitset<sizeof(CpuState)>;
     const DataLayout& layout = fn->getParent()->getDataLayout();
     Function* sync_out = fn->getParent()->getFunction(LiftVisitor::kSyncOut);
@@ -346,12 +346,20 @@ bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* re
     copy(copied, true);
     b.CreateStore(b.getInt8(0), b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(offsetof(CpuState, did_jump))));
 
+    // A loop that skips to its last iteration (Core::set_steady_skip) jumps
+    // the fields it counts in without storing the iterations between: a
+    // field is then clean where the real state holds a value from before
+    // the skip. Every copy out writes every field the block stores, so the
+    // real state never lags behind.
+    Bytes stored_anywhere;
+    if (steady_skip)
+        for (auto& [store, set] : stores) stored_anywhere |= set;
     std::vector<std::pair<CallInst*, Bytes>> syncs;
     for (auto& block : *fn) {
         Bytes dirty = in[&block];
         for (auto& inst : block) {
             Function* f = callee(inst);
-            if (f && (f == sync_out || f == commit)) syncs.push_back({cast<CallInst>(&inst), dirty});
+            if (f && (f == sync_out || f == commit)) syncs.push_back({cast<CallInst>(&inst), dirty | stored_anywhere});
             else if (f && f == sync_in) syncs.push_back({cast<CallInst>(&inst), touched});
             step(inst, dirty);
         }

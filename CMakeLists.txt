@@ -54,6 +54,7 @@ add_library(bfin-core STATIC
     src/packet_state.cpp
     src/guest_memory.cpp
     src/guest_speculation.cpp
+    src/steady_skip.cpp
     src/syscall_emu.cpp
     src/cec.cpp
     src/evt.cpp
@@ -225,6 +226,9 @@ if(BCORE_BUILD_FAULT_TESTS)
     add_executable(bcore-loop-block-test tests/loop_block_test.cpp)
     target_link_libraries(bcore-loop-block-test PRIVATE bfin-core)
     add_test(NAME bcore-loop-block-test COMMAND bcore-loop-block-test)
+    add_executable(bcore-steady-skip-test tests/steady_skip_test.cpp)
+    target_link_libraries(bcore-steady-skip-test PRIVATE bfin-core)
+    add_test(NAME bcore-steady-skip-test COMMAND bcore-steady-skip-test)
     add_executable(bcore-lb-guard-test tests/lb_guard_test.cpp)
     target_link_libraries(bcore-lb-guard-test PRIVATE bfin-core)
     add_test(NAME bcore-lb-guard-test COMMAND bcore-lb-guard-test)
