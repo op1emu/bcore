@@ -4412,26 +4412,20 @@ llvm::Value* LiftVisitor::emit_saturate_acc(
         sat_flag = b.CreateZExt(b.CreateOr(under, over), i32ty, "acc_sat_ih");
         new_acc = emit_smin(emit_smax(new_acc, lo32), hi32);
     } else if (mmod == MMOD_W32) {
-        // W32: 32-bit window clamp driven by sgn40 (bit 39 of original acc)
-        auto* shr31    = b.CreateLShr(new_acc, b.getInt64(31), "w32_shr31");
-        auto* is_zero  = b.CreateICmpEQ(shr31, b.getInt64(0), "w32_zero");
-        auto* is_ones  = b.CreateICmpEQ(shr31, b.getInt64(0x1ffffffffLL), "w32_ones");
-        auto* is_valid  = b.CreateOr(is_zero, is_ones, "w32_valid");
-        auto* not_valid = b.CreateNot(is_valid, "w32_not_valid");
-        auto* neg_clamp = b.CreateAnd(sgn40, not_valid, "w32_neg_clamp");
-        auto* pos_clamp = b.CreateAnd(b.CreateNot(sgn40), not_valid, "w32_pos_clamp");
-        new_acc = b.CreateSelect(neg_clamp,
-            b.getInt64((int64_t)(uint64_t)0xFFFFFFFF80000000ULL), new_acc, "w32_nc");
-        new_acc = b.CreateSelect(pos_clamp,
-            b.getInt64(0x7FFFFFFFLL), new_acc, "w32_pc");
-        new_acc = b.CreateAnd(new_acc, b.getInt64(0xFFFFFFFFLL));
-        auto* has_sign = b.CreateICmpNE(
-            b.CreateAnd(new_acc, b.getInt64(0x80000000LL)), b.getInt64(0));
-        new_acc = b.CreateSelect(has_sign,
-            b.CreateOr(new_acc, b.getInt64((int64_t)(uint64_t)0xFFFFFFFF00000000ULL)),
-            new_acc, "w32_sext");
-        auto* range_sat = b.CreateOr(neg_clamp, pos_clamp, "w32_range_sat");
-        sat_flag = b.CreateZExt(b.CreateOr(range_sat, tsat_flag), i32ty, "acc_sat_w32");
+        // W32: a sum outside the signed 32-bit window clamps to its end on
+        // the side of sgn40 (bit 39 of the original acc); the result is the
+        // window's value sign-extended. Inside it, sext32(trunc32(sum)) is
+        // the sum itself, written so that the result visibly has 33 sign
+        // bits (an i32 value), which lets the IR drop the 40-bit
+        // re-extension of every later load of the accumulator.
+        auto* i64ty = b.getInt64Ty();
+        auto* fits = b.CreateICmpULT(b.CreateAdd(new_acc, b.getInt64(0x80000000LL)), b.getInt64(0x100000000LL),
+                                     "w32_fits");
+        auto* clamp = b.CreateSelect(sgn40, b.getInt64((int64_t)(uint64_t)0xFFFFFFFF80000000ULL),
+                                     b.getInt64(0x7FFFFFFFLL), "w32_clamp");
+        auto* in_window = b.CreateSExt(b.CreateTrunc(new_acc, i32ty), i64ty);
+        new_acc = b.CreateSelect(fits, in_window, clamp, "w32_sext");
+        sat_flag = b.CreateZExt(b.CreateOr(b.CreateNot(fits), tsat_flag), i32ty, "acc_sat_w32");
     } else if (mmod == MMOD_IU && MM) {
         // M_IU + MM=1: truncate to 40 bits, do NOT set sat_flag.
         // Reference: acc &= 0xFFFFFFFFFF (no sat=1).
@@ -4562,9 +4556,22 @@ llvm::Value* LiftVisitor::emit_mac_common(
             auto* sat_val = (mmod == MMOD_W32)
                 ? b.getInt64(0x7fffffffLL)
                 : b.getInt64(0x80000000LL);
-            auto* is_sat  = b.CreateICmpEQ(prod64, b.getInt64(0x40000000), "is_sat");
-            auto* shifted = b.CreateShl(prod64, b.getInt64(1), "frac_shift");
-            prod64 = b.CreateSelect(is_sat, sat_val, shifted, "prod_frac");
+            llvm::Value* is_sat = nullptr;
+            if (mmod == MMOD_W32 && is_signed) {
+                // Two signed halves: the product is at most 2^30, so 32 bits
+                // hold it, and the doubled one, clamped, too. Said in 32 bits
+                // the IR knows it (a loop of these sums in 32-bit lanes).
+                auto* i16ty = llvm::Type::getInt16Ty(ctx);
+                auto* p32 = b.CreateNSWMul(b.CreateSExt(b.CreateTrunc(s0_16, i16ty), i32ty),
+                                           b.CreateSExt(b.CreateTrunc(s1_16, i16ty), i32ty), "prod32");
+                is_sat = b.CreateICmpEQ(p32, b.getInt32(0x40000000), "is_sat");
+                auto* frac32 = b.CreateSelect(is_sat, b.getInt32(0x7fffffff), b.CreateShl(p32, b.getInt32(1)), "frac32");
+                prod64 = b.CreateSExt(frac32, i64ty, "prod_frac");
+            } else {
+                is_sat = b.CreateICmpEQ(prod64, b.getInt64(0x40000000), "is_sat");
+                auto* shifted = b.CreateShl(prod64, b.getInt64(1), "frac_shift");
+                prod64 = b.CreateSelect(is_sat, sat_val, shifted, "prod_frac");
+            }
             if (mmod == MMOD_W32)
                 tsat_flag = is_sat;
         }
