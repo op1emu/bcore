@@ -82,11 +82,27 @@ public:
     // lifted, by copies of the shadow's fields to the real state and back.
     // l_zero: the DAG registers (bit i for L[i]) the block may take to be
     // linear (L[i] = 0), which its entry guard then checks.
-    void set_loop_mode(llvm::Value* real, const std::set<size_t>& fields, unsigned l_zero) {
+    // circular: those it may take to be circular buffers that I[i] stays in
+    // (Circular), which its entry guard checks too.
+    void set_loop_mode(llvm::Value* real, const std::set<size_t>& fields, unsigned l_zero, unsigned circular = 0) {
         real_cpu_ = real;
         loop_fields_ = fields;
         l_zero_ = l_zero;
+        circ_ = circular;
     }
+    // How a block steps its DAG registers, from its lift. A loop block may
+    // take I[i] to stay in its circular buffer -- I[i] - B[i] below L[i], with
+    // L[i] <= B[i] and B[i] + 2 L[i] <= 2^32 -- where every step is at most
+    // L[i] in size and nothing but a DAG update writes I[i]: then each update
+    // is a compare and a select or two (no 64-bit carry tests), and each
+    // access through I[i] lies in [B[i], B[i] + L[i]) (bcore.guest.ptr.in),
+    // which a loop's copy can be proven for at its entry.
+    struct Circular {
+        uint32_t max_step[4] = {};  // the largest constant step of I[i]
+        unsigned mregs[4] = {};     // the M registers I[i] is stepped by (bit m)
+        unsigned other_writes = 0;  // bit i: something else writes I[i]
+    };
+    const Circular& circular() const { return circ_use_; }
     // The CpuState fields the block stores to.
     const std::set<size_t>& written_fields() const { return written_fields_; }
     // Whether a loop block keeps this field in its shadow: a register or a
@@ -673,6 +689,11 @@ private:
     llvm::Value* real_cpu_ = nullptr;  // loop mode: the real CpuState (set_loop_mode)
     std::set<size_t> loop_fields_;
     unsigned l_zero_ = 0;
+    unsigned circ_ = 0;                          // set_loop_mode's circular
+    Circular circ_use_;                          // what the lift saw
+    bool in_dag_update_ = false;                 // a DAG update stores I[i]
+    std::map<llvm::Value*, unsigned> circ_addr_; // I[i] values of circular i, by value
+    bool circular_now(unsigned i) const { return real_cpu_ && regs_kept_ && (circ_ >> i & 1); }
     bool regs_kept_ = true;  // no helper since the entry may have changed a register
     std::set<size_t> written_fields_;
     uint32_t packet_pc_ = 0;
@@ -869,6 +890,8 @@ private:
     // Carry-bit accurate dagadd/dagsub matching reference bfin-sim.c.
     // m_val is i32, treated as signed (M register or constant).
     void emit_dagmod_add(uint16_t dagno, llvm::Value* m_val);
+    void emit_dag_circular(uint16_t dagno, llvm::Value* delta);
+    void note_dag_step(uint16_t dagno, llvm::Value* m_val);
     void emit_dagmod_sub(uint16_t dagno, llvm::Value* m_val);
     // Convenience wrappers:
     void emit_dagadd(uint16_t dagno, uint32_t delta);

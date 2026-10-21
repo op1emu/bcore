@@ -20,6 +20,7 @@
 using namespace llvm;
 
 static constexpr const char* kGuestPtr = "bcore.guest.ptr";
+static constexpr const char* kGuestPtrIn = "bcore.guest.ptr.in";
 static constexpr const char* kGuestAligned = "bcore.guest.aligned";
 
 static Function* declare(Module& m, const char* name, FunctionType* type) {
@@ -35,13 +36,19 @@ Value* guest_ptr(IRBuilder<>& b, Module& m, Value* table, Value* addr) {
     return b.CreateCall(declare(m, kGuestPtr, type), {table, addr}, "guest_ptr");
 }
 
+Value* guest_ptr_in(IRBuilder<>& b, Module& m, Value* table, Value* addr, Value* lo, Value* size) {
+    auto* i32 = b.getInt32Ty();
+    auto* type = FunctionType::get(b.getInt8PtrTy(), {b.getInt8PtrTy(), i32, i32, i32}, false);
+    return b.CreateCall(declare(m, kGuestPtrIn, type), {table, addr, lo, size}, "guest_ptr");
+}
+
 Value* guest_aligned(IRBuilder<>& b, Module& m, Value* addr, unsigned width) {
     auto* type = FunctionType::get(b.getInt1Ty(), {b.getInt32Ty(), b.getInt32Ty()}, false);
     return b.CreateCall(declare(m, kGuestAligned, type), {addr, b.getInt32(width)}, "guest_aligned");
 }
 
 bool has_guest_memory(const Module& m) {
-    return m.getFunction(kGuestPtr) || m.getFunction(kGuestAligned);
+    return m.getFunction(kGuestPtr) || m.getFunction(kGuestPtrIn) || m.getFunction(kGuestAligned);
 }
 
 static Function* callee_of(const Instruction& inst) {
@@ -57,6 +64,10 @@ struct Access {
     const SCEV* step;
     unsigned width;   // bytes accessed (for bcore.guest.aligned, the alignment)
     bool pointer;     // bcore.guest.ptr; else bcore.guest.aligned
+    // bcore.guest.ptr.in: the window [lo, lo + size) every address lies in,
+    // both defined before the loop (no start or step then).
+    Value* lo = nullptr;
+    Value* size = nullptr;
 };
 
 // The widest access through a bcore.guest.ptr result, or 0 where it has a
@@ -78,7 +89,7 @@ static unsigned access_width(CallInst* call, const DataLayout& layout) {
 }
 
 static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se, Function* ptr_fn,
-                    Function* aligned_fn, std::set<BasicBlock*>& done) {
+                    Function* in_fn, Function* aligned_fn, std::set<BasicBlock*>& done) {
     BasicBlock* preheader = loop.getLoopPreheader();
     if (!preheader || !loop.hasDedicatedExits() || !loop.isLCSSAForm(dt)) return false;
     const SCEV* count = se.getSymbolicMaxBackedgeTakenCount(&loop);
@@ -91,8 +102,24 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
     for (auto* block : loop.blocks())
         for (auto& inst : *block) {
             Function* f = callee_of(inst);
-            if (!f || (f != ptr_fn && f != aligned_fn)) continue;
+            if (!f || (f != ptr_fn && f != aligned_fn && f != in_fn)) continue;
             auto* call = cast<CallInst>(&inst);
+            if (f == in_fn) {
+                const unsigned width = access_width(call, layout);
+                Value* t = call->getArgOperand(0);
+                Value* lo = call->getArgOperand(2);
+                Value* size = call->getArgOperand(3);
+                auto before = [&](Value* v) {
+                    auto* def = dyn_cast<Instruction>(v);
+                    return !def || dt.dominates(def, at);
+                };
+                if (!width || (width & (width - 1)) || (table && t != table) || !before(t) || !before(lo) ||
+                    !before(size))
+                    continue;
+                table = t;
+                accesses.push_back({call, nullptr, nullptr, width, true, lo, size});
+                continue;
+            }
             const bool pointer = f == ptr_fn;
             Value* addr = call->getArgOperand(pointer ? 1 : 0);
             unsigned width = 0;
@@ -140,6 +167,23 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
     std::vector<Value*> pages(accesses.size()), page_vas(accesses.size());
     for (size_t k = 0; k < accesses.size(); ++k) {
         const Access& a = accesses[k];
+        if (a.lo) {
+            // Its window, [lo, lo + size), with the access's width past it.
+            b.SetInsertPoint(at);
+            auto* lo = b.CreateZExt(a.lo, i64);
+            auto* hi = b.CreateAdd(b.CreateAdd(lo, b.CreateZExt(a.size, i64)), b.getInt64(int64_t(a.width) - 2),
+                                   "lver.hi");
+            ok = b.CreateAnd(ok, b.CreateICmpNE(a.size, b.getInt32(0)));
+            ok = b.CreateAnd(ok, b.CreateICmpULT(hi, b.getInt64(1ull << 32)));
+            ok = b.CreateAnd(ok, b.CreateICmpEQ(b.CreateLShr(lo, Memory::kPageBits), b.CreateLShr(hi, Memory::kPageBits)));
+            auto* index = b.CreateAnd(b.CreateLShr(lo, Memory::kPageBits), b.getInt64(Memory::kPageTableEntries - 1));
+            auto* page = b.CreateLoad(b.getInt8PtrTy(), b.CreateGEP(b.getInt8PtrTy(), table, index), "lver.page");
+            ok = b.CreateAnd(ok, b.CreateIsNotNull(page));
+            pages[k] = page;
+            page_vas[k] = b.CreateTrunc(b.CreateAnd(lo, b.getInt64(~uint64_t(Memory::kPageSize - 1))), b.getInt32Ty(),
+                                        "lver.page_va");
+            continue;
+        }
         Value* start = expander.expandCodeFor(a.start, a.start->getType(), at);
         Value* step = expander.expandCodeFor(a.step, a.step->getType(), at);
         b.SetInsertPoint(at);
@@ -172,7 +216,7 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
     std::vector<Value*> offsets(accesses.size());
     for (size_t k = 0; k < accesses.size(); ++k) {
         const Access& a = accesses[k];
-        if (!a.pointer) continue;
+        if (!a.pointer || a.lo) continue;
         const SCEV* va = se.getZeroExtendExpr(se.getSCEV(page_vas[k]), i64);
         const SCEV* first = se.getMinusSCEV(se.getZeroExtendExpr(a.start, i64), va);
         const SCEV* offset = se.getAddRecExpr(first, se.getSignExtendExpr(a.step, i64), &loop, SCEV::FlagAnyWrap);
@@ -219,9 +263,15 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
             cmp->eraseFromParent();
         }
         IRBuilder<> at_call(call);
-        // The expander may have put an invariant offset before the loop.
-        auto mapped = vmap.find(offsets[k]);
-        Value* offset = mapped != vmap.end() ? static_cast<Value*>(mapped->second) : offsets[k];
+        Value* offset;
+        if (accesses[k].lo) {
+            // In the window, so in the page: its offset there.
+            offset = at_call.CreateZExt(at_call.CreateSub(call->getArgOperand(1), page_vas[k]), at_call.getInt64Ty());
+        } else {
+            // The expander may have put an invariant offset before the loop.
+            auto mapped = vmap.find(offsets[k]);
+            offset = mapped != vmap.end() ? static_cast<Value*>(mapped->second) : offsets[k];
+        }
         auto* ptr = at_call.CreateInBoundsGEP(at_call.getInt8Ty(), pages[k], offset, "lver.ptr");
         call->replaceAllUsesWith(ptr);
         call->eraseFromParent();
@@ -245,8 +295,9 @@ unsigned attribute_count(const Function& f, const char* attr) {
 PreservedAnalyses GuestLoopVersioning::run(Function& f, FunctionAnalysisManager& am) {
     Module& m = *f.getParent();
     Function* ptr_fn = m.getFunction(kGuestPtr);
+    Function* in_fn = m.getFunction(kGuestPtrIn);
     Function* aligned_fn = m.getFunction(kGuestAligned);
-    if (!ptr_fn && !aligned_fn) return PreservedAnalyses::all();
+    if (!ptr_fn && !in_fn && !aligned_fn) return PreservedAnalyses::all();
     std::set<BasicBlock*> done;
     bool changed = false;
     for (int round = 0; round < 16; ++round) {
@@ -257,7 +308,7 @@ PreservedAnalyses GuestLoopVersioning::run(Function& f, FunctionAnalysisManager&
         for (Loop* loop : li.getLoopsInPreorder()) {
             if (!loop->isInnermost() || done.count(loop->getHeader())) continue;
             done.insert(loop->getHeader());
-            if (version(*loop, li, dt, se, ptr_fn, aligned_fn, done)) {
+            if (version(*loop, li, dt, se, ptr_fn, in_fn, aligned_fn, done)) {
                 count_in_attribute(f, kLoopsProvenAttr);
                 versioned = true;
                 break;
@@ -271,7 +322,9 @@ PreservedAnalyses GuestLoopVersioning::run(Function& f, FunctionAnalysisManager&
 }
 
 void lower_guest_memory(Module& m) {
-    if (Function* f = m.getFunction(kGuestPtr)) {
+    for (const char* name : {kGuestPtr, kGuestPtrIn}) {
+        Function* f = m.getFunction(name);
+        if (!f) continue;
         std::vector<CallInst*> calls;
         for (auto* user : f->users()) calls.push_back(cast<CallInst>(user));
         for (auto* call : calls) {

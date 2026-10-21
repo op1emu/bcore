@@ -628,3 +628,22 @@ as always and exits where it would have.
 
 Measured on op1emu's synth phase (main frame to 10 s of guest time): device
 reads 52.2M -> 12.3M, every other workload counter and digest identical.
+
+## Circular buffers in loop blocks
+
+A circular DAG register (L != 0) stepped by bfin's dagadd/dagsub is a chain
+of 64-bit carry tests and selects, and its address is no AddRec, so neither
+SCEV nor GuestLoopVersioning could do anything with the loop around it
+(op1emu's dsp_fir_convolution: a two-packet dual-MAC hardware loop, I1 a
+ring of samples). Under an entry guard -- L != 0, L <= B, B + 2L <= 2^32,
+I - B < L, every step at most L in size, B, L and the modifiers unwritten,
+I written by DAG updates only -- I stays in [B, B + L): I + d lies in
+[B - L, B + 2L), neither end wraps, every carry test comes out the same
+way, and the update is t = I + d; t >= B + L ? t - L : t; then < B ? + L.
+(L <= B matters: with B < L a negative step wraps below 0, where dagadd
+adds L and the short form does not.) The accesses through I go through
+bcore.guest.ptr.in(table, addr, B, L), which GuestLoopVersioning proves
+from the window at entry like an affine access (one mapped page holding
+[B, B + L) plus the width) and lowers to page + (addr - page_va).
+loop_block_test randomizes I1's buffer and step, larger than the buffer
+included, against plain blocks.

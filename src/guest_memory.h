@@ -28,6 +28,12 @@
 // definition, one page table load per access, as a plain block does it.
 
 llvm::Value* guest_ptr(llvm::IRBuilder<>& b, llvm::Module& m, llvm::Value* table, llvm::Value* addr);
+// bcore.guest.ptr.in(ptr table, i32 addr, i32 lo, i32 size): bcore.guest.ptr,
+// for an address the block knows lies in [lo, lo + size) (a circular
+// buffer's, with lo and size its base and length): what a loop's copy can be
+// proven for at entry, though the address is not affine in the loop.
+llvm::Value* guest_ptr_in(llvm::IRBuilder<>& b, llvm::Module& m, llvm::Value* table, llvm::Value* addr,
+                          llvm::Value* lo, llvm::Value* size);
 llvm::Value* guest_aligned(llvm::IRBuilder<>& b, llvm::Module& m, llvm::Value* addr, unsigned width);
 // Whether the module has either declaration.
 bool has_guest_memory(const llvm::Module& m);

@@ -303,16 +303,26 @@ Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
     auto* cache = reg_cacheable(offset) ? reg_cache_here() : nullptr;
     if (cache) {
         auto it = cache->find(offset);
-        if (it != cache->end()) return it->second;
+        if (it != cache->end()) {
+            if (offset >= offsetof(CpuState, iregs[0]) && offset <= offsetof(CpuState, iregs[3]) &&
+                circular_now(unsigned(offset - offsetof(CpuState, iregs[0])) / 4))
+                circ_addr_[it->second] = unsigned(offset - offsetof(CpuState, iregs[0])) / 4;
+            return it->second;
+        }
     }
     auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty(), name + ".ptr");
     auto* value = builder_.CreateLoad(builder_.getInt32Ty(), ptr, name);
     if (cache) (*cache)[offset] = value;
+    if (offset >= offsetof(CpuState, iregs[0]) && offset <= offsetof(CpuState, iregs[3]) &&
+        circular_now(unsigned(offset - offsetof(CpuState, iregs[0])) / 4))
+        circ_addr_[value] = unsigned(offset - offsetof(CpuState, iregs[0])) / 4;
     return value;
 }
 
 void LiftVisitor::store_cpu_u32(size_t offset, Value* val) {
     accesses_cycles_ |= is_cycles(offset);
+    if (!in_dag_update_ && offset >= offsetof(CpuState, iregs[0]) && offset <= offsetof(CpuState, iregs[3]))
+        circ_use_.other_writes |= 1u << (offset - offsetof(CpuState, iregs[0])) / 4;
     // CYCLES2 write (cycles[1]): redirect to shadow (cycles[2]); readable value
     // only updates when CYCLES is read (see load_cpu_u32 above).
     if (offset == offsetof(CpuState, cycles[1]))
@@ -1505,6 +1515,14 @@ llvm::Value* LiftVisitor::emit_page_lookup(llvm::Value* addr) {
 llvm::Value* LiftVisitor::emit_page_ptr(llvm::Value* addr, llvm::Value*& ptr) {
     entry_load_ptr(offsetof(CpuState, page_table), page_table_value_, "page_table");
     if (!real_cpu_) return emit_page_lookup(addr);
+    // An access through a circular I[i]: in its buffer (Circular).
+    if (auto it = circ_addr_.find(addr); it != circ_addr_.end() && circular_now(it->second)) {
+        const unsigned i = it->second;
+        auto* base = load_cpu_u32(offsetof(CpuState, bregs) + i * 4, "breg");
+        auto* length = load_cpu_u32(offsetof(CpuState, lregs) + i * 4, "lreg");
+        ptr = guest_ptr_in(builder_, *module_, page_table_value_, addr, base, length);
+        return ptr;
+    }
     ptr = guest_ptr(builder_, *module_, page_table_value_, addr);
     return ptr;
 }
@@ -3858,9 +3876,37 @@ bool LiftVisitor::decode_LDST_ST_P_32_z_ind(uint16_t p, uint16_t d) {
 
 // Carry-bit accurate dagadd, matching reference bfin-sim.c dagadd().
 // m_val is i32 (signed). Handles both M>=0 and M<0 paths.
+// I[i] + d in its circular buffer, where it stays (Circular, the entry
+// guard): I + d lies in [B - L, B + 2L), which neither end wraps, and the
+// carry tests of dagadd/dagsub all come out the way that folds to this.
+void LiftVisitor::emit_dag_circular(uint16_t dagno, Value* delta) {
+    auto& B = builder_;
+    auto* i_val = load_cpu_u32(offsetof(CpuState, iregs) + dagno * 4, "ireg");
+    auto* l_val = load_cpu_u32(offsetof(CpuState, lregs) + dagno * 4, "lreg");
+    auto* b_val = load_cpu_u32(offsetof(CpuState, bregs) + dagno * 4, "breg");
+    auto* t = B.CreateAdd(i_val, delta, "dag_t");
+    auto* end = B.CreateAdd(b_val, l_val, "dag_end");
+    auto* below_end = B.CreateSelect(B.CreateICmpUGE(t, end), B.CreateSub(t, l_val), t, "dag_wrap_down");
+    auto* result = B.CreateSelect(B.CreateICmpULT(below_end, b_val), B.CreateAdd(below_end, l_val), below_end,
+                                  "dag_result");
+    in_dag_update_ = true;
+    store_cpu_u32(offsetof(CpuState, iregs) + dagno * 4, result);
+    in_dag_update_ = false;
+}
+
+void LiftVisitor::note_dag_step(uint16_t dagno, Value* m_val) {
+    if (auto* c = dyn_cast<ConstantInt>(m_val)) {
+        const int32_t m = int32_t(c->getZExtValue());
+        const uint32_t size = m < 0 ? uint32_t(-int64_t(m)) : uint32_t(m);
+        circ_use_.max_step[dagno] = std::max(circ_use_.max_step[dagno], size);
+    }
+}
+
 void LiftVisitor::emit_dagmod_add(uint16_t dagno, llvm::Value* m_val) {
     auto& B = builder_;
     auto* i64ty = B.getInt64Ty();
+    note_dag_step(dagno, m_val);
+    if (circular_now(dagno)) return emit_dag_circular(dagno, m_val);
 
     auto* i_val = load_cpu_u32(offsetof(CpuState, iregs) + dagno * 4, "ireg");
     auto* l_val = load_cpu_u32(offsetof(CpuState, lregs) + dagno * 4, "lreg");
@@ -3913,7 +3959,9 @@ void LiftVisitor::emit_dagmod_add(uint16_t dagno, llvm::Value* m_val) {
     auto* neg_result = B.CreateSelect(flag_neg, neg_flag, neg_noflag, "neg_res");
 
     auto* result = B.CreateSelect(m_neg, neg_result, pos_result, "dag_result");
+    in_dag_update_ = true;
     store_cpu_u32(offsetof(CpuState, iregs) + dagno * 4, result);
+    in_dag_update_ = false;
 }
 
 // Carry-bit accurate dagsub, matching reference bfin-sim.c dagsub().
@@ -3921,6 +3969,8 @@ void LiftVisitor::emit_dagmod_add(uint16_t dagno, llvm::Value* m_val) {
 void LiftVisitor::emit_dagmod_sub(uint16_t dagno, llvm::Value* m_val) {
     auto& B = builder_;
     auto* i64ty = B.getInt64Ty();
+    note_dag_step(dagno, m_val);
+    if (circular_now(dagno)) return emit_dag_circular(dagno, B.CreateNeg(m_val, "dag_neg"));
 
     auto* i_val = load_cpu_u32(offsetof(CpuState, iregs) + dagno * 4, "ireg");
     auto* l_val = load_cpu_u32(offsetof(CpuState, lregs) + dagno * 4, "lreg");
@@ -3977,7 +4027,9 @@ void LiftVisitor::emit_dagmod_sub(uint16_t dagno, llvm::Value* m_val) {
     auto* mpos_result = B.CreateSelect(mpos_cond, mpos_yes, mpos_no, "mpos_res");
 
     auto* result = B.CreateSelect(m_is_neg, mneg_result, mpos_result, "dag_result");
+    in_dag_update_ = true;
     store_cpu_u32(offsetof(CpuState, iregs) + dagno * 4, result);
+    in_dag_update_ = false;
 }
 
 // Convenience: dagadd with positive constant delta
@@ -3993,12 +4045,14 @@ void LiftVisitor::emit_dagsub(uint16_t dagno, uint32_t delta) {
 // dagadd with M register (signed)
 void LiftVisitor::emit_dagadd_mreg(uint16_t dagno, uint16_t mreg_idx) {
     auto* m_val = load_cpu_u32(offsetof(CpuState, mregs) + mreg_idx * 4, "mreg");
+    circ_use_.mregs[dagno] |= 1u << mreg_idx;
     emit_dagmod_add(dagno, m_val);
 }
 
 // dagsub with M register (signed)
 void LiftVisitor::emit_dagsub_mreg(uint16_t dagno, uint16_t mreg_idx) {
     auto* m_val = load_cpu_u32(offsetof(CpuState, mregs) + mreg_idx * 4, "mreg");
+    circ_use_.mregs[dagno] |= 1u << mreg_idx;
     emit_dagmod_sub(dagno, m_val);
 }
 
