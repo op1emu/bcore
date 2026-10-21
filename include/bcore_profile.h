@@ -152,9 +152,13 @@ struct BcoreStats {
     uint64_t lb_guard_misses    = 0;
     // Of the blocks translated: those compiled as loop blocks
     // (Core::set_loop_blocks), and in them the loops given a copy with
-    // their guest memory proven at entry (guest_memory.h).
+    // their guest memory proven at entry (guest_memory.h), the copies given
+    // a speculative copy of a saturating sum (guest_speculation.h), and the
+    // loops the vectorizer then vectorized.
     uint64_t loop_blocks        = 0;
     uint64_t loops_proven       = 0;
+    uint64_t loops_speculated   = 0;
+    uint64_t loops_vectorized   = 0;
     // Interrupts and exceptions dispatched per IVG level (0 = EMU, 1 = RST,
     // 2 = NMI, 3 = EVX, ... 15 = IVG15), counted where the CEC sets the
     // IPEND bit. Guest behavior, unlike the block counters above: with the

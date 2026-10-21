@@ -1,5 +1,7 @@
 #include "jit_engine.h"
 #include "guest_memory.h"
+#include "guest_speculation.h"
+#include <llvm/Transforms/Vectorize/LoopVectorize.h>
 
 #include <cstdio>
 #include <atomic>
@@ -251,6 +253,17 @@ void JitEngine::optimize_module(llvm::Module& mod) {
         versioning.addPass(llvm::createModuleToFunctionPassAdaptor(GuestLoopVersioning()));
         versioning.run(mod, mam);
         lower_guest_memory(mod);
+        // The proven copies cleaned up, their saturating sums speculated
+        // (guest_speculation.h), and the copies that asked for it
+        // vectorized: only those, whatever the opt level.
+        llvm::ModulePassManager spec;
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg,loop-simplify,lcssa)"));
+        spec.addPass(llvm::createModuleToFunctionPassAdaptor(SatReductionSpeculation()));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(adce,instcombine,loop-simplify,lcssa)"));
+        spec.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::LoopVectorizePass(
+            llvm::LoopVectorizeOptions().setVectorizeOnlyWhenForced(true).setInterleaveOnlyWhenForced(true))));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg)"));
+        spec.run(mod, mam);
         mam.clear();
         fam.clear();
     }
