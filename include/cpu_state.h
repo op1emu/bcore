@@ -76,6 +76,9 @@ struct CpuState {
     // The CEC's interrupt-may-be-pending flag; set by Core likewise, read by
     // generated code before it calls cec_check_pending.
     const bool* cec_pending;
+    // The host's wakeup-is-now flag (Core::set_idle_waits), or null: an IDLE
+    // runs on as a NOP while it or cec_pending is set. Set by Core likewise.
+    const uint8_t* idle_wake;
 
     // Chaining: a block that ends may run the next one itself instead of
     // returning to the host (Core::set_chaining). Core::run sets the table and
@@ -105,6 +108,11 @@ struct CpuState {
     // lb_guard): the block returns without running a packet, and Core::run
     // compiles it again, careful at every packet.
     uint8_t lb_guard_miss;
+    // Set by an IDLE (Core::set_idle_waits) that found no wakeup due now
+    // (idle_wake, cec_pending): the block ended after it, with pc past it,
+    // and returned. The core waits for a wakeup there: the host lets guest
+    // time pass to its next event before the next run. Core::run clears it.
+    uint8_t idle;
     // CYCLES (cycles[1]:cycles[0]) when this run started. With
     // Core::set_host_cycles a chained block that accesses CYCLES sets it to
     // cycles_base + chain_packets first, as a host that writes CYCLES before

@@ -84,6 +84,38 @@ static void test_budget(int opt) {
     require(c.run(0x100, 8) == 8 && c.cpu.dpregs[0] == 9 && c.cpu.pc == 0x100, "budget 8: four blocks");
 }
 
+// With set_idle_waits an IDLE ends its block and the run, with
+// CpuState::idle set and pc past it; without, or while the host's wake flag
+// is set, it does nothing.
+static void test_idle(int opt) {
+    {
+        Chained c(opt);
+        uint8_t wake = 1;
+        c.core.set_idle_waits(true, &wake);
+        c.code(0x100, {kIncR0, 0x0020, 0x2ffe});  // R0 += 1; IDLE; JUMP.S 0x100
+        require(c.run(0x100, 1000) >= 1000 && !c.cpu.idle, "a wakeup due now: IDLE is a NOP");
+        wake = 0;
+        c.cpu.dpregs[0] = 0;
+        require(c.run(0x100, 1000) == 2 && c.cpu.idle && c.cpu.dpregs[0] == 1, "none: the same code waits");
+    }
+    for (bool waits : {false, true}) {
+        Chained c(opt);
+        c.core.set_idle_waits(waits);
+        c.code(0x100, {kIncR0, 0x0020, 0x2ffe});  // R0 += 1; IDLE; JUMP.S 0x100
+        const uint32_t retired = c.run(0x100, 1000);
+        if (waits) {
+            require(retired == 2 && c.cpu.idle && c.cpu.pc == 0x104 && c.cpu.dpregs[0] == 1,
+                    "IDLE ends the run past it");
+            // The wakeup resumes past the IDLE: the jump back chains into
+            // the top, which runs up to the IDLE again.
+            require(c.run(0x104, 1000) == 3 && c.cpu.idle && c.cpu.pc == 0x104 && c.cpu.dpregs[0] == 2,
+                    "the wakeup runs on to the next IDLE");
+        } else {
+            require(retired >= 1000 && !c.cpu.idle, "IDLE is a NOP");
+        }
+    }
+}
+
 // Not counting chained blocks changes nothing else.
 static void test_uncounted(int opt) {
     Chained c(opt);
@@ -261,6 +293,7 @@ int main() {
         test_pending(opt);
         test_host_cycles(opt);
         test_dry(opt);
+        test_idle(opt);
     }
     printf("chain test passed\n");
     return 0;

@@ -69,6 +69,8 @@ public:
     // the guard (lb_guard_used): at entry, each bottom is the hint's or lies
     // outside the block.
     void set_careful(bool careful) { careful_ = careful; }
+    // IDLE ends the block with CpuState::idle set (Core::set_idle_waits).
+    void set_idle_waits(bool waits) { idle_waits_ = waits; }
     // Loop mode (BBTranslator's loop blocks): the visitor's cpu pointer is a
     // shadow copy of the guest state the block keeps in an alloca, and `real`
     // the CpuState the host and the helpers see. The shadow holds the fields
@@ -667,6 +669,7 @@ private:
     bool accesses_cycles_ = false;
     const CpuState* hint_ = nullptr;
     bool careful_ = false;
+    bool idle_waits_ = false;
     llvm::Value* real_cpu_ = nullptr;  // loop mode: the real CpuState (set_loop_mode)
     std::set<size_t> loop_fields_;
     unsigned l_zero_ = 0;

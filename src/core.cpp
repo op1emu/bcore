@@ -60,6 +60,7 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_count_chained(count_chained_);
     translator_->set_lazy_state(lazy_state_);
     translator_->set_loop_blocks(loop_blocks_);
+    translator_->set_idle_waits(idle_waits_);
     applyModuleTarget();
 
     return true;
@@ -228,10 +229,12 @@ bool Core::run(uint32_t pc) {
     // (cpu_state_init) between runs of blocks that are already compiled.
     cpu_->page_table = page_table_;
     cpu_->cec_pending = &bcore_cec_pending;
+    cpu_->idle_wake = idle_wake_;
     cpu_->chain_table = jit_->chainTable();
     cpu_->chain_packets = 0;
     cpu_->chain_blocks = 0;
     cpu_->chain_would = 0;
+    cpu_->idle = 0;
     cpu_->cycles_base = uint64_t(cpu_->cycles[1]) << 32 | cpu_->cycles[0];
     cpu_->did_jump = false;
     cpu_->pc = pc;
@@ -353,6 +356,12 @@ void Core::set_lazy_state(bool lazy) {
 void Core::set_loop_blocks(bool loop) {
     loop_blocks_ = loop;
     if (translator_) translator_->set_loop_blocks(loop_blocks_);
+}
+
+void Core::set_idle_waits(bool waits, const uint8_t* wake) {
+    idle_waits_ = waits;
+    idle_wake_ = wake;
+    if (translator_) translator_->set_idle_waits(idle_waits_);
 }
 
 void Core::set_dump_ir(bool enable) {

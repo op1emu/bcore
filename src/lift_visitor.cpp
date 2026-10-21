@@ -2478,8 +2478,47 @@ bool LiftVisitor::decode_ProgCtrl_RTE() {
 bool LiftVisitor::decode_ProgCtrl_IDLE() {
     if (parallel_slot_ > 0) return false;
 
-    // In single-threaded user-mode emulation, IDLE has no wake-up sources;
-    // treat as a sync NOP (matches CSYNC/SSYNC handling).
+    // Without a host to wait for (bcore's own emu), IDLE has no wake-up
+    // sources: a sync NOP, like CSYNC/SSYNC. With one (set_idle_waits), the
+    // block ends after it and says so: the core waits for a wakeup at the
+    // next packet, which the host then lets guest time reach. Where a loop
+    // may end at the IDLE the next PC would be the hardware loop's: a NOP
+    // there too -- and in a careful compilation, which knows no loop bottom
+    // to be absent, so a block recompiled careful spins where it waited.
+    if (!idle_waits_ || !lb_absent(current_pc)) return true;
+    // A wakeup due now (CpuState::idle_wake, cec_pending): a NOP too.
+    auto& ctx = builder_.getContext();
+    auto* i8 = builder_.getInt8Ty();
+    Value* wake = builder_.CreateLoad(i8, entry_load_ptr(offsetof(CpuState, cec_pending), cec_pending_value_,
+                                                         "cec_pending_flag"), "cec_pending");
+    auto* wake_ptr = builder_.CreateLoad(builder_.getInt8PtrTy(), cpu_field_ptr(offsetof(CpuState, idle_wake),
+                                                                                 builder_.getInt8PtrTy()), "idle_wake_ptr");
+    auto* fn = builder_.GetInsertBlock()->getParent();
+    auto* has_flag = BasicBlock::Create(ctx, "idle_wake_flag", fn);
+    auto* decide = BasicBlock::Create(ctx, "idle_decide", fn);
+    auto* from = builder_.GetInsertBlock();
+    builder_.CreateCondBr(builder_.CreateIsNotNull(wake_ptr), has_flag, decide);
+    builder_.SetInsertPoint(has_flag);
+    auto* flag = builder_.CreateLoad(i8, wake_ptr, "idle_wake");
+    builder_.CreateBr(decide);
+    builder_.SetInsertPoint(decide);
+    auto* wake_flag = builder_.CreatePHI(i8, 2);
+    wake_flag->addIncoming(builder_.getInt8(0), from);
+    wake_flag->addIncoming(flag, has_flag);
+    wake = builder_.CreateOr(wake, wake_flag);
+    carry_reg_cache(from, decide);
+    auto* wait = BasicBlock::Create(ctx, "idle_wait", fn);
+    auto* nop = BasicBlock::Create(ctx, "idle_now", fn);
+    builder_.CreateCondBr(builder_.CreateICmpEQ(wake, builder_.getInt8(0)), wait, nop);
+    builder_.SetInsertPoint(wait);
+    carry_reg_cache(decide, wait);  // for the epilog this exit runs (finalize_pending_exits)
+    builder_.CreateStore(builder_.getInt8(1), cpu_field_ptr(offsetof(CpuState, idle), i8));
+    emit_stop_chaining();
+    emit_jump_imm(current_pc + 2, "idle");
+    pending_exits_.push_back({wait});
+    terminated_ = false;  // the wakeup that is now runs on
+    builder_.SetInsertPoint(nop);
+    carry_reg_cache(decide, nop);
     return true;
 }
 bool LiftVisitor::decode_ProgCtrl_CLI(uint16_t d) {

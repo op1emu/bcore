@@ -62,7 +62,7 @@ struct BcoreCompileMetrics {
     // Where decoding ended the block: the kind of its terminating
     // instruction ("jump", "call", "return", "return-from-event",
     // "jump-indirect", "call-indirect", "loop-setup", "raise", "exception",
-    // "halt", "illegal", "unimplemented"), or "packet-cap" when it reached
+    // "halt", "idle", "illegal", "unimplemented"), or "packet-cap" when it reached
     // the 256-packet block limit, or "step-budget" when it reached a
     // limited-mode budget of at most 256 packets. A static string; never
     // null.

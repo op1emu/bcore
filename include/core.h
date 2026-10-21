@@ -63,6 +63,13 @@ public:
     // each helper call and exit (BBTranslator::set_loop_blocks; on by
     // default). Either way every reader sees the same values.
     void set_loop_blocks(bool loop);
+    // Blocks compiled from now on end at an IDLE and return to the host with
+    // CpuState::idle set, so it can let guest time pass until a wakeup (off
+    // by default: IDLE does nothing, as for a host with nothing to wait for).
+    // While *wake (if given) or an interrupt may be pending, the wakeup is now
+    // and an IDLE does nothing either: the host sets it where a wakeup source
+    // is already asserted.
+    void set_idle_waits(bool waits, const uint8_t* wake = nullptr);
     // Passes (PassBuilder text) run on every block after the default IR
     // pipeline, from the next compilation on; empty for none. The default is
     // kDefaultPostPipeline. False, and unchanged, if it does not parse or init
@@ -132,5 +139,7 @@ private:
     bool count_chained_ = true;
     bool lazy_state_ = true;
     bool loop_blocks_ = true;
+    bool idle_waits_ = false;
+    const uint8_t* idle_wake_ = nullptr;
     std::string post_pipeline_ = kDefaultPostPipeline;
 };

@@ -45,6 +45,8 @@ public:
     // to the real CpuState before each helper call and each exit, and back
     // after each call that may have changed it. Exact either way.
     void set_loop_blocks(bool loop) { loop_blocks_ = loop; }
+    // An IDLE ends its block (Core::set_idle_waits).
+    void set_idle_waits(bool waits) { idle_waits_ = waits; }
     // The declaration a loop block's exits call where they copy the shadow
     // out (replaced by the copies, as LiftVisitor::kSyncOut is).
     static constexpr const char* kCommit = "bcore.loop.commit";
@@ -111,6 +113,7 @@ private:
     bool chain_dry_ = false;
     std::function<bool(uint32_t)> chain_filter_;
     bool loop_blocks_ = false;
+    bool idle_waits_ = false;
     bool host_cycles_ = false;
     bool count_chained_ = true;
     bool lazy_state_ = true;
