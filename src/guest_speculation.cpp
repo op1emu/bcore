@@ -470,7 +470,11 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
                                            ConstantAsMetadata::get(ConstantInt::getTrue(ctx))});
         MDNode* interleave = MDNode::get(ctx, {MDString::get(ctx, "llvm.loop.interleave.count"),
                                                ConstantAsMetadata::get(at_latch.getInt32(1))});
-        MDNode* id = MDNode::getDistinct(ctx, {nullptr, enable, interleave});
+        // Not unrolled after: m is the loop's count (63 for the firmware's
+        // FIR filler), a few vector iterations, and the runtime unroll's
+        // remainder loop cost more than it saved (3% of the FIR benchmark).
+        MDNode* nounroll = MDNode::get(ctx, {MDString::get(ctx, "llvm.loop.unroll.disable")});
+        MDNode* id = MDNode::getDistinct(ctx, {nullptr, enable, interleave, nounroll});
         id->replaceOperandWith(0, id);
         br->setMetadata(LLVMContext::MD_loop, id);
     }
