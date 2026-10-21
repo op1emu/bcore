@@ -52,6 +52,7 @@ add_library(bfin-core STATIC
     src/jit_engine.cpp
     src/bb_translator.cpp
     src/packet_state.cpp
+    src/guest_memory.cpp
     src/syscall_emu.cpp
     src/cec.cpp
     src/evt.cpp

@@ -1,4 +1,5 @@
 #include "jit_engine.h"
+#include "guest_memory.h"
 
 #include <cstdio>
 #include <atomic>
@@ -237,6 +238,22 @@ void JitEngine::optimize_module(llvm::Module& mod) {
     pb_->registerLoopAnalyses(lam);
     pb_->crossRegisterProxies(lam, fam, cgam, mam);
 
+    // A loop block's guest memory (guest_memory.h): its loops in canonical
+    // form and its shadow in SSA values first, so that SCEV sees the
+    // registers as inductions, then proven copies, then the rest as plain
+    // accesses. The default pipeline then cleans up after both.
+    if (has_guest_memory(mod)) {
+        llvm::ModulePassManager pre;
+        llvm::cantFail(pb_->parsePassPipeline(
+            pre, "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
+        pre.run(mod, mam);
+        llvm::ModulePassManager versioning;
+        versioning.addPass(llvm::createModuleToFunctionPassAdaptor(GuestLoopVersioning()));
+        versioning.run(mod, mam);
+        lower_guest_memory(mod);
+        mam.clear();
+        fam.clear();
+    }
     // Rebuild per-module pipeline each call (analysis managers are fresh).
     // passBuilder itself is reused across calls (avoids plugin registration overhead).
     llvm::ModulePassManager mpm = pb_->buildPerModuleDefaultPipeline(lvl);

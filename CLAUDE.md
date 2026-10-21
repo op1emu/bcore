@@ -49,6 +49,7 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/code_arena.h/cpp`: `CodeArena` (one reservation: hot code, cold parts split off by the machine function splitter, data), `CodeArenaPool` (a JitEngine's arenas: an object goes whole into one with room, else a new one, else its own `SectionMemoryManager`, so a full arena never stops the process) and the per-object `ArenaMemoryManager` that JitEngine's `RTDyldObjectLinkingLayer` uses
 - `src/bb_translator.h/cpp`: Basic-block translator — decodes instructions until terminator, produces one LLVM function per BB
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)
+- `src/guest_memory.h/cpp`: a loop block's guest memory said abstractly (`bcore.guest.ptr`, `bcore.guest.aligned`), `GuestLoopVersioning` (SCEV ranges proven at loop entry, a copy with direct RAM access) and `lower_guest_memory`
 - `tools/emu.cpp`: ELF loader, JIT execution loop, hardware loop support, CLI options (`--trace`, `--dump`, `--max-steps`, `--count-packets`, `--chain`, `--opt-level`)
 
 ## Common Development Tasks

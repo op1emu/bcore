@@ -303,7 +303,7 @@ int main() {
     test_l_zero();
     std::mt19937 rng(7);
     unsigned cases = 0, raised = 0, long_runs = 0;
-    uint64_t loop_blocks = 0;
+    uint64_t loop_blocks = 0, proven = 0;
     for (int program_no = 0; program_no < 48; ++program_no) {
         Program p;
         p.hardware = program_no % 2 == 0;
@@ -389,15 +389,16 @@ int main() {
                         return 1;
                     }
                     loop_blocks += got.stats.loop_blocks;
+                    proven += got.stats.loops_proven;
                     ++cases;
                 }
     }
     require(raised > 0, "no program raised an exception or an interrupt");
 #if BCORE_ENABLE_PROFILE
-    require(loop_blocks > 0, "no MAC loop became a loop block");
+    require(loop_blocks > 0 && proven > 0, "no MAC loop became a loop block with its memory proven");
 #endif
     require(long_runs > 0, "no chained run looped");
-    printf("loop block test passed (%u cases, %u raised, %u long runs; MAC loops: %llu loop blocks)\n",
-           cases, raised, long_runs, (unsigned long long)loop_blocks);
+    printf("loop block test passed (%u cases, %u raised, %u long runs; MAC loops: %llu loop blocks, %llu proven)\n",
+           cases, raised, long_runs, (unsigned long long)loop_blocks, (unsigned long long)proven);
     return 0;
 }
