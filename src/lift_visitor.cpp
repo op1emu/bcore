@@ -1,6 +1,7 @@
 #include "lift_visitor.h"
 #include "cec.h"
 #include "mem.h"
+#include "guest_memory.h"
 
 #include <cstdio>
 #include <cstddef>
@@ -1449,8 +1450,11 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     auto* function = builder_.GetInsertBlock()->getParent();
     auto* fault = llvm::BasicBlock::Create(builder_.getContext(), "data_misaligned", function);
     auto* aligned = llvm::BasicBlock::Create(builder_.getContext(), "data_aligned", function);
-    auto* bad = builder_.CreateICmpNE(
-        builder_.CreateAnd(addr, builder_.getInt32(width - 1)), builder_.getInt32(0));
+    // A loop block says it abstractly (guest_memory.h), for its loops' entry
+    // to prove once.
+    Value* bad = real_cpu_ ? builder_.CreateNot(guest_aligned(builder_, *module_, addr, width))
+                           : builder_.CreateICmpNE(builder_.CreateAnd(addr, builder_.getInt32(width - 1)),
+                                                   builder_.getInt32(0));
     auto* from = builder_.GetInsertBlock();
     builder_.CreateCondBr(bad, fault, aligned, weights_rarely(builder_.getContext()));
     builder_.SetInsertPoint(fault);
@@ -1488,6 +1492,23 @@ llvm::Value* LiftVisitor::emit_page_lookup(llvm::Value* addr) {
                                       builder_.getInt64Ty(), "page_index");
     auto* slot = builder_.CreateGEP(ptr_ty, page_table_value_, index, "page_slot");
     return builder_.CreateLoad(ptr_ty, slot, "page");
+}
+
+// The page of an access through the page table, null where it calls the
+// host; ptr, where it is not left null, the access's host address on the
+// fast path. A loop block asks bcore.guest.ptr for both (guest_memory.h),
+// which its loops' entry may prove at once for every iteration.
+llvm::Value* LiftVisitor::emit_page_ptr(llvm::Value* addr, llvm::Value*& ptr) {
+    entry_load_ptr(offsetof(CpuState, page_table), page_table_value_, "page_table");
+    if (!real_cpu_) return emit_page_lookup(addr);
+    ptr = guest_ptr(builder_, *module_, page_table_value_, addr);
+    return ptr;
+}
+
+llvm::Value* LiftVisitor::page_offset_ptr(llvm::Value* page, llvm::Value* addr) {
+    auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
+                                       builder_.getInt64Ty(), "page_offset");
+    return builder_.CreateGEP(builder_.getInt8Ty(), page, offset);
 }
 
 llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm::Value* addr) {
@@ -1552,15 +1573,14 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* bb_fast = llvm::BasicBlock::Create(ctx, "page_fast", fn_);
         auto* bb_slow = llvm::BasicBlock::Create(ctx, "page_slow", fn_);
         auto* bb_done = llvm::BasicBlock::Create(ctx, "page_done", fn_);
-        auto* page = emit_page_lookup(addr);
+        Value* ptr = nullptr;
+        auto* page = emit_page_ptr(addr, ptr);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
                               weights_usually(ctx));
 
         builder_.SetInsertPoint(bb_fast);
-        auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
-                                           builder_.getInt64Ty(), "page_offset");
-        auto* ptr = builder_.CreateGEP(builder_.getInt8Ty(), page, offset);
+        if (!ptr) ptr = page_offset_ptr(page, addr);
         auto* fast_result = builder_.CreateAlignedLoad(
             ret_ty, ptr, llvm::Align(ret_ty->getIntegerBitWidth() / 8), "page_val");
         auto* fast_bb = builder_.GetInsertBlock();
@@ -1647,15 +1667,14 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* bb_fast = llvm::BasicBlock::Create(ctx, "page_wr_fast", fn_);
         auto* bb_slow = llvm::BasicBlock::Create(ctx, "page_wr_slow", fn_);
         auto* bb_done = llvm::BasicBlock::Create(ctx, "page_wr_done", fn_);
-        auto* page = emit_page_lookup(addr);
+        Value* ptr = nullptr;
+        auto* page = emit_page_ptr(addr, ptr);
         auto* start = builder_.GetInsertBlock();
         builder_.CreateCondBr(builder_.CreateIsNotNull(page, "page_mapped"), bb_fast, bb_slow,
                               weights_usually(ctx));
 
         builder_.SetInsertPoint(bb_fast);
-        auto* offset = builder_.CreateZExt(builder_.CreateAnd(addr, Memory::kPageSize - 1),
-                                           builder_.getInt64Ty(), "page_offset");
-        auto* ptr = builder_.CreateGEP(builder_.getInt8Ty(), page, offset);
+        if (!ptr) ptr = page_offset_ptr(page, addr);
         builder_.CreateAlignedStore(val, ptr, llvm::Align(val->getType()->getIntegerBitWidth() / 8));
         builder_.CreateBr(bb_done);
 

@@ -676,6 +676,8 @@ private:
     std::vector<std::pair<uint32_t, uint32_t>> edges_to_;  // (packet PC, target)
     void emit_loop_sync(const char* name);
     llvm::Value* acc_slot(int n);
+    llvm::Value* emit_page_ptr(llvm::Value* addr, llvm::Value*& ptr);
+    llvm::Value* page_offset_ptr(llvm::Value* page, llvm::Value* addr);
     void store_acc_slot(int n, llvm::Value* acc, bool now = false);
     llvm::Value* pending_acc_[2] = {};  // a parallel packet's, stored at its end
     bool lb_guard_used_ = false;

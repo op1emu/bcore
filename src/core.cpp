@@ -1,4 +1,5 @@
 #include "core.h"
+#include "guest_memory.h"
 
 #include <sstream>
 
@@ -126,6 +127,8 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
         optimize_end = bcore_profile::monotonic_ns();
         if (want_ir) print(optimized_ir);
 #endif
+    } else {
+        lower_guest_memory(*result.module);  // optimize_module's, without the IR pipeline
     }
     if (dump_ir_) {
         llvm::errs() << "=== IR BB @ " << llvm::format_hex(pc, 10) << " ===\n";
@@ -151,8 +154,11 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
     const uint64_t materialize_begin = bcore_profile::monotonic_ns();
 #endif
 #if BCORE_ENABLE_PROFILE
-    for (auto& f : *result.module)
-        if (!f.isDeclaration() && f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) profile_->stats.loop_blocks++;
+    for (auto& f : *result.module) {
+        if (f.isDeclaration()) continue;
+        if (f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) profile_->stats.loop_blocks++;
+        profile_->stats.loops_proven += attribute_count(f, kLoopsProvenAttr);
+    }
 #endif
     BbFunc fn = nullptr;
     if (jit_->addModule(pc,

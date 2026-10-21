@@ -51,6 +51,7 @@ Native code  ◄──► extern "C" helpers (mem_read/write, CEC, hwloop)
 | `src/bb_translator.cpp` | Drives instruction-by-instruction decode until a terminator; one LLVM function per BB |
 | `src/jit_engine.cpp` | LLVM LLJIT wrapper; explicit `absoluteSymbols` registration; JIT cache with write-triggered invalidation |
 | `src/code_arena.cpp` | One mapping per JIT engine that every compiled object is placed in (`ArenaMemoryManager`): blocks packed next to each other, cold parts apart from the hot code |
+| `src/guest_memory.cpp` | Loop blocks' guest memory as abstract calls; `GuestLoopVersioning` proves a loop's accesses once at its entry (one mapped page each, aligned) and gives it a copy that accesses RAM directly |
 | `src/cec.cpp` | Core Event Controller (interrupts, exceptions, RTI/RTX/RTN/RTE, CLI/STI, supervisor mode) |
 | `src/evt.cpp` | Exception Vector Table device (EVT0–EVT15) |
 | `include/core.h` | Public facade: `Core::init()`, `run(pc)`, `invalidate()`, `disassemble()` |
