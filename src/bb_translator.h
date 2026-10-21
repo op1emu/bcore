@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -69,10 +70,11 @@ private:
     void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
     llvm::BasicBlock* emit_lb_guard(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu,
                                     llvm::BasicBlock* first_entry, uint32_t first_pc, uint32_t last_pc,
-                                    const uint32_t hint_lb[2]);
+                                    const uint32_t hint_lb[2], const uint32_t hint_lt[2], unsigned pinned);
     // direct: a block whose return stays a return.
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* mem,
-                         uint32_t entry_pc, llvm::BasicBlock* self_loop, llvm::BasicBlock* direct);
+                         uint32_t entry_pc, llvm::BasicBlock* self_loop, llvm::BasicBlock* direct,
+                         llvm::BasicBlock* first_entry, const std::set<llvm::ReturnInst*>* steady);
     static llvm::BasicBlock* lb_guard_miss_block(llvm::BasicBlock* guard);
 
     Memory* mem_;
