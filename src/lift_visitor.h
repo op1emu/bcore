@@ -72,7 +72,16 @@ public:
     bool lb_guard_used() const { return lb_guard_used_; }
     // Whether nothing in the block can have changed either loop bottom: a
     // native loop back to its start needs the guard again otherwise.
-    bool lb_steady() const { return lb_steady_[0] && lb_steady_[1]; }
+    bool lb_steady() const { return lb_steady_[0] && lb_steady_[1] && lt_steady_[0] && lt_steady_[1]; }
+    // The loops whose bottom and top the block relies on being the hint's at
+    // entry (bit i for loop i): a packet at such a bottom takes the back edge
+    // to a constant top. The guard then also requires LB[i] and LT[i] equal
+    // to the hint's.
+    unsigned lb_pinned() const { return lb_pinned_; }
+    // The returns of back edges to a pinned top taken while nothing in the
+    // block had yet changed a loop bottom or top: one to the block's start
+    // may skip the entry guard.
+    const std::set<llvm::ReturnInst*>& steady_back_edges() const { return steady_back_edges_; }
     // Whether a jump in the block has a constant target at this PC.
     bool jumps_to(uint32_t pc) const { return const_targets_.count(pc) != 0; }
     void set_fallthrough_pc(uint32_t pc) { fallthrough_pc_ = pc; }
@@ -623,6 +632,13 @@ private:
     bool careful_ = false;
     bool lb_guard_used_ = false;
     bool lb_steady_[2] = {true, true};
+    bool lt_steady_[2] = {true, true};
+    unsigned lb_pinned_ = 0;
+    std::set<llvm::ReturnInst*> steady_back_edges_;
+    // At insn_pc a loop the hint puts there ends, given the entry guard: the
+    // mask of the loops (bit i for loop i), each pinned; 0 where the block
+    // cannot rely on it.
+    unsigned pin_bottom(uint32_t insn_pc);
     // At insn_pc no loop can end, given the entry guard; notes that the block
     // relies on it.
     bool lb_absent(uint32_t insn_pc);
@@ -657,6 +673,7 @@ private:
     void emit_stop_chaining();
     void emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len);
     void emit_epilog_jumped(uint32_t insn_pc);
+    void emit_epilog_pinned(uint32_t insn_pc, uint32_t insn_len, unsigned pinned, bool check_cec);
     void emit_hwloop_count_down(llvm::Value* at0, llvm::Value* at1, llvm::Value* lc0, llvm::Value* lc1);
     void emit_cec_check(bool exit_in_check);
     uint32_t fallthrough_pc_ = 0;

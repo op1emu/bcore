@@ -169,8 +169,148 @@ static void test_fetch_during_careful(int opt) {
     require(cpu.chain_packets + cpu.packets == 5 && cpu.pc == kElsewhere, "then the careful block ran");
 }
 
+// A block compiled while loop 0 runs from its start to its packet `bottom`
+// takes the back edge to that top as a constant (the guard pins LB0 and
+// LT0). Run with another loop 0 -- its top or its bottom moved, or no loop
+// -- it must miss and behave as a block compiled for that loop does.
+struct PinOutcome { uint32_t pc, r0, lc0, packets, chain_packets; uint64_t misses; };
+
+static PinOutcome run_pinned(int opt, bool chained, bool compile_running, uint32_t lt, uint32_t lb, uint32_t lc) {
+    CpuState cpu{};
+    FlatMemory mem(0, 0x1000, &cpu);
+    for (int i = 0; i < kAdds; ++i) mem.write16(kPc + 2 * i, 0x6408);
+    mem.write16(kPc + 2 * kAdds, 0x2000);
+    Core core(&cpu, &mem);
+    core.set_chaining(chained, false);
+    require(core.init(opt), "init");
+    cec_init(); evt_init();
+    // Compiled for loop 0 from kPc to its fourth packet, running (or for
+    // the loop the run has, which then needs no guard to miss).
+    cpu.lt[0] = compile_running ? kPc : lt;
+    cpu.lb[0] = compile_running ? kPc + 6 : lb;
+    cpu.lc[0] = compile_running ? 9 : lc;
+    cpu.lb[1] = kElsewhere;
+    cpu.chain_budget = 0;
+    require(core.run(kPc), "compile");
+
+    cpu = {};
+    cpu.lt[0] = lt; cpu.lb[0] = lb; cpu.lc[0] = lc;
+    cpu.lb[1] = kElsewhere;
+    PinOutcome out{};
+    for (int runs = 0; runs < 64 && cpu.pc != kPc + 2 * kAdds; ++runs) {
+        cpu.chain_budget = chained ? 1000 : 0;
+        require(core.run(runs ? cpu.pc : kPc), "run");
+        out.packets += cpu.packets;
+        out.chain_packets += cpu.chain_packets;
+        cpu.did_jump = false;
+    }
+    out.pc = cpu.pc;
+    out.r0 = cpu.dpregs[0];
+    out.lc0 = cpu.lc[0];
+    out.misses = core.stats().lb_guard_misses;
+    return out;
+}
+
+static unsigned test_pinned() {
+    unsigned cases = 0;
+    const uint32_t bottom = kPc + 6;
+    struct Loop { uint32_t lt, lb, lc; bool same; };
+    for (int opt : {0, 1, 2})
+        for (bool chained : {false, true})
+            for (Loop loop : {Loop{kPc, bottom, 3, true}, Loop{kPc, bottom, 1, true}, Loop{kPc, bottom, 0, true},
+                              Loop{kPc + 2, bottom, 3, false}, Loop{kPc, bottom + 2, 3, false},
+                              Loop{kPc + 4, bottom, 2, false}, Loop{kElsewhere, kElsewhere, 0, false}}) {
+                const PinOutcome want = run_pinned(opt, chained, false, loop.lt, loop.lb, loop.lc);
+                const PinOutcome got = run_pinned(opt, chained, true, loop.lt, loop.lb, loop.lc);
+                if (got.pc != want.pc || got.r0 != want.r0 || got.lc0 != want.lc0 || got.packets != want.packets ||
+                    got.chain_packets != want.chain_packets) {
+                    fprintf(stderr, "FAIL: -O%d%s pinned loop lt %x lb %x lc %u: pc %x r0 %u lc0 %u packets %u/%u, "
+                                    "expected pc %x r0 %u lc0 %u packets %u/%u\n",
+                            opt, chained ? " chained" : "", loop.lt, loop.lb, loop.lc, got.pc, got.r0, got.lc0,
+                            got.packets, got.chain_packets, want.pc, want.r0, want.lc0, want.packets,
+                            want.chain_packets);
+                    std::exit(1);
+                }
+#if BCORE_ENABLE_PROFILE
+                require(got.misses == (loop.same ? 0u : 1u), "a pinned loop missed other than when it moved");
+#endif
+                ++cases;
+            }
+    return cases;
+}
+
+// Both loops: a block compiled with loop 1 (or both, at one bottom)
+// running pins those, and must behave as one compiled for whatever loops it
+// then runs with.
+struct Loops { uint32_t lt[2], lb[2], lc[2]; };
+
+static PinOutcome run_loops(int opt, bool chained, const Loops& compiled, const Loops& running) {
+    CpuState cpu{};
+    FlatMemory mem(0, 0x1000, &cpu);
+    for (int i = 0; i < kAdds; ++i) mem.write16(kPc + 2 * i, 0x6408);
+    mem.write16(kPc + 2 * kAdds, 0x2000);
+    Core core(&cpu, &mem);
+    core.set_chaining(chained, false);
+    require(core.init(opt), "init");
+    cec_init(); evt_init();
+    auto set = [&](const Loops& l) {
+        for (int i = 0; i < 2; ++i) { cpu.lt[i] = l.lt[i]; cpu.lb[i] = l.lb[i]; cpu.lc[i] = l.lc[i]; }
+    };
+    set(compiled);
+    cpu.chain_budget = 0;
+    require(core.run(kPc), "compile");
+    cpu = {};
+    set(running);
+    PinOutcome out{};
+    for (int runs = 0; runs < 128 && cpu.pc != kPc + 2 * kAdds; ++runs) {
+        cpu.chain_budget = chained ? 1000 : 0;
+        require(core.run(runs ? cpu.pc : kPc), "run");
+        out.packets += cpu.packets;
+        out.chain_packets += cpu.chain_packets;
+        cpu.did_jump = false;
+    }
+    out.pc = cpu.pc;
+    out.r0 = cpu.dpregs[0];
+    out.lc0 = cpu.lc[0] | cpu.lc[1] << 16;
+    out.misses = core.stats().lb_guard_misses;
+    return out;
+}
+
+static unsigned test_pinned_both() {
+    unsigned cases = 0;
+    const uint32_t b = kPc + 6, e = kElsewhere;
+    const Loops shapes[] = {
+        {{e, kPc + 2}, {e, b}, {0, 3}},            // loop 1 alone
+        {{kPc, kPc + 2}, {b, b}, {4, 3}},          // both at one bottom
+        {{kPc, kPc + 2}, {b, b}, {5, 1}},          // both, loop 1 on its last pass
+        {{kPc, kPc + 2}, {b, b}, {3, 0}},          // both, loop 1 idle
+        {{kPc + 2, kPc}, {b, b + 2}, {2, 6}},      // loop 1 ends a packet later
+        {{e, e}, {e, e}, {0, 0}},                  // none
+    };
+    for (int opt : {0, 1, 2})
+        for (bool chained : {false, true})
+            for (const Loops& compiled : shapes)
+                for (const Loops& running : shapes) {
+                    const PinOutcome want = run_loops(opt, chained, running, running);
+                    const PinOutcome got = run_loops(opt, chained, compiled, running);
+                    if (got.pc != want.pc || got.r0 != want.r0 || got.lc0 != want.lc0 || got.packets != want.packets ||
+                        got.chain_packets != want.chain_packets) {
+                        fprintf(stderr, "FAIL: -O%d%s loops compiled lc %u,%u run lc %u,%u: r0 %u/%u lc %x/%x "
+                                        "packets %u/%u chain %u/%u\n",
+                                opt, chained ? " chained" : "", compiled.lc[0], compiled.lc[1], running.lc[0],
+                                running.lc[1], got.r0, want.r0, got.lc0, want.lc0, got.packets, want.packets,
+                                got.chain_packets, want.chain_packets);
+                        std::exit(1);
+                    }
+                    ++cases;
+                }
+    return cases;
+}
+
 int main() {
     unsigned cases = 0;
+    cases += test_pinned();
+    cases += test_pinned_both();
     for (int opt : {0, 1, 2, 3}) test_fetch_during_careful(opt);
     for (int opt : {0, 1, 2})
         for (bool chained : {false, true})

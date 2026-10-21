@@ -120,6 +120,8 @@ void LiftVisitor::carry_reg_cache(BasicBlock* from, BasicBlock* to) {
 void LiftVisitor::emit_cpu_store(size_t offset, Value* val) {
     if (offset == offsetof(CpuState, lb[0])) lb_steady_[0] = false;
     if (offset == offsetof(CpuState, lb[1])) lb_steady_[1] = false;
+    if (offset == offsetof(CpuState, lt[0])) lt_steady_[0] = false;
+    if (offset == offsetof(CpuState, lt[1])) lt_steady_[1] = false;
     auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
     builder_.CreateStore(val, ptr);
     if (!reg_cacheable(offset)) return;
@@ -147,6 +149,7 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
         if (!mem_keeps_regs_) {
             cache->clear();
             lb_steady_[0] = lb_steady_[1] = false;
+            lt_steady_[0] = lt_steady_[1] = false;
         }
         cache->erase(kDidJumpClear);
         return;
@@ -169,6 +172,21 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
     }
     cache->clear();
     lb_steady_[0] = lb_steady_[1] = false;
+    lt_steady_[0] = lt_steady_[1] = false;
+}
+
+unsigned LiftVisitor::pin_bottom(uint32_t insn_pc) {
+    if (careful_ || !hint_ || !lb_steady()) return 0;
+    unsigned mask = 0;
+    // A loop that ends here and runs now (its count says so; a hint with an
+    // idle loop, whose top may be anything, keeps the compares).
+    for (int i = 0; i < 2; ++i)
+        if (hint_->lb[i] == insn_pc && hint_->lc[i] != 0) mask |= 1u << i;
+    // Both loops end here but one does not run: the compares decide.
+    if (!mask || ((hint_->lb[0] == insn_pc) + (hint_->lb[1] == insn_pc)) != __builtin_popcount(mask)) return 0;
+    lb_guard_used_ = true;
+    lb_pinned_ |= mask;
+    return mask;
 }
 
 bool LiftVisitor::lb_absent(uint32_t insn_pc) {
@@ -558,6 +576,10 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     check_cec_pending_ = false;
     const uint32_t next_pc = insn_pc + insn_len;
 
+    if (unsigned pinned = pin_bottom(insn_pc)) {
+        emit_epilog_pinned(insn_pc, insn_len, pinned, check_cec);
+        return;
+    }
     auto* lb0 = load_cpu_u32(offsetof(CpuState, lb[0]), "lb0");
     auto* lb1 = load_cpu_u32(offsetof(CpuState, lb[1]), "lb1");
     if (!hint_ || (hint_->lb[0] != insn_pc && hint_->lb[1] != insn_pc)) {
@@ -618,6 +640,56 @@ void LiftVisitor::emit_epilog_clear(uint32_t insn_pc, uint32_t insn_len) {
     builder_.CreateBr(bb_done);
 
     // Both ways did_jump is clear; only the step may have changed a counter.
+    builder_.SetInsertPoint(bb_done);
+    carry_reg_cache(start, bb_done);
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[0]));
+    reg_cache_[bb_done].erase(offsetof(CpuState, lc[1]));
+}
+
+// emit_epilog_clear at a bottom the entry guard pins (pin_bottom): the
+// loops in `pinned` end here and have the hint's tops, the other loop's
+// bottom is elsewhere. The step is then the branches it decides: loop 1 goes
+// on to its top while LC1 > 1, else loop 0 to its while LC0 > 1, else on to
+// the next instruction, counting down as bfin_hwloop_step's phase B does.
+// Each back edge stores a constant PC, so the chain exit can branch straight
+// to a top that is the block's start.
+void LiftVisitor::emit_epilog_pinned(uint32_t insn_pc, uint32_t insn_len, unsigned pinned, bool check_cec) {
+    auto& ctx = builder_.getContext();
+    auto* fn = builder_.GetInsertBlock()->getParent();
+    auto* i32 = builder_.getInt32Ty();
+    auto* one = builder_.getInt32(1);
+    auto* zero = builder_.getInt32(0);
+    const uint32_t next_pc = insn_pc + insn_len;
+    auto field = [&](size_t offset) { return cpu_field_ptr(offset, i32); };
+    auto* start = builder_.GetInsertBlock();
+    auto* bb_done = BasicBlock::Create(ctx, "hwloop_done", fn);
+    // Loop 1 first: it wins over loop 0, and while it goes on loop 0 is left.
+    for (int i = 1; i >= 0; --i) {
+        if (!(pinned & (1u << i))) continue;
+        auto* lc = builder_.CreateLoad(i32, field(offsetof(CpuState, lc[0]) + 4 * i), i ? "lc1" : "lc0");
+        auto* bb_back = BasicBlock::Create(ctx, "hwloop_back", fn);
+        auto* bb_end = BasicBlock::Create(ctx, "hwloop_end", fn);
+        builder_.CreateCondBr(builder_.CreateICmpUGT(lc, one), bb_back, bb_end, weights_loop(ctx));
+
+        builder_.SetInsertPoint(bb_back);
+        builder_.CreateStore(builder_.CreateSub(lc, one), field(offsetof(CpuState, lc[0]) + 4 * i));
+        builder_.CreateStore(builder_.getInt32(hint_->lt[i]), field(offsetof(CpuState, pc)));
+        emit_set_did_jump();
+        if (check_cec) emit_cec_check(false);
+        auto* ret = builder_.CreateRetVoid();
+        if (lb_steady()) steady_back_edges_.insert(ret);
+
+        // The loop ends (LC 1, or 0: a single pass), and its count reaches 0.
+        builder_.SetInsertPoint(bb_end);
+        builder_.CreateStore(zero, field(offsetof(CpuState, lc[0]) + 4 * i));
+    }
+    store_cpu_u32(offsetof(CpuState, pc), builder_.getInt32(next_pc));
+    if (check_cec) {
+        emit_cec_check(false);
+        emit_did_jump_exit(true);
+    }
+    builder_.CreateBr(bb_done);
+
     builder_.SetInsertPoint(bb_done);
     carry_reg_cache(start, bb_done);
     reg_cache_[bb_done].erase(offsetof(CpuState, lc[0]));
