@@ -590,3 +590,41 @@ happens outside the copy. LLVM 15 has no saturating RecurKind.
 Measured (boot to op1emu's main frame, workload and digests identical with
 and without loop blocks, and dry): host instructions in execution 57.8G ->
 19.8G; the firmware's FIR loop (0x01a5e27e) 1.73 s -> 0.12 s.
+
+## Loops that wait (SteadyLoopSkip)
+
+Firmware waits in loops that poll -- a device status register, a flag in
+RAM, a hardware loop that counts down a timeout -- and within a run nothing
+they read can change: the host's devices change between runs, no other code
+runs. An iteration is then the previous one plus its counters. The pass
+classifies a loop block's header PHIs by SCEV: affine with a nonzero step
+(the counters: chain_packets, packets, chain_blocks, LC0, a register the
+loop increments) or not (they must come back to their values, compared at
+the latch). Everything computed from a counter may only be stored to
+CpuState, decide an exit SCEV counts, flow back into a header PHI or leave
+through an LCSSA PHI. With that, a steady iteration means every later one up
+to the first counted exit is the same, and the latch selects each counter's
+value at that iteration (expanded in the preheader). Iteration N then runs
+as always and exits where it would have.
+- The run's budget was no exit SCEV could count for a loop of more than one
+  packet: `chain_packets + packets` had no nuw and the budget any i32. Range
+  metadata on the budget loads and a nuw add made them countable, which also
+  gave GuestLoopVersioning ~25% more proven loops.
+- Device reads go through callbacks: the host says which it cannot promise
+  would repeat (a FIFO pop, a time-derived count) by counting them in
+  CpuState::unstable_reads; the latch compares it with its value at the top
+  of the iteration. A host that does not count must not turn the pass on.
+- A sync before a callback copies the dirty shadow fields only: after a skip
+  a counter field is clean where the real state still holds its value from
+  before the skip. With the pass on, every copy out writes every field the
+  block stores anywhere.
+- Values also flow between iterations through CpuState itself: a field the
+  loop stores and loads back. Allowed only where the stored value is not
+  derived from a counter (did_jump, copied out before a callback that may
+  set it, then read).
+- A loop block whose accesses go inline (rawmem) has no bcore.guest calls,
+  so the loop-block pipeline (SROA first) never ran: the pass then found no
+  header PHIs at all. It runs its own SROA in that case.
+
+Measured on op1emu's synth phase (main frame to 10 s of guest time): device
+reads 52.2M -> 12.3M, every other workload counter and digest identical.

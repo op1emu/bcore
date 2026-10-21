@@ -1,5 +1,6 @@
 #include "core.h"
 #include "guest_memory.h"
+#include "steady_skip.h"
 
 #include <sstream>
 
@@ -39,6 +40,7 @@ bool Core::init(int opt_level, int codegen_level) {
     if (!jit_->init(opt_level_, codegen_level_) || !jit_->set_post_pipeline(post_pipeline_))
         return false;
     jit_->setChainFilter(chain_filter_);
+    jit_->set_steady_skip(steady_skip_);
     attachProfiler();
 
     // Use the Memory interface's is_fastmem() to determine mode.
@@ -61,6 +63,7 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_lazy_state(lazy_state_);
     translator_->set_loop_blocks(loop_blocks_);
     translator_->set_idle_waits(idle_waits_);
+    translator_->set_steady_skip(steady_skip_ != 0);
     applyModuleTarget();
 
     return true;
@@ -160,6 +163,7 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
         if (f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) profile_->stats.loop_blocks++;
         profile_->stats.loops_proven += attribute_count(f, kLoopsProvenAttr);
         profile_->stats.loops_speculated += attribute_count(f, kLoopsSpeculatedAttr);
+        profile_->stats.loops_steady += attribute_count(f, kLoopsSteadyAttr);
         // A vectorized loop: its latch says so (as does its scalar
         // remainder's) and does vector work.
         for (auto& block : f) {
@@ -281,6 +285,7 @@ void Core::invalidate() {
     if (!jit_->init(opt_level_, codegen_level_) || !jit_->set_post_pipeline(post_pipeline_))
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
+    jit_->set_steady_skip(steady_skip_);
     applyModuleTarget();
 #if BCORE_ENABLE_PROFILE
     // The old engine's objects are gone; drop their map entries before the
@@ -356,6 +361,12 @@ void Core::set_lazy_state(bool lazy) {
 void Core::set_loop_blocks(bool loop) {
     loop_blocks_ = loop;
     if (translator_) translator_->set_loop_blocks(loop_blocks_);
+}
+
+void Core::set_steady_skip(int mode) {
+    steady_skip_ = mode;
+    if (jit_) jit_->set_steady_skip(steady_skip_);
+    if (translator_) translator_->set_steady_skip(steady_skip_ != 0);
 }
 
 void Core::set_idle_waits(bool waits, const uint8_t* wake) {

@@ -54,6 +54,8 @@ public:
     // A pass pipeline (PassBuilder text) optimize_module runs after the
     // default one; empty for none. False, and unchanged, if it does not parse.
     bool set_post_pipeline(const std::string& pipeline);
+    // SteadyLoopSkip on loop blocks (steady_skip.h): 0 off, 1 dry, 2 on.
+    void set_steady_skip(int mode) { steady_skip_ = mode; }
     // The layout and triple LLJIT compiles for. A module carrying exactly these
     // passes addIRModule's check; any other non-default layout is an error.
     std::string dataLayout() const { return jit_->getDataLayout().getStringRepresentation(); }
@@ -113,4 +115,5 @@ private:
     std::unique_ptr<llvm::TargetMachine> pass_machine_;
     std::unique_ptr<llvm::PassBuilder> pb_;
     std::string post_pipeline_;
+    int steady_skip_ = 0;
 };

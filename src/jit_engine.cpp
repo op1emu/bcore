@@ -1,6 +1,7 @@
 #include "jit_engine.h"
 #include "guest_memory.h"
 #include "guest_speculation.h"
+#include "steady_skip.h"
 #include <llvm/Transforms/Vectorize/LoopVectorize.h>
 
 #include <cstdio>
@@ -244,7 +245,8 @@ void JitEngine::optimize_module(llvm::Module& mod) {
     // form and its shadow in SSA values first, so that SCEV sees the
     // registers as inductions, then proven copies, then the rest as plain
     // accesses. The default pipeline then cleans up after both.
-    if (has_guest_memory(mod)) {
+    const bool guest_memory = has_guest_memory(mod);  // lower_guest_memory takes the declarations
+    if (guest_memory) {
         llvm::ModulePassManager pre;
         llvm::cantFail(pb_->parsePassPipeline(
             pre, "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
@@ -264,6 +266,23 @@ void JitEngine::optimize_module(llvm::Module& mod) {
             llvm::LoopVectorizeOptions().setVectorizeOnlyWhenForced(true).setInterleaveOnlyWhenForced(true))));
         llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg)"));
         spec.run(mod, mam);
+        mam.clear();
+        fam.clear();
+    }
+    // Loops that wait skip to their last iteration (steady_skip.h): last, on
+    // the loops as the passes above left them (the speculative and proven
+    // copies count by their addresses, and stay out).
+    bool loop_blocks = false;
+    for (auto& f : mod) loop_blocks |= f.hasFnAttribute("bcore-loop-block");
+    if (steady_skip_ && loop_blocks) {
+        llvm::ModulePassManager steady;
+        // A loop block without guest memory had none of the above: its
+        // shadow in SSA values first.
+        llvm::cantFail(pb_->parsePassPipeline(steady, guest_memory
+            ? "function(loop-simplify,lcssa)"
+            : "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
+        steady.addPass(llvm::createModuleToFunctionPassAdaptor(SteadyLoopSkip(steady_skip_ == 1)));
+        steady.run(mod, mam);
         mam.clear();
         fam.clear();
     }

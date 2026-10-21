@@ -70,6 +70,13 @@ public:
     // and an IDLE does nothing either: the host sets it where a wakeup source
     // is already asserted.
     void set_idle_waits(bool waits, const uint8_t* wake = nullptr);
+    // Loop blocks compiled from now on skip from a steady iteration to their
+    // last (steady_skip.h): 0 off (the default), 1 dry (they count the
+    // iterations they would skip in CpuState::steady_iterations), 2 on. Only
+    // for a host whose memory callbacks count the reads they cannot promise
+    // would repeat in CpuState::unstable_reads: without that every read
+    // callback would be taken to repeat.
+    void set_steady_skip(int mode);
     // Passes (PassBuilder text) run on every block after the default IR
     // pipeline, from the next compilation on; empty for none. The default is
     // kDefaultPostPipeline. False, and unchanged, if it does not parse or init
@@ -140,6 +147,7 @@ private:
     bool lazy_state_ = true;
     bool loop_blocks_ = true;
     bool idle_waits_ = false;
+    int steady_skip_ = 0;
     const uint8_t* idle_wake_ = nullptr;
     std::string post_pipeline_ = kDefaultPostPipeline;
 };

@@ -47,6 +47,9 @@ public:
     void set_loop_blocks(bool loop) { loop_blocks_ = loop; }
     // An IDLE ends its block (Core::set_idle_waits).
     void set_idle_waits(bool waits) { idle_waits_ = waits; }
+    // Loop blocks may skip iterations (Core::set_steady_skip): their copies
+    // to the real state then write every field the block stores anywhere.
+    void set_steady_skip(bool steady) { steady_skip_ = steady; }
     // The declaration a loop block's exits call where they copy the shadow
     // out (replaced by the copies, as LiftVisitor::kSyncOut is).
     static constexpr const char* kCommit = "bcore.loop.commit";
@@ -94,7 +97,7 @@ private:
     };
     BBTranslateResult translate_as(uint32_t pc, const CpuState* hint, bool careful,
                                    const LoopPlan* loop, LoopPlan* plan);
-    static bool expand_loop_syncs(llvm::Function* fn, llvm::AllocaInst* shadow, llvm::Value* real);
+    static bool expand_loop_syncs(llvm::Function* fn, llvm::AllocaInst* shadow, llvm::Value* real, bool steady_skip);
     // direct: a block whose return stays a return.
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,
                          llvm::Value* mem,
@@ -114,6 +117,7 @@ private:
     std::function<bool(uint32_t)> chain_filter_;
     bool loop_blocks_ = false;
     bool idle_waits_ = false;
+    bool steady_skip_ = false;
     bool host_cycles_ = false;
     bool count_chained_ = true;
     bool lazy_state_ = true;

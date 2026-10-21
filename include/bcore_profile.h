@@ -159,6 +159,8 @@ struct BcoreStats {
     uint64_t loops_proven       = 0;
     uint64_t loops_speculated   = 0;
     uint64_t loops_vectorized   = 0;
+    // Loops given SteadyLoopSkip's test (Core::set_steady_skip).
+    uint64_t loops_steady       = 0;
     // Interrupts and exceptions dispatched per IVG level (0 = EMU, 1 = RST,
     // 2 = NMI, 3 = EVX, ... 15 = IVG15), counted where the CEC sets the
     // IPEND bit. Guest behavior, unlike the block counters above: with the
