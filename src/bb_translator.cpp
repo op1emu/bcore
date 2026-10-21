@@ -113,6 +113,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     if (loop) visitor.set_loop_mode(cpu_ptr, loop->fields, loop->l_zero);
     visitor.set_hint(hint);
     visitor.set_careful(careful);
+    visitor.set_idle_waits(idle_waits_);
     // What the entry guard compares the loop bottoms with: the hint's, as the
     // lifter saw them.
     const uint32_t hint_lb[2] = {hint ? hint->lb[0] : 0, hint ? hint->lb[1] : 0};
