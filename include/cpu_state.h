@@ -92,7 +92,7 @@ struct CpuState {
     // exception and halt, and when a RAISE (cec_raise) or an IMASK write
     // leaves an interrupt pending, and so may the host's memory callbacks
     // and other threads: anything after which the host has work returns to
-    // it.
+    // it. Below 2^31.
     uint32_t chain_budget;
     // Packets retired by the blocks that already ran in this run; the block
     // running counts its own in `packets`.
