@@ -199,6 +199,7 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
             cache->clear();
             lb_steady_[0] = lb_steady_[1] = false;
             lt_steady_[0] = lt_steady_[1] = false;
+            regs_kept_ = false;
         }
         cache->erase(kDidJumpClear);
         return;
@@ -222,6 +223,7 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
     cache->clear();
     lb_steady_[0] = lb_steady_[1] = false;
     lt_steady_[0] = lt_steady_[1] = false;
+    regs_kept_ = false;
 }
 
 unsigned LiftVisitor::pin_bottom(uint32_t insn_pc) {
@@ -292,8 +294,10 @@ Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
         auto* c2_ptr = cpu_field_ptr(offsetof(CpuState, cycles[1]), builder_.getInt32Ty());
         builder_.CreateStore(shadow_val, c2_ptr);
     }
-    // A loop block's linear DAG registers, as its entry guard requires.
-    if (real_cpu_ && offset >= offsetof(CpuState, lregs[0]) && offset <= offsetof(CpuState, lregs[3]) &&
+    // A loop block's linear DAG registers, as its entry guard requires, until
+    // a helper that may change registers has run: past that the block reads
+    // them (and its back edges pass the guard again, lb_steady being false).
+    if (real_cpu_ && regs_kept_ && offset >= offsetof(CpuState, lregs[0]) && offset <= offsetof(CpuState, lregs[3]) &&
         (l_zero_ >> ((offset - offsetof(CpuState, lregs[0])) / 4) & 1))
         return builder_.getInt32(0);
     auto* cache = reg_cacheable(offset) ? reg_cache_here() : nullptr;
