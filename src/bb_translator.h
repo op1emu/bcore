@@ -12,7 +12,7 @@
 #include <llvm/IR/Module.h>
 
 class Memory;
-class LiftVisitor;
+#include "lift_visitor.h"
 struct CpuState;
 
 struct BBTranslateResult {
@@ -55,6 +55,8 @@ public:
     static constexpr const char* kCommit = "bcore.loop.commit";
     // The function attribute a loop block carries.
     static constexpr const char* kLoopBlockAttr = "bcore-loop-block";
+    // A loop block's DAG registers taken to stay in their circular buffers.
+    static constexpr const char* kCircularAttr = "bcore-dag-circular";
     // Upper bound on packets per block (default and maximum 256). Limited
     // mode sets it to the step budget, since a run never executes more:
     // translating the rest of the block would only be compiled again from
@@ -89,11 +91,14 @@ private:
     llvm::BasicBlock* emit_lb_guard(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,
                                     const LiftVisitor& visitor, llvm::BasicBlock* first_entry, uint32_t first_pc, uint32_t last_pc,
                                     const uint32_t hint_lb[2], const uint32_t hint_lt[2], unsigned pinned,
-                                    unsigned l_zero);
+                                    unsigned l_zero, unsigned circular = 0,
+                                    const LiftVisitor::Circular* circ_use = nullptr);
     // What a loop block keeps in its shadow (LiftVisitor::set_loop_mode).
     struct LoopPlan {
         std::set<size_t> fields;
         unsigned l_zero = 0;
+        unsigned circular = 0;            // LiftVisitor::Circular: bit i, I[i]'s buffer
+        LiftVisitor::Circular circ_use;   // its steps, for the entry guard
     };
     BBTranslateResult translate_as(uint32_t pc, const CpuState* hint, bool careful,
                                    const LoopPlan* loop, LoopPlan* plan);

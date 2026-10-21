@@ -164,6 +164,7 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
         profile_->stats.loops_proven += attribute_count(f, kLoopsProvenAttr);
         profile_->stats.loops_speculated += attribute_count(f, kLoopsSpeculatedAttr);
         profile_->stats.loops_steady += attribute_count(f, kLoopsSteadyAttr);
+        profile_->stats.dag_circular += attribute_count(f, BBTranslator::kCircularAttr);
         // A vectorized loop: its latch says so (as does its scalar
         // remainder's) and does vector work.
         for (auto& block : f) {

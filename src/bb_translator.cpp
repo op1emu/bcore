@@ -111,7 +111,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     LiftVisitor visitor(builder, state, mem_ptr, mod.get(),
                         mem_, unlimited_,
                         fastmem_, fast_base_, mem_->rawmem_limit());
-    if (loop) visitor.set_loop_mode(cpu_ptr, loop->fields, loop->l_zero);
+    if (loop) visitor.set_loop_mode(cpu_ptr, loop->fields, loop->l_zero, loop->circular);
     visitor.set_hint(hint);
     visitor.set_careful(careful);
     visitor.set_idle_waits(idle_waits_);
@@ -170,9 +170,11 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     }
 
     const unsigned l_zero = loop ? loop->l_zero : 0;
-    BasicBlock* lb_guard = visitor.lb_guard_used() || l_zero
+    const unsigned circular = loop ? loop->circular : 0;
+    BasicBlock* lb_guard = visitor.lb_guard_used() || l_zero || circular
         ? emit_lb_guard(builder, fn, state, cpu_ptr, visitor, first_entry, pc, last_pc,
-                        visitor.lb_guard_used() ? hint_lb : nullptr, hint_lt, visitor.lb_pinned(), l_zero)
+                        visitor.lb_guard_used() ? hint_lb : nullptr, hint_lt, visitor.lb_pinned(), l_zero,
+                        circular, loop ? &loop->circ_use : nullptr)
         : nullptr;
     // Before the chain exit turns the returns into branches to it. A loop
     // block's packet state is in its shadow, which holds it in SSA values
@@ -214,6 +216,33 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
                 if (hint->lregs[i] == 0 && loop_fields->count(l) && !visitor.written_fields().count(l))
                     plan->l_zero |= 1u << i;
             }
+        // Circular DAG registers the block steps only by DAG updates, by
+        // steps no larger than their buffer, with base, length and the
+        // modifiers it uses unchanged: assumed to stay in their buffer, as
+        // the hint's are (LiftVisitor::Circular).
+        if (last && hint) {
+            const LiftVisitor::Circular& use = visitor.circular();
+            auto written = [&](size_t offset) { return visitor.written_fields().count(offset) != 0; };
+            for (int i = 0; i < 4; ++i) {
+                const uint32_t ireg = hint->iregs[i], base = hint->bregs[i], length = hint->lregs[i];
+                if (!length || !loop_fields->count(offsetof(CpuState, iregs[0]) + 4 * i)) continue;
+                if (length > base || uint64_t(base) + 2 * uint64_t(length) > (uint64_t(1) << 32) ||
+                    ireg - base >= length || use.max_step[i] > length || (use.other_writes >> i & 1) ||
+                    written(offsetof(CpuState, bregs[0]) + 4 * i) || written(offsetof(CpuState, lregs[0]) + 4 * i))
+                    continue;
+                bool steps = true;
+                for (int m = 0; m < 4; ++m) {
+                    if (!(use.mregs[i] >> m & 1)) continue;
+                    const int32_t step = int32_t(hint->mregs[m]);
+                    const uint64_t size = step < 0 ? uint64_t(-int64_t(step)) : uint64_t(step);
+                    steps = steps && size <= length && !written(offsetof(CpuState, mregs[0]) + 4 * m);
+                }
+                if (!steps) continue;
+                plan->circular |= 1u << i;
+                plan->circ_use.max_step[i] = use.max_step[i];
+                plan->circ_use.mregs[i] = use.mregs[i];
+            }
+        }
     }
     if (chaining_ && unlimited_)
         emit_chain_exit(builder, fn, state, cpu_ptr, mem_ptr, pc, self_loop ? loop_top : nullptr,
@@ -225,6 +254,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
             return {nullptr, std::move(ctx), visitor.fallthrough_pc(), "packet-cap"};
         }
         fn->addFnAttr(kLoopBlockAttr);
+        if (loop->circular) fn->addFnAttr(kCircularAttr, std::to_string(__builtin_popcount(loop->circular)));
     }
 
     // Verify the module
@@ -429,7 +459,8 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
 BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu, Value* real,
                                         const LiftVisitor& visitor, BasicBlock* first_entry,
                                         uint32_t first_pc, uint32_t last_pc, const uint32_t hint_lb[2],
-                                        const uint32_t hint_lt[2], unsigned pinned, unsigned l_zero) {
+                                        const uint32_t hint_lt[2], unsigned pinned, unsigned l_zero,
+                                        unsigned circular, const LiftVisitor::Circular* circ_use) {
     auto& ctx = fn->getContext();
     auto& entry = fn->getEntryBlock();
     auto* guard = BasicBlock::Create(ctx, "lb_guard", fn, first_entry);
@@ -445,6 +476,32 @@ BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu
             auto* l = b.CreateLoad(i32, field(b, real, offsetof(CpuState, lregs[0]) + 4 * i), "guard_l");
             ok = b.CreateAnd(ok, b.CreateICmpEQ(l, b.getInt32(0)));
         }
+    // A circular I[i] in its buffer, which it then stays in
+    // (LiftVisitor::Circular): L != 0, L <= B, B + 2L <= 2^32, I - B < L,
+    // and every step no larger than L.
+    auto* i64 = b.getInt64Ty();
+    for (int i = 0; i < 4; ++i) {
+        if (!(circular >> i & 1)) continue;
+        auto value = [&](size_t offset, const char* name) {
+            return b.CreateLoad(i32, field(b, visitor.shadowed(offset) ? cpu : real, offset), name);
+        };
+        auto* ireg = value(offsetof(CpuState, iregs[0]) + 4 * i, "guard_i");
+        auto* base = value(offsetof(CpuState, bregs[0]) + 4 * i, "guard_b");
+        auto* length = value(offsetof(CpuState, lregs[0]) + 4 * i, "guard_l");
+        ok = b.CreateAnd(ok, b.CreateICmpNE(length, b.getInt32(0)));
+        ok = b.CreateAnd(ok, b.CreateICmpULE(length, base));
+        auto* end = b.CreateAdd(b.CreateZExt(base, i64), b.CreateShl(b.CreateZExt(length, i64), 1));
+        ok = b.CreateAnd(ok, b.CreateICmpULE(end, b.getInt64(uint64_t(1) << 32)));
+        ok = b.CreateAnd(ok, b.CreateICmpULT(b.CreateSub(ireg, base), length));
+        ok = b.CreateAnd(ok, b.CreateICmpULE(b.getInt32(circ_use->max_step[i]), length));
+        for (int m = 0; m < 4; ++m) {
+            if (!(circ_use->mregs[i] >> m & 1)) continue;
+            auto* step = value(offsetof(CpuState, mregs[0]) + 4 * m, "guard_m");
+            auto* size = b.CreateSelect(b.CreateICmpSLT(step, b.getInt32(0)), b.CreateNeg(step), step);
+            // |INT32_MIN| is 2^31 as unsigned, larger than any L <= B allows.
+            ok = b.CreateAnd(ok, b.CreateICmpULE(size, length));
+        }
+    }
     for (int i = 0; hint_lb && i < 2; ++i) {
         auto loop_field = [&](size_t offset) { return field(b, visitor.shadowed(offset) ? cpu : real, offset); };
         auto* lb = b.CreateLoad(i32, loop_field(offsetof(CpuState, lb[0]) + 4 * i), "guard_lb");

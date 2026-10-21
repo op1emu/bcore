@@ -144,6 +144,8 @@ struct Program {
     uint32_t lc;             // P5, LC0 for the hardware loop
     std::vector<uint32_t> ram;  // at kRam, if not the default
     uint32_t a0x = 0, a0w = 0;  // A0 at entry
+    // I1's circular buffer and step at entry (LiftVisitor::Circular).
+    uint32_t i1 = kRing, b1 = kRing, l1 = 0x14, m1 = 4;
 };
 
 // The program at kCode:
@@ -231,7 +233,7 @@ static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, boo
     cpu.dpregs[12] = kRam + 0x100;    // P4
     cpu.dpregs[13] = p.lc;            // P5
     cpu.iregs[0] = kRam;              // I0, linear
-    cpu.iregs[1] = kRing; cpu.bregs[1] = kRing; cpu.lregs[1] = 0x14; cpu.mregs[1] = 4;  // I1 circular
+    cpu.iregs[1] = p.i1; cpu.bregs[1] = p.b1; cpu.lregs[1] = p.l1; cpu.mregs[1] = p.m1;  // I1 circular
     cpu.iregs[2] = kRam + 0x80;       // I2, linear
     cpu.iregs[3] = kRam + 0x180;      // I3, linear
     cpu.dpregs[1] = 0x7fff;
@@ -363,7 +365,7 @@ int main() {
     printf("clobbering callback cases passed (%u)\n", clobbering);
     std::mt19937 rng(7);
     unsigned cases = 0, raised = 0, long_runs = 0;
-    uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0;
+    uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0, circular = 0;
     for (int program_no = 0; program_no < 48; ++program_no) {
         Program p;
         p.hardware = program_no % 2 == 0;
@@ -371,6 +373,14 @@ int main() {
         for (int& i : p.body) i = int(rng() % (program_no % 4 == 1 ? kKinds : kKinds - kRaising));
         static const uint32_t kCounts[] = {0, 1, 2, 5, 40};
         p.lc = kCounts[rng() % 5];
+        // I1's buffer: words, a step of words, often no larger than the
+        // buffer (the circular case), sometimes larger.
+        static const uint32_t kLengths[] = {4, 8, 0x14, 0x40, 0x100};
+        static const int32_t kSteps[] = {-8, -4, 0, 4, 8, 0x40, -0x100, 0x104};
+        p.l1 = kLengths[rng() % 5];
+        p.b1 = kRing + 4 * (rng() % 0x40);
+        p.i1 = p.b1 + 4 * (rng() % (p.l1 / 4));
+        p.m1 = uint32_t(kSteps[rng() % 8]);
         for (int opt : {0, 1, 2})
             for (bool pages : {false, true})
                 for (bool chained : {false, true})
@@ -381,6 +391,7 @@ int main() {
                         // must change nothing: a device read is a recorded
                         // access, so the recorder counts every one unstable.
                         const Outcome got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0);
+                        circular += got.stats.dag_circular;
                         if (!(want == got)) {
                             fprintf(stderr, "FAIL: program %d (%s, lc %u) -O%d%s%s budget %u: %zu/%zu runs, "
                                             "%zu/%zu accesses, pc %x/%x\n",
@@ -463,6 +474,7 @@ int main() {
 #if BCORE_ENABLE_PROFILE
     require(loop_blocks > 0 && proven > 0, "no MAC loop became a loop block with its memory proven");
     require(speculated > 0 && vectorized > 0, "no MAC loop's sum was speculated and vectorized");
+    require(circular > 0, "no loop block took I1 to stay in its circular buffer");
 #endif
     require(long_runs > 0, "no chained run looped");
     printf("loop block test passed (%u cases, %u raised, %u long runs; MAC loops: %llu loop blocks, %llu proven, "
