@@ -66,6 +66,30 @@ bool plan_loop(Loop& loop, ScalarEvolution& se, DominatorTree& dt, Value* cpu, c
         else return false;
     }
     if (plan.counters.empty()) return false;
+    // A loop that waits recomputes its other values from what it reads, or
+    // leaves them alone, or ORs a sticky flag into itself (which comes back
+    // the same once it has). One that folds a value into itself otherwise
+    // (an accumulator, a running sum) is computing, and an iteration of it
+    // is steady only by chance: no test for it, which would cost every
+    // iteration a compare per PHI.
+    for (PHINode* phi : plan.others) {
+        Value* next = phi->getIncomingValueForBlock(latch);
+        if (next == phi) continue;
+        if (auto* op = dyn_cast<BinaryOperator>(next);
+            op && (op->getOpcode() == Instruction::Or || op->getOpcode() == Instruction::And) &&
+            (op->getOperand(0) == phi || op->getOperand(1) == phi))
+            next = op->getOperand(0) == phi ? op->getOperand(1) : op->getOperand(0);
+        std::vector<const Value*> work{next};
+        std::set<const Value*> seen;
+        while (!work.empty()) {
+            const auto* inst = dyn_cast<Instruction>(work.back());
+            work.pop_back();
+            if (!inst || !loop.contains(inst) || !seen.insert(inst).second) continue;
+            if (inst == phi) return false;
+            if (isa<PHINode>(inst) && inst->getParent() == header) continue;
+            for (const Value* op : inst->operands()) work.push_back(op);
+        }
+    }
 
     // The exits: counted ones give the last iteration; the others must not
     // depend on a counter.
