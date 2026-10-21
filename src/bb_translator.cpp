@@ -15,6 +15,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/Analysis/ValueTracking.h>
 
 #include "decoder.h"
@@ -622,6 +623,11 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         auto* budget = at.CreateLoad(i32, field(at, real, offsetof(CpuState, chain_budget)), "chain_budget");
         budget->setAtomic(AtomicOrdering::Monotonic);
         budget->setAlignment(Align(4));
+        // Below 2^31 (CpuState::chain_budget), so that the run's packets
+        // plus a block's never wrap: ScalarEvolution can then count a loop
+        // that retires more than one packet an iteration by its budget.
+        budget->setMetadata(LLVMContext::MD_range,
+                            MDBuilder(ctx).createRange(APInt(32, 0), APInt(32, 0x80000000u)));
         return budget;
     };
     // A loop block compares with the budget it found at entry, then sees
@@ -632,7 +638,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     Value* entry_budget = loop ? load_budget(at_entry) : nullptr;
     auto admit = [&](Value* packets, BasicBlock* go, BasicBlock* out) {
         auto* done = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_packets)), "chain_packets");
-        auto* total = b.CreateAdd(done, packets, "chain_total");
+        auto* total = b.CreateNUWAdd(done, packets, "chain_total");
         if (!loop) {
             b.CreateCondBr(b.CreateICmpULT(total, load_budget(b)), go, out, weights_usually(ctx));
             return total;
