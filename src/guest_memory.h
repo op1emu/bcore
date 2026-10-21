@@ -41,8 +41,10 @@ struct GuestLoopVersioning : llvm::PassInfoMixin<GuestLoopVersioning> {
     llvm::PreservedAnalyses run(llvm::Function& f, llvm::FunctionAnalysisManager& am);
 };
 
-// The function attribute that counts a function's proven loops (BcoreStats).
+// The function attribute that counts a function's proven loops, and the one
+// SatReductionSpeculation counts its speculated sums with (BcoreStats).
 constexpr const char* kLoopsProvenAttr = "bcore-loops-proven";
+constexpr const char* kLoopsSpeculatedAttr = "bcore-loops-speculated";
 void count_in_attribute(llvm::Function& f, const char* attr);
 unsigned attribute_count(const llvm::Function& f, const char* attr);
 

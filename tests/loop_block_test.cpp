@@ -303,7 +303,7 @@ int main() {
     test_l_zero();
     std::mt19937 rng(7);
     unsigned cases = 0, raised = 0, long_runs = 0;
-    uint64_t loop_blocks = 0, proven = 0;
+    uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0;
     for (int program_no = 0; program_no < 48; ++program_no) {
         Program p;
         p.hardware = program_no % 2 == 0;
@@ -346,7 +346,8 @@ int main() {
     }
     // The firmware's FIR filler shape: one MAC (W32) with two loads, in a
     // hardware loop, over data that saturates the accumulator or does not,
-    // from accumulators near the window's ends.
+    // from accumulators near the window's ends, so that a speculative sum
+    // both holds and fails its bound.
     for (int program_no = 0; program_no < 40; ++program_no) {
         Program p;
         p.hardware = true;
@@ -390,15 +391,20 @@ int main() {
                     }
                     loop_blocks += got.stats.loop_blocks;
                     proven += got.stats.loops_proven;
+                    speculated += got.stats.loops_speculated;
+                    vectorized += got.stats.loops_vectorized;
                     ++cases;
                 }
     }
     require(raised > 0, "no program raised an exception or an interrupt");
 #if BCORE_ENABLE_PROFILE
     require(loop_blocks > 0 && proven > 0, "no MAC loop became a loop block with its memory proven");
+    require(speculated > 0 && vectorized > 0, "no MAC loop's sum was speculated and vectorized");
 #endif
     require(long_runs > 0, "no chained run looped");
-    printf("loop block test passed (%u cases, %u raised, %u long runs; MAC loops: %llu loop blocks, %llu proven)\n",
-           cases, raised, long_runs, (unsigned long long)loop_blocks, (unsigned long long)proven);
+    printf("loop block test passed (%u cases, %u raised, %u long runs; MAC loops: %llu loop blocks, %llu proven, "
+           "%llu speculated, %llu vectorized)\n",
+           cases, raised, long_runs, (unsigned long long)loop_blocks, (unsigned long long)proven,
+           (unsigned long long)speculated, (unsigned long long)vectorized);
     return 0;
 }

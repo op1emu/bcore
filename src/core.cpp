@@ -158,6 +158,21 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
         if (f.isDeclaration()) continue;
         if (f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) profile_->stats.loop_blocks++;
         profile_->stats.loops_proven += attribute_count(f, kLoopsProvenAttr);
+        profile_->stats.loops_speculated += attribute_count(f, kLoopsSpeculatedAttr);
+        // A vectorized loop: its latch says so (as does its scalar
+        // remainder's) and does vector work.
+        for (auto& block : f) {
+            auto* loop = block.getTerminator() ? block.getTerminator()->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
+            if (!loop) continue;
+            bool vectorized = false, vector = false;
+            for (auto& op : loop->operands())
+                if (auto* node = llvm::dyn_cast<llvm::MDNode>(op.get()); node && node->getNumOperands() &&
+                    llvm::isa<llvm::MDString>(node->getOperand(0)) &&
+                    llvm::cast<llvm::MDString>(node->getOperand(0))->getString() == "llvm.loop.isvectorized")
+                    vectorized = true;
+            for (auto& inst : block) vector |= inst.getType()->isVectorTy();
+            if (vectorized && vector) profile_->stats.loops_vectorized++;
+        }
     }
 #endif
     BbFunc fn = nullptr;
