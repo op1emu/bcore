@@ -670,6 +670,7 @@ private:
     llvm::Value* real_cpu_ = nullptr;  // loop mode: the real CpuState (set_loop_mode)
     std::set<size_t> loop_fields_;
     unsigned l_zero_ = 0;
+    bool regs_kept_ = true;  // no helper since the entry may have changed a register
     std::set<size_t> written_fields_;
     uint32_t packet_pc_ = 0;
     std::map<size_t, uint32_t> field_first_pc_;

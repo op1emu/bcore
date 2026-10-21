@@ -32,10 +32,13 @@ static constexpr uint32_t kSize = 0x3000;
 static constexpr uint32_t kPages = kSize >> Memory::kPageBits;
 
 // Code and data below kDevice inline (rawmem, or the page table); above it,
-// each access is recorded with the packet state the callback sees.
+// each access is recorded with the packet state the callback sees. A
+// clobbering one says its callbacks may change registers, and its device
+// read does: L0 to 12 or back to 0 (B0 at kRam), and R3.
 class RecordingMemory : public Memory {
 public:
-    RecordingMemory(CpuState* cpu, bool pages) : cpu_(cpu), data_(kSize, 0), pages_(pages) {
+    RecordingMemory(CpuState* cpu, bool pages, bool clobber = false)
+        : cpu_(cpu), data_(kSize, 0), pages_(pages), clobber_(clobber) {
         table_.assign(kPageTableEntries, nullptr);
         for (uint32_t page = 0; page < (kDevice >> kPageBits); ++page) table_[page] = &data_[page << kPageBits];
     }
@@ -53,7 +56,7 @@ public:
     uint32_t size() const override { return kSize; }
     uint32_t rawmem_limit() const override { return pages_ ? 0 : kDevice; }
     uint8_t* const* page_table() const override { return pages_ ? table_.data() : nullptr; }
-    bool callbacks_preserve_registers() const override { return true; }
+    bool callbacks_preserve_registers() const override { return !clobber_; }
     // Past the end (a pointer the loops walk on): reads 0, writes nothing.
     uint8_t read8(uint32_t a) const override { note('r', a); return a < kSize ? data_[a] : 0; }
     uint16_t read16(uint32_t a) const override {
@@ -63,6 +66,11 @@ public:
     uint32_t read32(uint32_t a) const override {
         note('r', a);
         if (a == kFault) cec_exception(cpu_, 0x26, nullptr);
+        if (a == kDevice && clobber_) {
+            cpu_->lregs[0] = clobbers_++ % 3 == 1 ? 12 : 0;
+            cpu_->bregs[0] = kRam;
+            cpu_->dpregs[3] += 5;
+        }
         uint32_t v = 0;
         if (a + 4 <= kSize) std::memcpy(&v, &data_[a], 4);
         return v;
@@ -90,6 +98,8 @@ private:
     std::vector<uint8_t> data_;
     std::vector<uint8_t*> table_;
     bool pages_;
+    bool clobber_;
+    mutable unsigned clobbers_ = 0;
 };
 
 // What loop bodies are made of (encodings from bfin-elf-as).
@@ -188,9 +198,10 @@ struct Outcome {
     }
 };
 
-static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, bool pages, bool loops) {
+static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, bool pages, bool loops,
+                   bool clobber = false) {
     CpuState cpu{};
-    RecordingMemory mem(&cpu, pages);
+    RecordingMemory mem(&cpu, pages, clobber);
     load(mem, p);
     for (uint32_t i = 0; i < 0x200; i += 4) mem.poke32(kRam + i, 0x00030000u + i * 0x1111u);
     for (size_t i = 0; i < p.ram.size(); ++i) mem.poke32(kRam + 4 * uint32_t(i), p.ram[i]);
@@ -299,8 +310,55 @@ static void test_l_zero() {
         }
 }
 
+// Loops whose device read changes registers behind the block (a Memory
+// whose callbacks do not preserve them): among them L0, which a loop block
+// may have taken to be 0 at compilation, and R3, which the loop sums into.
+static unsigned test_clobbering_callbacks() {
+    std::mt19937 rng(13);
+    unsigned cases = 0;
+    for (int program_no = 0; program_no < 24; ++program_no) {
+        Program p;
+        p.hardware = program_no % 2 == 0;
+        p.body.resize(rng() % 6);
+        for (int& i : p.body) {
+            do i = int(rng() % (kKinds - kRaising)); while (i == kBranchOut);
+        }
+        // The device read, and a load through I0 with R3 summing it, in
+        // either order.
+        const bool read_first = program_no % 4 < 2;
+        p.body.insert(p.body.begin() + rng() % (p.body.size() + 1), read_first ? 0 : 3);
+        p.body.insert(p.body.begin() + rng() % (p.body.size() + 1), read_first ? 3 : 0);
+        p.body.push_back(7);  // R3 = R3 + R1
+        static const uint32_t kCounts[] = {1, 2, 5, 40};
+        p.lc = kCounts[rng() % 4];
+        for (int opt : {0, 1, 2})
+            for (bool pages : {false, true})
+                for (bool chained : {false, true})
+                    for (uint32_t budget : {0u, 7u, 1000u}) {
+                        if (chained != (budget != 0)) continue;
+                        const Outcome want = run(p, opt, chained, budget, pages, false, true);
+                        const Outcome got = run(p, opt, chained, budget, pages, true, true);
+                        if (!(want == got)) {
+                            fprintf(stderr, "FAIL: clobbering program %d (%s, lc %u) -O%d%s budget %u: pc %x/%x\n",
+                                    program_no, p.hardware ? "hardware" : "jump", p.lc, opt, pages ? " pages" : "",
+                                    budget, want.pc, got.pc);
+                            for (size_t i = 0; i < want.state.size(); i += 4)
+                                if (std::memcmp(&want.state[i], &got.state[i], 4))
+                                    fprintf(stderr, "  CpuState+%zu: %08x/%08x\n", i,
+                                            *reinterpret_cast<const uint32_t*>(&want.state[i]),
+                                            *reinterpret_cast<const uint32_t*>(&got.state[i]));
+                            std::exit(1);
+                        }
+                        ++cases;
+                    }
+    }
+    return cases;
+}
+
 int main() {
     test_l_zero();
+    const unsigned clobbering = test_clobbering_callbacks();
+    printf("clobbering callback cases passed (%u)\n", clobbering);
     std::mt19937 rng(7);
     unsigned cases = 0, raised = 0, long_runs = 0;
     uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0;
