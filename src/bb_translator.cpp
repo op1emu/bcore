@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <optional>
+#include <bitset>
+#include <map>
 #include <vector>
 
 #include "chain_table.h"
@@ -25,7 +27,31 @@ BBTranslator::BBTranslator(Memory* mem,
                            bool unlimited, bool fastmem, uint64_t fast_base)
     : mem_(mem), unlimited_(unlimited), fastmem_(fastmem), fast_base_(fast_base) {}
 
+// A block that may run itself again in a native loop is lifted a second
+// time as a loop block (translate_as(..., loop = true)) where the first
+// lifting says it qualifies: chaining, unlimited and not dry, not careful,
+// its loop bottoms steady and no CYCLES access.
+//
+// The loop block's shadow holds only what the loop uses: the fields the
+// packets from its start to its last back edge reach, by the first lifting.
+// The rest of the block reaches the others in CpuState, as a plain block
+// does, so values the loop does not touch are not carried across it.
 BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, bool careful) {
+    LoopPlan loop;
+    BBTranslateResult plain = translate_as(pc, hint, careful, nullptr, &loop);
+    if (loop.fields.empty()) return plain;
+    BBTranslateResult looped = translate_as(pc, hint, careful, &loop, nullptr);
+    // A shadow the copies cannot follow (expand_loop_syncs): the plain block.
+    if (!looped.module) return plain;
+    plain.module.reset();  // before its context
+    return looped;
+}
+
+// loop: what a loop block keeps in its shadow and assumes, or null for a
+// plain block; plan, for a plain block: set to what a loop block would, or
+// left empty where the block does not qualify.
+BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, bool careful,
+                                             const LoopPlan* loop, LoopPlan* plan) {
     auto ctx = std::make_unique<LLVMContext>();
     auto mod = std::make_unique<Module>("bb_module", *ctx);
     // Before the first instruction is built: IRBuilder takes load/store
@@ -72,9 +98,19 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
     declare_extern("mem_write16", FunctionType::get(void_ty, {i8ptr, i32_ty, i16_ty}, false));
     declare_extern("mem_write32", FunctionType::get(void_ty, {i8ptr, i32_ty, i32_ty}, false));
 
-    LiftVisitor visitor(builder, cpu_ptr, mem_ptr, mod.get(),
+    // A loop block's guest state: the shadow the visitor lifts into, copied
+    // from the real state at entry (expand_loop_syncs).
+    Value* state = cpu_ptr;
+    if (loop) {
+        auto* shadow = builder.CreateAlloca(ArrayType::get(Type::getInt8Ty(*ctx), LiftVisitor::kShadowSize), nullptr,
+                                            "shadow");
+        shadow->setAlignment(Align(8));
+        state = shadow;
+    }
+    LiftVisitor visitor(builder, state, mem_ptr, mod.get(),
                         mem_, unlimited_,
                         fastmem_, fast_base_, mem_->rawmem_limit());
+    if (loop) visitor.set_loop_mode(cpu_ptr, loop->fields, loop->l_zero);
     visitor.set_hint(hint);
     visitor.set_careful(careful);
     // What the entry guard compares the loop bottoms with: the hint's, as the
@@ -98,6 +134,7 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
         if (!first_entry) first_entry = insn_entry;
         snprintf(label_name, sizeof(label_name), "insn_0x%08x", insn_pc);
         auto* insn = BasicBlock::Create(ctx, label_name, fn);
+        visitor.set_packet_pc(insn_pc);
 
         auto* previous = builder.GetInsertBlock();
         builder.CreateBr(insn_entry);
@@ -130,11 +167,15 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
             builder.CreateRetVoid();
     }
 
-    BasicBlock* lb_guard = visitor.lb_guard_used()
-        ? emit_lb_guard(builder, fn, cpu_ptr, first_entry, pc, last_pc, hint_lb, hint_lt, visitor.lb_pinned())
+    const unsigned l_zero = loop ? loop->l_zero : 0;
+    BasicBlock* lb_guard = visitor.lb_guard_used() || l_zero
+        ? emit_lb_guard(builder, fn, state, cpu_ptr, visitor, first_entry, pc, last_pc,
+                        visitor.lb_guard_used() ? hint_lb : nullptr, hint_lt, visitor.lb_pinned(), l_zero)
         : nullptr;
-    // Before the chain exit turns the returns into branches to it.
-    if (lazy_state_) sink_packet_state(*fn, cpu_ptr);
+    // Before the chain exit turns the returns into branches to it. A loop
+    // block's packet state is in its shadow, which holds it in SSA values
+    // and copies it out before each call and return (expand_loop_syncs).
+    if (lazy_state_ && !loop) sink_packet_state(*fn, cpu_ptr);
     if (host_cycles_ && visitor.accesses_cycles()) emit_host_cycles(builder, cpu_ptr, first_entry);
     // A native loop where the block may well branch to itself: a jump to its
     // start, or the start of a hardware loop now, unless the filter rejects
@@ -144,10 +185,45 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
                            (!chain_filter_ || chain_filter_(pc));
     // A native loop that may have moved a loop bottom passes the guard again.
     BasicBlock* loop_top = lb_guard && !visitor.lb_steady() ? lb_guard : first_entry;
+    if (plan && loop_blocks_ && self_loop && chaining_ && unlimited_ && !chain_dry_ && !careful &&
+        !visitor.accesses_cycles()) {
+        std::set<size_t>* loop_fields = &plan->fields;
+        // The loop: from the start to the last packet that branches back to it.
+        uint32_t last = 0;
+        for (auto [from, to] : visitor.edges_to())
+            if (to == pc) last = std::max(last, from);
+        if (hint)
+            for (int i = 0; i < 2; ++i)
+                if (hint->lt[i] == pc && hint->lb[i] >= pc) last = std::max(last, hint->lb[i]);
+        if (last)
+            for (auto [offset, first] : visitor.field_first_pc())
+                if (first <= last && LiftVisitor::shadowable(offset)) loop_fields->insert(offset);
+        // An accumulator's two fields together: the shadow keeps it whole too
+        // (LiftVisitor::kAccSlot), following both.
+        for (int n = 0; n < 2; ++n)
+            if (loop_fields->count(offsetof(CpuState, ax[0]) + 4 * n) || loop_fields->count(offsetof(CpuState, aw[0]) + 4 * n)) {
+                loop_fields->insert(offsetof(CpuState, ax[0]) + 4 * n);
+                loop_fields->insert(offsetof(CpuState, aw[0]) + 4 * n);
+            }
+        // Linear DAG registers the block reads but never writes: assumed so.
+        if (last && hint)
+            for (int i = 0; i < 4; ++i) {
+                const size_t l = offsetof(CpuState, lregs[0]) + 4 * i;
+                if (hint->lregs[i] == 0 && loop_fields->count(l) && !visitor.written_fields().count(l))
+                    plan->l_zero |= 1u << i;
+            }
+    }
     if (chaining_ && unlimited_)
-        emit_chain_exit(builder, fn, cpu_ptr, mem_ptr, pc, self_loop ? loop_top : nullptr,
+        emit_chain_exit(builder, fn, state, cpu_ptr, mem_ptr, pc, self_loop ? loop_top : nullptr,
                         lb_guard ? lb_guard_miss_block(lb_guard) : nullptr, first_entry,
                         &visitor.steady_back_edges());
+    if (loop) {
+        if (!expand_loop_syncs(fn, cast<AllocaInst>(state), cpu_ptr)) {
+            mod.reset();  // before its context
+            return {nullptr, std::move(ctx), visitor.fallthrough_pc(), "packet-cap"};
+        }
+        fn->addFnAttr(kLoopBlockAttr);
+    }
 
     // Verify the module
     std::string err_str;
@@ -164,6 +240,148 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
 
 static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
     return b.CreateGEP(b.getInt8Ty(), cpu, b.getInt64(offset));
+}
+
+// A loop block's shadow (BBTranslator::set_loop_blocks), once lifted. The
+// shadow starts with the real state's values of every field the block reads
+// or writes (touched, from the loads and stores at the shadow's constant
+// offsets), so a field is clean -- the same in both -- until the block
+// stores to it. Where a helper call (LiftVisitor::kSyncOut) or an exit
+// (kCommit) needs the real state current, the block copies the fields dirty
+// there, from a forward dataflow over the function: dirty after a store
+// to the field on some path since the last copy out. After a call that may
+// have changed the real state (kSyncIn) it copies every touched field back,
+// and all are clean again. Copying only dirty fields keeps a loop's
+// unchanged fields out of its registers: a clean field never needs its
+// value carried to a copy.
+//
+// False, changing nothing, where the shadow is used other than through loads
+// and stores at constant offsets: the block is then compiled plain.
+bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* real) {
+    using Bytes = std::bitset<sizeof(CpuState)>;
+    const DataLayout& layout = fn->getParent()->getDataLayout();
+    Function* sync_out = fn->getParent()->getFunction(LiftVisitor::kSyncOut);
+    Function* sync_in = fn->getParent()->getFunction(LiftVisitor::kSyncIn);
+    Function* commit = fn->getParent()->getFunction(kCommit);
+    auto bytes = [](uint32_t begin, uint32_t size) {
+        Bytes set;
+        for (uint32_t i = begin; i < begin + size && i < sizeof(CpuState); ++i) set.set(i);
+        return set;
+    };
+    // The bytes each store to the shadow writes, and every byte touched.
+    std::map<StoreInst*, Bytes> stores;
+    Bytes touched;
+    // At ptr, the shadow plus offset (the shadow itself, or one GEP off it):
+    // only loads and stores to it.
+    auto access = [&](Value* ptr, uint32_t offset, bool base) {
+        for (auto* user : ptr->users()) {
+            if (auto* load = dyn_cast<LoadInst>(user)) {
+                touched |= bytes(offset, uint32_t(layout.getTypeStoreSize(load->getType())));
+            } else if (auto* store = dyn_cast<StoreInst>(user); store && store->getPointerOperand() == ptr) {
+                const Bytes set = bytes(offset, uint32_t(layout.getTypeStoreSize(store->getValueOperand()->getType())));
+                touched |= set;
+                stores[store] = set;
+            } else if (!(base && isa<GetElementPtrInst>(user))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!access(shadow, 0, true)) return false;
+    for (auto* user : shadow->users())
+        if (auto* gep = dyn_cast<GetElementPtrInst>(user)) {
+            auto offset = cpu_field_offset(gep, shadow);
+            if (!offset || *offset >= LiftVisitor::kShadowSize || !access(gep, uint32_t(*offset), false)) return false;
+        }
+
+    auto callee = [](Instruction& inst) -> Function* {
+        auto* call = dyn_cast<CallInst>(&inst);
+        return call ? call->getCalledFunction() : nullptr;
+    };
+    // What one instruction does to the dirty bytes.
+    auto step = [&](Instruction& inst, Bytes& dirty) {
+        if (auto* store = dyn_cast<StoreInst>(&inst)) {
+            if (auto it = stores.find(store); it != stores.end()) dirty |= it->second;
+            return;
+        }
+        Function* f = callee(inst);
+        if (f && (f == sync_out || f == commit || f == sync_in)) dirty.reset();
+    };
+    std::map<BasicBlock*, Bytes> in;
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto& block : *fn) {
+            Bytes dirty = in[&block];
+            for (auto& inst : block) step(inst, dirty);
+            for (auto* succ : successors(&block)) {
+                Bytes merged = in[succ] | dirty;
+                if (merged != in[succ]) { in[succ] = merged; changed = true; }
+            }
+        }
+    }
+
+    auto& ctx = fn->getContext();
+    IRBuilder<> b(ctx);
+    auto copy = [&](const Bytes& set, bool to_shadow) {
+        for (uint32_t begin = 0; begin < sizeof(CpuState);) {
+            if (!set.test(begin)) { ++begin; continue; }
+            uint32_t end = begin;
+            while (end < sizeof(CpuState) && set.test(end)) ++end;
+            auto* at_shadow = b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(begin));
+            auto* at_real = b.CreateGEP(b.getInt8Ty(), real, b.getInt64(begin));
+            if (to_shadow) b.CreateMemCpy(at_shadow, Align(1), at_real, Align(1), end - begin);
+            else b.CreateMemCpy(at_real, Align(1), at_shadow, Align(1), end - begin);
+            begin = end;
+        }
+    };
+    // did_jump is clear when a block starts (Core::run, the chain exit), as
+    // the visitor assumes: the shadow starts with it clear rather than
+    // copied, so the IR knows it.
+    b.SetInsertPoint(fn->getEntryBlock().getTerminator());
+    Bytes copied = touched;
+    for (uint32_t i = offsetof(CpuState, did_jump); i < offsetof(CpuState, did_jump) + sizeof(bool); ++i)
+        copied.reset(i);
+    copy(copied, true);
+    b.CreateStore(b.getInt8(0), b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(offsetof(CpuState, did_jump))));
+
+    std::vector<std::pair<CallInst*, Bytes>> syncs;
+    for (auto& block : *fn) {
+        Bytes dirty = in[&block];
+        for (auto& inst : block) {
+            Function* f = callee(inst);
+            if (f && (f == sync_out || f == commit)) syncs.push_back({cast<CallInst>(&inst), dirty});
+            else if (f && f == sync_in) syncs.push_back({cast<CallInst>(&inst), touched});
+            step(inst, dirty);
+        }
+    }
+    // The whole accumulators (LiftVisitor::kAccSlot) the block uses, built
+    // from the real state's fields where the shadow's are copied in.
+    bool acc_used[2] = {};
+    for (auto* user : shadow->users())
+        if (auto* gep = dyn_cast<GetElementPtrInst>(user))
+            if (auto offset = cpu_field_offset(gep, shadow); offset && *offset >= LiftVisitor::kAccSlot)
+                acc_used[(*offset - LiftVisitor::kAccSlot) / 8] = true;
+    auto build_accs = [&] {
+        for (int n = 0; n < 2; ++n) {
+            if (!acc_used[n]) continue;
+            auto* ax = b.CreateLoad(b.getInt32Ty(), b.CreateGEP(b.getInt8Ty(), real, b.getInt64(offsetof(CpuState, ax[0]) + 4 * n)));
+            auto* aw = b.CreateLoad(b.getInt32Ty(), b.CreateGEP(b.getInt8Ty(), real, b.getInt64(offsetof(CpuState, aw[0]) + 4 * n)));
+            auto* acc = b.CreateOr(b.CreateShl(b.CreateSExt(b.CreateTrunc(ax, b.getInt8Ty()), b.getInt64Ty()), 32),
+                                   b.CreateZExt(aw, b.getInt64Ty()));
+            b.CreateStore(acc, b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(LiftVisitor::kAccSlot + 8 * n)));
+        }
+    };
+    b.SetInsertPoint(fn->getEntryBlock().getTerminator());
+    build_accs();
+    for (auto& [call, set] : syncs) {
+        b.SetInsertPoint(call);
+        copy(set, call->getCalledFunction() == sync_in);
+        if (call->getCalledFunction() == sync_in) build_accs();
+        call->eraseFromParent();
+    }
+    for (Function* decl : {sync_out, sync_in, commit})
+        if (decl) decl->eraseFromParent();
+    return true;
 }
 
 // A host that writes CYCLES before every block (CYCLES2 too, and its shadow)
@@ -194,10 +412,14 @@ void BBTranslator::emit_host_cycles(IRBuilder<>& b, Value* cpu, BasicBlock* firs
 // own, nothing retired, and the run's chain state is as the block found it,
 // so Core::run compiles it again careful and runs that in its place. A loop
 // the block pins (LiftVisitor::lb_pinned) needs its bottom and its top to be
-// exactly the hint's. Returns the guard's block.
-BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu, BasicBlock* first_entry,
+// exactly the hint's; hint_lb null for none of this. A loop block's linear
+// DAG registers (l_zero, bit i for L[i]) must be. In a loop block (cpu its shadow, real the CpuState)
+// the guard reads the shadow, as a native loop that passes it again must,
+// and where it misses copies the shadow out first. Returns the guard's block.
+BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu, Value* real,
+                                        const LiftVisitor& visitor, BasicBlock* first_entry,
                                         uint32_t first_pc, uint32_t last_pc, const uint32_t hint_lb[2],
-                                        const uint32_t hint_lt[2], unsigned pinned) {
+                                        const uint32_t hint_lt[2], unsigned pinned, unsigned l_zero) {
     auto& ctx = fn->getContext();
     auto& entry = fn->getEntryBlock();
     auto* guard = BasicBlock::Create(ctx, "lb_guard", fn, first_entry);
@@ -208,11 +430,17 @@ BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu
     b.SetInsertPoint(guard);
     auto* i32 = b.getInt32Ty();
     Value* ok = b.getTrue();
-    for (int i = 0; i < 2; ++i) {
-        auto* lb = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, lb[0]) + 4 * i), "guard_lb");
+    for (int i = 0; i < 4; ++i)
+        if (l_zero >> i & 1) {
+            auto* l = b.CreateLoad(i32, field(b, real, offsetof(CpuState, lregs[0]) + 4 * i), "guard_l");
+            ok = b.CreateAnd(ok, b.CreateICmpEQ(l, b.getInt32(0)));
+        }
+    for (int i = 0; hint_lb && i < 2; ++i) {
+        auto loop_field = [&](size_t offset) { return field(b, visitor.shadowed(offset) ? cpu : real, offset); };
+        auto* lb = b.CreateLoad(i32, loop_field(offsetof(CpuState, lb[0]) + 4 * i), "guard_lb");
         auto* hinted = b.CreateICmpEQ(lb, b.getInt32(hint_lb[i]));
         if (pinned & (1u << i)) {
-            auto* lt = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, lt[0]) + 4 * i), "guard_lt");
+            auto* lt = b.CreateLoad(i32, loop_field(offsetof(CpuState, lt[0]) + 4 * i), "guard_lt");
             ok = b.CreateAnd(ok, b.CreateAnd(hinted, b.CreateICmpEQ(lt, b.getInt32(hint_lt[i]))));
             continue;
         }
@@ -222,7 +450,11 @@ BasicBlock* BBTranslator::emit_lb_guard(IRBuilder<>& b, Function* fn, Value* cpu
     b.CreateCondBr(ok, first_entry, miss, weights_usually(ctx));
 
     b.SetInsertPoint(miss);
-    b.CreateStore(b.getInt8(1), field(b, cpu, offsetof(CpuState, lb_guard_miss)));
+    b.CreateStore(b.getInt8(1), field(b, real, offsetof(CpuState, lb_guard_miss)));
+    if (cpu != real) {
+        auto* ft = FunctionType::get(b.getVoidTy(), false);
+        b.CreateCall(ft, fn->getParent()->getOrInsertFunction(kCommit, ft).getCallee());
+    }
     b.CreateRetVoid();
     return guard;
 }
@@ -341,9 +573,14 @@ static Tail sink_tail(ReturnInst* ret, Value* cpu) {
 // the PC is this block's (a hardware loop's back edge) and otherwise looks
 // it up in the table.
 //
+// cpu is where the block keeps the guest state, real the CpuState: the same
+// but in a loop block, whose shadow the exit copies to the real state
+// (kCommit, see expand_loop_syncs) before it returns or calls the next block,
+// and not where it runs itself again.
+//
 // A back edge to the block's start in `steady` (the loop registers as the
 // entry guard found them) branches past the guard, to first_entry.
-void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* mem,
+void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* real, Value* mem,
                                    uint32_t entry_pc, BasicBlock* self_loop, BasicBlock* direct,
                                    BasicBlock* first_entry, const std::set<ReturnInst*>* steady) {
     std::vector<ReturnInst*> returns;
@@ -361,25 +598,48 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     // and publishes between runs): loaded once.
     auto& entry = fn->getEntryBlock();
     IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
-    auto* table = at_entry.CreateLoad(ptr, field(at_entry, cpu, offsetof(CpuState, chain_table)), "chain_table");
+    auto* table = at_entry.CreateLoad(ptr, field(at_entry, real, offsetof(CpuState, chain_table)), "chain_table");
+    const bool loop = cpu != real;
+    auto commit = [&] {
+        if (!loop) return;
+        auto* ft = FunctionType::get(b.getVoidTy(), false);
+        b.CreateCall(ft, fn->getParent()->getOrInsertFunction(kCommit, ft).getCallee());
+    };
 
     auto* leave = BasicBlock::Create(ctx, "chain_leave", fn);
     b.SetInsertPoint(leave);
+    commit();
     b.CreateRetVoid();
 
     // The budget test every exit makes: on to `go` with the run's packets
     // including this block's, or to `out`. No exit finds an interrupt pending:
     // generated code checks one after every instruction that may enable it,
     // and whatever else makes one pending sets the budget to 0 (cec_raise).
+    auto load_budget = [&](IRBuilder<>& at) {
+        // Atomic: another thread may set it to 0, and a native loop with no
+        // call in it would otherwise read it once.
+        auto* budget = at.CreateLoad(i32, field(at, real, offsetof(CpuState, chain_budget)), "chain_budget");
+        budget->setAtomic(AtomicOrdering::Monotonic);
+        budget->setAlignment(Align(4));
+        return budget;
+    };
+    // A loop block compares with the budget it found at entry, then sees
+    // whether the budget is 0 now: the same test, since while a run lasts
+    // the budget changes only to 0, but one whose first half counts the
+    // loop's iterations (the budget at entry does not change in it), and
+    // its second half one load where the plain test had two.
+    Value* entry_budget = loop ? load_budget(at_entry) : nullptr;
     auto admit = [&](Value* packets, BasicBlock* go, BasicBlock* out) {
         auto* done = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_packets)), "chain_packets");
         auto* total = b.CreateAdd(done, packets, "chain_total");
-        // Atomic: another thread may set it to 0, and a native loop with no
-        // call in it would otherwise read it once.
-        auto* budget = b.CreateLoad(i32, field(b, cpu, offsetof(CpuState, chain_budget)), "chain_budget");
-        budget->setAtomic(AtomicOrdering::Monotonic);
-        budget->setAlignment(Align(4));
-        b.CreateCondBr(b.CreateICmpULT(total, budget), go, out, weights_usually(ctx));
+        if (!loop) {
+            b.CreateCondBr(b.CreateICmpULT(total, load_budget(b)), go, out, weights_usually(ctx));
+            return total;
+        }
+        auto* now = BasicBlock::Create(ctx, "chain_budget_now", fn);
+        b.CreateCondBr(b.CreateICmpULT(total, entry_budget), now, out, weights_usually(ctx));
+        b.SetInsertPoint(now);
+        b.CreateCondBr(b.CreateICmpNE(load_budget(b), b.getInt32(0)), go, out, weights_usually(ctx));
         return total;
     };
     // The tail stores a return skipped (sink_tail), where the block returns.
@@ -393,6 +653,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         IRBuilder<>::InsertPointGuard guard(b);
         b.SetInsertPoint(block);
         store_tail(tail);
+        commit();
         b.CreateRetVoid();
         return block;
     };
@@ -409,7 +670,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     auto chain = [&](Value* total, const Tail& tail, Value* next, bool did_jump_clear) {
         if (chain_dry_) {
             store_tail(tail);
-            b.CreateStore(b.getInt8(1), field(b, cpu, offsetof(CpuState, chain_would)));
+            b.CreateStore(b.getInt8(1), field(b, real, offsetof(CpuState, chain_would)));
+            commit();
             b.CreateRetVoid();
             return false;
         }
@@ -436,7 +698,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         b.SetInsertPoint(hit);
         if (!chain(total, tail, pc, did_jump_clear)) return;
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
-        auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {cpu, mem});
+        commit();
+        auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {real, mem});
         call->setCallingConv(CallingConv::GHC);
         call->setTailCallKind(CallInst::TCK_MustTail);
         b.CreateRetVoid();

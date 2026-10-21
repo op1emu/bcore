@@ -69,6 +69,43 @@ public:
     // the guard (lb_guard_used): at entry, each bottom is the hint's or lies
     // outside the block.
     void set_careful(bool careful) { careful_ = careful; }
+    // Loop mode (BBTranslator's loop blocks): the visitor's cpu pointer is a
+    // shadow copy of the guest state the block keeps in an alloca, and `real`
+    // the CpuState the host and the helpers see. The shadow holds the fields
+    // generated code alone writes while the block runs (shadowed()); every
+    // other field's pointer is the real one's. Each helper call is preceded
+    // by a call to the declaration kSyncOut and, unless it is a memory
+    // callback that keeps the registers and did not set did_jump, followed by
+    // one to kSyncIn: the translator replaces them, once the block is
+    // lifted, by copies of the shadow's fields to the real state and back.
+    // l_zero: the DAG registers (bit i for L[i]) the block may take to be
+    // linear (L[i] = 0), which its entry guard then checks.
+    void set_loop_mode(llvm::Value* real, const std::set<size_t>& fields, unsigned l_zero) {
+        real_cpu_ = real;
+        loop_fields_ = fields;
+        l_zero_ = l_zero;
+    }
+    // The CpuState fields the block stores to.
+    const std::set<size_t>& written_fields() const { return written_fields_; }
+    // Whether a loop block keeps this field in its shadow: a register or a
+    // packet or chain field (shadowable), and one the loop's packets use
+    // (set_loop_mode's fields) or the chain exit's own.
+    bool shadowed(size_t offset) const;
+    static bool shadowable(size_t offset);
+    // The packet being lifted (BBTranslator, before each).
+    void set_packet_pc(uint32_t pc) { packet_pc_ = pc; }
+    // For each CpuState field the block reaches through its cpu pointer, the
+    // first packet's PC that does; and the packets that take a back edge or
+    // jump to a constant PC, with that PC.
+    const std::map<size_t, uint32_t>& field_first_pc() const { return field_first_pc_; }
+    const std::vector<std::pair<uint32_t, uint32_t>>& edges_to() const { return edges_to_; }
+    static constexpr const char* kSyncOut = "bcore.loop.sync_out";
+    // Past CpuState in a loop block's shadow: the accumulators whole, as
+    // i64 (acc_slot), which the translator recomputes from ax/aw wherever it
+    // copies them in. The shadow's size.
+    static constexpr size_t kAccSlot = (sizeof(CpuState) + 7) & ~size_t(7);
+    static constexpr size_t kShadowSize = kAccSlot + 16;
+    static constexpr const char* kSyncIn = "bcore.loop.sync_in";
     bool lb_guard_used() const { return lb_guard_used_; }
     // Whether nothing in the block can have changed either loop bottom: a
     // native loop back to its start needs the guard again otherwise.
@@ -630,6 +667,17 @@ private:
     bool accesses_cycles_ = false;
     const CpuState* hint_ = nullptr;
     bool careful_ = false;
+    llvm::Value* real_cpu_ = nullptr;  // loop mode: the real CpuState (set_loop_mode)
+    std::set<size_t> loop_fields_;
+    unsigned l_zero_ = 0;
+    std::set<size_t> written_fields_;
+    uint32_t packet_pc_ = 0;
+    std::map<size_t, uint32_t> field_first_pc_;
+    std::vector<std::pair<uint32_t, uint32_t>> edges_to_;  // (packet PC, target)
+    void emit_loop_sync(const char* name);
+    llvm::Value* acc_slot(int n);
+    void store_acc_slot(int n, llvm::Value* acc, bool now = false);
+    llvm::Value* pending_acc_[2] = {};  // a parallel packet's, stored at its end
     bool lb_guard_used_ = false;
     bool lb_steady_[2] = {true, true};
     bool lt_steady_[2] = {true, true};

@@ -123,6 +123,7 @@ Reads an ELF32 Blackfin binary and prints disassembly for all executable section
 | `--max-steps N` | Leave each block after at most N packets (0 = unlimited, default; 1 single-steps) |
 | `--count-packets` | Print the packets and block runs executed (`packets=N runs=M`) to stderr at exit; with `--chain` also the runs that returned to the loop (`returns=N`) |
 | `--chain` | Let a block run the next one itself (`Core::set_chaining`, a budget of 2^30 packets per run) until a CEC event or a halt; the same results as without it |
+| `--no-loop-blocks` | Compile a block that runs itself again like any other (`Core::set_loop_blocks`): its loop's registers go through `CpuState` at every packet; the same results, slower |
 | `--opt-level N` / `-O N` | LLVM optimization level 0–3 for both the IR pass pipeline and the backend (default: 2) |
 | `--fastmem` | `mmap` memory at address 0 for zero-overhead JIT loads/stores |
 

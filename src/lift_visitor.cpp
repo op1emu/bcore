@@ -74,8 +74,32 @@ uint16_t LiftVisitor::iftech(uint32_t addr) {
 
 // ---- IR Helper Methods ----
 
+static bool reg_cacheable(size_t offset);
+
+// The fields a loop block keeps in its shadow: the registers the register
+// cache holds, and the packet and chain state generated code writes as it
+// runs. The host, the helpers and other threads own the rest (the chain
+// budget, halted, the system registers, CYCLES), and generated code reaches
+// them in the real CpuState.
+bool LiftVisitor::shadowed(size_t offset) const {
+    if (!real_cpu_ || !shadowable(offset)) return false;
+    return loop_fields_.count(offset) || offset == offsetof(CpuState, pc) ||
+           offset == offsetof(CpuState, insn_len) || offset == offsetof(CpuState, did_jump) ||
+           offset == offsetof(CpuState, packets) || offset == offsetof(CpuState, chain_packets) ||
+           offset == offsetof(CpuState, chain_blocks);
+}
+
+bool LiftVisitor::shadowable(size_t offset) {
+    return reg_cacheable(offset) || offset == offsetof(CpuState, pc) || offset == offsetof(CpuState, insn_len) ||
+           offset == offsetof(CpuState, did_jump) || offset == offsetof(CpuState, packets) ||
+           offset == offsetof(CpuState, chain_packets) || offset == offsetof(CpuState, chain_blocks);
+}
+
 Value* LiftVisitor::cpu_field_ptr(size_t offset, Type* ty, const Twine& name) {
-    auto* i8ptr = builder_.CreateBitCast(cpu_ptr_, builder_.getInt8PtrTy());
+    if (auto [it, fresh] = field_first_pc_.emplace(offset, packet_pc_); !fresh && packet_pc_ < it->second)
+        it->second = packet_pc_;
+    Value* base = real_cpu_ && !shadowed(offset) ? real_cpu_ : cpu_ptr_;
+    auto* i8ptr = builder_.CreateBitCast(base, builder_.getInt8PtrTy());
     auto* gep = builder_.CreateGEP(builder_.getInt8Ty(), i8ptr,
                                    builder_.getInt32(static_cast<uint32_t>(offset)));
     return builder_.CreateBitCast(gep, ty->getPointerTo(), name);
@@ -118,17 +142,41 @@ void LiftVisitor::carry_reg_cache(BasicBlock* from, BasicBlock* to) {
 }
 
 void LiftVisitor::emit_cpu_store(size_t offset, Value* val) {
+    written_fields_.insert(offset);
     if (offset == offsetof(CpuState, lb[0])) lb_steady_[0] = false;
     if (offset == offsetof(CpuState, lb[1])) lb_steady_[1] = false;
     if (offset == offsetof(CpuState, lt[0])) lt_steady_[0] = false;
     if (offset == offsetof(CpuState, lt[1])) lt_steady_[1] = false;
     auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
     builder_.CreateStore(val, ptr);
-    if (!reg_cacheable(offset)) return;
-    if (auto* cache = reg_cache_here())
-        (*cache)[offset] = val;
-    else if (auto* block = builder_.GetInsertBlock())
-        reg_cache_[block].erase(offset);  // a store before the block's end
+    if (reg_cacheable(offset)) {
+        if (auto* cache = reg_cache_here())
+            (*cache)[offset] = val;
+        else if (auto* block = builder_.GetInsertBlock())
+            reg_cache_[block].erase(offset);  // a store before the block's end
+    }
+    // A loop block's whole accumulator follows its fields.
+    for (int n = 0; n < 2; ++n)
+        if (real_cpu_ && (offset == offsetof(CpuState, ax[0]) + 4 * n || offset == offsetof(CpuState, aw[0]) + 4 * n) &&
+            shadowed(offset)) {
+            auto* acc = build_acc_i64(load_cpu_u32(offsetof(CpuState, ax[0]) + 4 * n, "ax"),
+                                      load_cpu_u32(offsetof(CpuState, aw[0]) + 4 * n, "aw"));
+            store_acc_slot(n, acc, true);
+        }
+}
+
+// now: at once, also in a parallel packet (where it waits for the packet's
+// end otherwise, as the packet's register writes do).
+void LiftVisitor::store_acc_slot(int n, Value* acc, bool now) {
+    if (in_parallel_ && !now) {
+        pending_acc_[n] = acc;
+        return;
+    }
+    builder_.CreateStore(acc, acc_slot(n));
+    auto* cache = reg_cache_here();
+    const size_t key = kAccSlot + 8 * n;
+    if (cache) (*cache)[key] = acc;
+    else if (auto* block = builder_.GetInsertBlock()) reg_cache_[block].erase(key);
 }
 
 // What a helper may change in the cached fields. cec_check_pending either
@@ -243,6 +291,10 @@ Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
         auto* c2_ptr = cpu_field_ptr(offsetof(CpuState, cycles[1]), builder_.getInt32Ty());
         builder_.CreateStore(shadow_val, c2_ptr);
     }
+    // A loop block's linear DAG registers, as its entry guard requires.
+    if (real_cpu_ && offset >= offsetof(CpuState, lregs[0]) && offset <= offsetof(CpuState, lregs[3]) &&
+        (l_zero_ >> ((offset - offsetof(CpuState, lregs[0])) / 4) & 1))
+        return builder_.getInt32(0);
     auto* cache = reg_cacheable(offset) ? reg_cache_here() : nullptr;
     if (cache) {
         auto it = cache->find(offset);
@@ -274,6 +326,13 @@ void LiftVisitor::on_parallel_end() {
         emit_cpu_store(offset, val);
     shadow_writes_.clear();
     in_parallel_ = false;
+    // A loop block's whole accumulators, after their fields (which store what
+    // they build) have.
+    for (int n = 0; n < 2; ++n)
+        if (pending_acc_[n]) {
+            store_acc_slot(n, pending_acc_[n], true);
+            pending_acc_[n] = nullptr;
+        }
     parallel_slot_ = 0;
 }
 
@@ -402,7 +461,10 @@ void LiftVisitor::emit_jump(Value* target, const char* kind) {
     // A register target can be a constant too: the register cache forwards
     // what an earlier instruction in the block stored (RETS = R0 after R0 = 1).
     auto* constant_target = llvm::dyn_cast<llvm::ConstantInt>(target);
-    if (constant_target) const_targets_.insert(uint32_t(constant_target->getZExtValue()));
+    if (constant_target) {
+        const_targets_.insert(uint32_t(constant_target->getZExtValue()));
+        edges_to_.push_back({packet_pc_, uint32_t(constant_target->getZExtValue())});
+    }
     if (!constant_target || (constant_target->getZExtValue() & 1)) {
         auto& ctx  = builder_.getContext();
         auto* fn   = builder_.GetInsertBlock()->getParent();
@@ -678,6 +740,7 @@ void LiftVisitor::emit_epilog_pinned(uint32_t insn_pc, uint32_t insn_len, unsign
         if (check_cec) emit_cec_check(false);
         auto* ret = builder_.CreateRetVoid();
         if (lb_steady()) steady_back_edges_.insert(ret);
+        edges_to_.push_back({packet_pc_, hint_->lt[i]});
 
         // The loop ends (LC 1, or 0: a single pass), and its count reaches 0.
         builder_.SetInsertPoint(bb_end);
@@ -862,9 +925,56 @@ Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
     auto* fn = module_->getOrInsertFunction(name, ft).getCallee();
     if (rarely_called(name))
         if (auto* f = dyn_cast<Function>(fn)) f->addFnAttr(Attribute::Cold);
-    auto* call = builder_.CreateCall(ft, fn, args);
+    if (!real_cpu_) {
+        auto* call = builder_.CreateCall(ft, fn, args);
+        reg_cache_after_call(name);
+        return call;
+    }
+    // Loop mode: the helper sees the real state, with what the block wrote so
+    // far, and the block sees what the helper wrote.
+    std::vector<Value*> real_args(args.begin(), args.end());
+    for (auto*& arg : real_args)
+        if (arg == cpu_ptr_) arg = real_cpu_;
+    emit_loop_sync(kSyncOut);
+    auto* call = builder_.CreateCall(ft, fn, real_args);
+    const std::string callee = name;
+    const bool memory = callee.rfind("mem_read", 0) == 0 || callee.rfind("mem_write", 0) == 0;
+    // cec_check_pending changes the guest state only where it takes an
+    // interrupt, which sets did_jump (or on a double fault, the execution
+    // state alone: halted, the budget).
+    if ((memory && mem_keeps_regs_) || callee == "cec_check_pending") {
+        // The callback leaves the registers alone unless it raises an
+        // exception, which sets did_jump: only then is the real state newer,
+        // and the block returns at once, as the lifter's did_jump exit after
+        // every memory callback would. Otherwise did_jump is as it was.
+        auto& ctx = builder_.getContext();
+        auto* fn_ = builder_.GetInsertBlock()->getParent();
+        auto* start = builder_.GetInsertBlock();
+        auto* dj_ptr = builder_.CreateGEP(builder_.getInt8Ty(), real_cpu_,
+                                          builder_.getInt32(offsetof(CpuState, did_jump)));
+        auto* dj = builder_.CreateLoad(builder_.getInt8Ty(), dj_ptr, "real_did_jump");
+        auto* raised = BasicBlock::Create(ctx, "loop_sync_raised", fn_);
+        auto* cont = BasicBlock::Create(ctx, "loop_sync_cont", fn_);
+        builder_.CreateCondBr(builder_.CreateICmpNE(dj, builder_.getInt8(0)), raised, cont, weights_rarely(ctx));
+        builder_.SetInsertPoint(raised);
+        emit_loop_sync(kSyncIn);
+        builder_.CreateRetVoid();
+        builder_.SetInsertPoint(cont);
+        carry_reg_cache(start, cont);
+        const bool clear = reg_cache_[start].count(kDidJumpClear) != 0;
+        reg_cache_after_call(name);
+        if (clear) reg_cache_[cont][kDidJumpClear] = builder_.getInt8(0);
+        return call;
+    } else {
+        emit_loop_sync(kSyncIn);
+    }
     reg_cache_after_call(name);
     return call;
+}
+
+void LiftVisitor::emit_loop_sync(const char* name) {
+    auto* ft = FunctionType::get(builder_.getVoidTy(), false);
+    builder_.CreateCall(ft, module_->getOrInsertFunction(name, ft).getCallee());
 }
 
 bool LiftVisitor::unimplemented(const char* name) {
@@ -892,9 +1002,26 @@ Value* LiftVisitor::build_acc_i64(Value* ax, Value* aw) {
 
 // Load accumulator n (ax[n] + aw[n]) as a sign-extended 40-bit i64.
 Value* LiftVisitor::emit_load_acc(int n) {
+    if (real_cpu_ && shadowed(offsetof(CpuState, ax[0]) + n * 4)) {
+        // A loop block also keeps the accumulator whole (acc_slot), equal to
+        // what its two fields build: carried across the loop in one value.
+        auto* cache = reg_cache_here();
+        const size_t key = kAccSlot + 8 * n;
+        if (cache)
+            if (auto it = cache->find(key); it != cache->end()) return it->second;
+        auto* value = builder_.CreateLoad(builder_.getInt64Ty(), acc_slot(n), "acc");
+        if (cache) (*cache)[key] = value;
+        return value;
+    }
     auto* ax = load_cpu_u32(offsetof(CpuState, ax[0]) + n * 4, "ax");
     auto* aw = load_cpu_u32(offsetof(CpuState, aw[0]) + n * 4, "aw");
     return build_acc_i64(ax, aw);
+}
+
+// A loop block's accumulator n as one i64: sext40 of its fields, kept
+// equal to them (emit_cpu_store) past the end of the shadow's CpuState.
+Value* LiftVisitor::acc_slot(int n) {
+    return builder_.CreateGEP(builder_.getInt8Ty(), cpu_ptr_, builder_.getInt64(kAccSlot + 8 * n), "acc_slot");
 }
 
 // Emit inline IR for SIGNBITS on a 40-bit accumulator (ax = ext byte, aw = lower 32).
@@ -979,6 +1106,13 @@ void LiftVisitor::emit_store_acc(int n, Value* acc64) {
         builder_.CreateLShr(acc64, builder_.getInt64(32)), i32ty, "ax_new");
     store_cpu_u32(offsetof(CpuState, aw[0]) + n * 4, aw_new);
     store_cpu_u32(offsetof(CpuState, ax[0]) + n * 4, ax_new);
+    // What the fields build, said directly: sext40 of the value (the IR
+    // folds it away where the value already has the sign bits).
+    if (real_cpu_ && shadowed(offsetof(CpuState, ax[0]) + n * 4)) {
+        auto* i64ty = builder_.getInt64Ty();
+        store_acc_slot(n, builder_.CreateAShr(builder_.CreateShl(acc64, ConstantInt::get(i64ty, 24)),
+                                              ConstantInt::get(i64ty, 24), "acc40"));
+    }
 }
 
 void LiftVisitor::emit_flags_az_an_16(Value* result16) {
@@ -1337,7 +1471,8 @@ llvm::Value* LiftVisitor::entry_load_ptr(size_t offset, llvm::Value*& slot, cons
     if (!slot) {
         auto& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
         llvm::IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
-        auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), cpu_ptr_, at_entry.getInt32(offset));
+        auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), real_cpu_ ? real_cpu_ : cpu_ptr_,
+                                         at_entry.getInt32(offset));
         slot = at_entry.CreateLoad(at_entry.getInt8PtrTy(), field, name);
     }
     return slot;
@@ -4504,7 +4639,8 @@ llvm::Value* LiftVisitor::emit_mac_common(
         auto* aw64 = b.CreateZExt(aw_val, b.getInt64Ty(), "aw64");
         acc = b.CreateOr(b.CreateShl(ax64, b.getInt64(32)), aw64, "acc_unext");
     } else {
-        acc = build_acc_i64(ax_val, aw_val);
+        acc = real_cpu_ && shadowed(offsetof(CpuState, ax[0]) + which * 4) ? emit_load_acc(int(which))
+                                                                           : build_acc_i64(ax_val, aw_val);
     }
 
     // acc_sat_flag: 1 if the 40-bit accumulator was clamped (drives V for fullword,
@@ -4598,6 +4734,8 @@ llvm::Value* LiftVisitor::emit_mac_common(
                           b.CreateAnd(ax_new, b.getInt32(0xFF), "ax_8"));
             store_cpu_u32(offsetof(CpuState, aw[0]) + which * 4,
                           b.CreateTrunc(acc, i32ty, "aw_new"));
+            if (real_cpu_ && shadowed(offsetof(CpuState, ax[0]) + which * 4))
+                store_acc_slot(int(which), b.CreateAShr(b.CreateShl(acc, b.getInt64(24)), b.getInt64(24), "acc40"));
         }
     }
 
@@ -8407,7 +8545,7 @@ bool LiftVisitor::decode_dsp32shiftimm_A1_ROT(
 // pseudoDbg_Assert: DBGA(Rx.l/h) / DBGAL(Rx) / DBGAH(Rx)
 // Checks (allreg(grp,regtest) >> shift) & 0xffff == expected; halts on mismatch.
 static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
-                                llvm::Value* cpu_ptr_,
+                                llvm::Value* did_jump_base, llvm::Value* real_cpu,
                                 llvm::Value* reg_val, uint32_t expected, uint32_t shift) {
     auto& ctx = B.getContext();
     auto* fn = B.GetInsertBlock()->getParent();
@@ -8420,8 +8558,11 @@ static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
     B.CreateCondBr(mismatch, bb_fail, bb_ok);
 
     B.SetInsertPoint(bb_fail);
+    // did_jump perhaps in a loop block's shadow (LiftVisitor::shadowed), the
+    // rest in the real state.
     auto make_ptr = [&](size_t off, llvm::Type* ty) {
-        auto* i8ptr = B.CreateBitCast(cpu_ptr_, B.getInt8PtrTy());
+        auto* base = off == offsetof(CpuState, did_jump) ? did_jump_base : real_cpu;
+        auto* i8ptr = B.CreateBitCast(base, B.getInt8PtrTy());
         auto* gep   = B.CreateConstGEP1_32(B.getInt8Ty(), i8ptr, (unsigned)off);
         return B.CreateBitCast(gep, ty->getPointerTo());
     };
@@ -8445,7 +8586,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_lo(uint32_t grp, uint32_t regtest, uin
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, cpu_ptr_, val, expected, 0);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 0);
     return true;
 }
 bool LiftVisitor::decode_pseudoDbg_Assert_hi(uint32_t grp, uint32_t regtest, uint32_t expected) {
@@ -8459,7 +8600,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_hi(uint32_t grp, uint32_t regtest, uin
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, cpu_ptr_, val, expected, 16);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 16);
     return true;
 }
 bool LiftVisitor::decode_pseudoDbg_Assert_low(uint32_t grp, uint32_t regtest, uint32_t expected) {
@@ -8473,7 +8614,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_low(uint32_t grp, uint32_t regtest, ui
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, cpu_ptr_, val, expected, 0);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 0);
     return true;
 }
 bool LiftVisitor::decode_pseudoDbg_Assert_high(uint32_t grp, uint32_t regtest, uint32_t expected) {
@@ -8487,7 +8628,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_high(uint32_t grp, uint32_t regtest, u
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, cpu_ptr_, val, expected, 16);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 16);
     return true;
 }
 

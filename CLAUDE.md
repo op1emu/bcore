@@ -95,6 +95,7 @@ The emulator:
 - `--max-steps N`: Leave each block after at most N packets (0 = unlimited, default; 1 single-steps)
 - `--count-packets`: Print the packets and block runs executed (`packets=N runs=M`) to stderr at exit
 - `--chain`: Blocks run the next block themselves until a CEC event or a halt (CpuState::chain_budget); results match a run without it
+- `--no-loop-blocks`: Blocks that run themselves again compile like any other (Core::set_loop_blocks); results match
 - `--opt-level N` / `-O N`: LLVM optimization level 0–3 (default: 2)
 
 ### Adding Emulator Support for New Instructions
