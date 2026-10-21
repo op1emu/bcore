@@ -12,6 +12,7 @@
 #include <llvm/IR/Module.h>
 
 class Memory;
+class LiftVisitor;
 struct CpuState;
 
 struct BBTranslateResult {
@@ -37,6 +38,18 @@ public:
     // entry guard (LiftVisitor::set_careful); its function is
     // bb_0x<pc>.careful.
     BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr, bool careful = false);
+    // Loop blocks: a block that runs itself again in a native loop keeps the
+    // guest state in an alloca, which the IR pipeline turns into SSA values,
+    // so a loop's registers stay in host registers across its back edge
+    // instead of going through CpuState at every packet. It copies the state
+    // to the real CpuState before each helper call and each exit, and back
+    // after each call that may have changed it. Exact either way.
+    void set_loop_blocks(bool loop) { loop_blocks_ = loop; }
+    // The declaration a loop block's exits call where they copy the shadow
+    // out (replaced by the copies, as LiftVisitor::kSyncOut is).
+    static constexpr const char* kCommit = "bcore.loop.commit";
+    // The function attribute a loop block carries.
+    static constexpr const char* kLoopBlockAttr = "bcore-loop-block";
     // Upper bound on packets per block (default and maximum 256). Limited
     // mode sets it to the step budget, since a run never executes more:
     // translating the rest of the block would only be compiled again from
@@ -68,11 +81,21 @@ public:
 
 private:
     void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
-    llvm::BasicBlock* emit_lb_guard(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu,
-                                    llvm::BasicBlock* first_entry, uint32_t first_pc, uint32_t last_pc,
-                                    const uint32_t hint_lb[2], const uint32_t hint_lt[2], unsigned pinned);
+    llvm::BasicBlock* emit_lb_guard(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,
+                                    const LiftVisitor& visitor, llvm::BasicBlock* first_entry, uint32_t first_pc, uint32_t last_pc,
+                                    const uint32_t hint_lb[2], const uint32_t hint_lt[2], unsigned pinned,
+                                    unsigned l_zero);
+    // What a loop block keeps in its shadow (LiftVisitor::set_loop_mode).
+    struct LoopPlan {
+        std::set<size_t> fields;
+        unsigned l_zero = 0;
+    };
+    BBTranslateResult translate_as(uint32_t pc, const CpuState* hint, bool careful,
+                                   const LoopPlan* loop, LoopPlan* plan);
+    static bool expand_loop_syncs(llvm::Function* fn, llvm::AllocaInst* shadow, llvm::Value* real);
     // direct: a block whose return stays a return.
-    void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* mem,
+    void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,
+                         llvm::Value* mem,
                          uint32_t entry_pc, llvm::BasicBlock* self_loop, llvm::BasicBlock* direct,
                          llvm::BasicBlock* first_entry, const std::set<llvm::ReturnInst*>* steady);
     static llvm::BasicBlock* lb_guard_miss_block(llvm::BasicBlock* guard);
@@ -87,6 +110,7 @@ private:
     bool chaining_ = false;
     bool chain_dry_ = false;
     std::function<bool(uint32_t)> chain_filter_;
+    bool loop_blocks_ = false;
     bool host_cycles_ = false;
     bool count_chained_ = true;
     bool lazy_state_ = true;

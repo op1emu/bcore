@@ -58,6 +58,7 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_host_cycles(host_cycles_);
     translator_->set_count_chained(count_chained_);
     translator_->set_lazy_state(lazy_state_);
+    translator_->set_loop_blocks(loop_blocks_);
     applyModuleTarget();
 
     return true;
@@ -148,6 +149,10 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
     profile_->want_object_shapes = want_metrics;
     profile_->capture_ns = 0;
     const uint64_t materialize_begin = bcore_profile::monotonic_ns();
+#endif
+#if BCORE_ENABLE_PROFILE
+    for (auto& f : *result.module)
+        if (!f.isDeclaration() && f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) profile_->stats.loop_blocks++;
 #endif
     BbFunc fn = nullptr;
     if (jit_->addModule(pc,
@@ -322,6 +327,11 @@ bool Core::set_post_pipeline(const std::string& pipeline) {
 void Core::set_lazy_state(bool lazy) {
     lazy_state_ = lazy;
     if (translator_) translator_->set_lazy_state(lazy_state_);
+}
+
+void Core::set_loop_blocks(bool loop) {
+    loop_blocks_ = loop;
+    if (translator_) translator_->set_loop_blocks(loop_blocks_);
 }
 
 void Core::set_dump_ir(bool enable) {

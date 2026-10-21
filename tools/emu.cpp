@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
     bool count_packets = false;
     bool chain = false;
     bool lazy_state = true;
+    bool loop_blocks = true;
     const char* post_pipeline = nullptr;
     uint64_t max_steps = 0; // 0 = unlimited
     int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
@@ -58,6 +59,8 @@ int main(int argc, char** argv) {
             chain = true;
         } else if (strcmp(argv[i], "--no-lazy-state") == 0) {
             lazy_state = false;
+        } else if (strcmp(argv[i], "--no-loop-blocks") == 0) {
+            loop_blocks = false;
         } else if (strcmp(argv[i], "--post-pipeline") == 0 && i + 1 < argc) {
             post_pipeline = argv[++i];
         } else {
@@ -66,7 +69,7 @@ int main(int argc, char** argv) {
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -186,6 +189,7 @@ int main(int argc, char** argv) {
     // Blocks run the next one themselves until a CEC event or a halt.
     core.set_chaining(chain);
     core.set_lazy_state(lazy_state);
+    core.set_loop_blocks(loop_blocks);
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
         return 1;

@@ -57,6 +57,12 @@ public:
     // stores them at every packet, as before). Either way every reader sees
     // the same values.
     void set_lazy_state(bool lazy);
+    // Blocks compiled from now on that run themselves again in a native loop
+    // (a hardware loop, a jump to their start) keep the guest state in SSA
+    // values across the loop instead of in CpuState, copying it out before
+    // each helper call and exit (BBTranslator::set_loop_blocks; on by
+    // default). Either way every reader sees the same values.
+    void set_loop_blocks(bool loop);
     // Passes (PassBuilder text) run on every block after the default IR
     // pipeline, from the next compilation on; empty for none. The default is
     // kDefaultPostPipeline. False, and unchanged, if it does not parse or init
@@ -125,5 +131,6 @@ private:
     bool host_cycles_ = false;
     bool count_chained_ = true;
     bool lazy_state_ = true;
+    bool loop_blocks_ = true;
     std::string post_pipeline_ = kDefaultPostPipeline;
 };
