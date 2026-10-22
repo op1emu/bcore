@@ -86,10 +86,16 @@ set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
 
 # ---- Copy-and-patch stencils (cp_format.h): x86-64 hosts ----
 # Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
+# On by default where the stencils run (x86-64); OFF builds the core
+# without them anywhere (Core::set_copy_patch then does nothing).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    set(BCORE_COPY_PATCH ON)
+    set(BCORE_COPY_PATCH_DEFAULT ON)
 else()
-    set(BCORE_COPY_PATCH OFF)
+    set(BCORE_COPY_PATCH_DEFAULT OFF)
+endif()
+option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64 only)" ${BCORE_COPY_PATCH_DEFAULT})
+if(BCORE_COPY_PATCH AND NOT BCORE_COPY_PATCH_DEFAULT)
+    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 host")
 endif()
 set(BCORE_CP_SOURCES)
 if(BCORE_COPY_PATCH)
