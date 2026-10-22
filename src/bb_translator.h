@@ -125,6 +125,8 @@ private:
                          llvm::Value* mem,
                          uint32_t entry_pc, llvm::BasicBlock* self_loop, llvm::BasicBlock* direct,
                          llvm::BasicBlock* first_entry, const std::set<llvm::ReturnInst*>* steady);
+    // A function's plain returns as one (tier 0).
+    static void merge_returns(llvm::Function* fn);
     static llvm::BasicBlock* lb_guard_miss_block(llvm::BasicBlock* guard);
 
     Memory* mem_;
