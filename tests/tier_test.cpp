@@ -162,9 +162,44 @@ static void test_late_page_table() {
     }
 }
 
+// A promotion queued on the worker, then tiering turned off and the block
+// compiled again (careful, after a loop-bottom guard miss): the promotion
+// was of the code replaced, and must not replace the new code (found in
+// review: it did, the guard missed again, and the second careful
+// compilation's symbol was defined twice).
+static void test_stale_promotion() {
+    auto once = [](bool tiered) {
+        CpuState cpu{};
+        FlatMemory mem(0, 0x4000, &cpu);
+        mem.write16(0x100, kAdd1); mem.write16(0x102, kAdd1); mem.write16(0x104, jump_s(0x104, 0x100));
+        Core core(&cpu, &mem);
+        if (tiered) {
+            core.set_tiering(1);
+            core.set_tier_background(true, 20);
+        }
+        require(core.init(2), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        require(core.run(0x100), "run");
+        if (tiered) core.set_tiering(0);
+        cpu.lt[0] = 0x100; cpu.lb[0] = 0x102;
+        std::vector<Run> runs;
+        for (int r = 0; r < 30; ++r) {
+            cpu.lc[0] = 3;
+            require(core.run(0x100), "a run after the block was compiled again failed");
+            runs.push_back({cpu.pc, cpu.packets, cpu.chain_packets, cpu.chain_blocks});
+            cpu.did_jump = false;
+        }
+        runs.push_back({cpu.dpregs[0], 0, 0, 0});
+        return runs;
+    };
+    require(once(true) == once(false), "a stale promotion changed what ran");
+}
+
 int main() {
     test_throwing_callback();
     test_late_page_table();
+    test_stale_promotion();
     std::vector<Case> cases;
     // 300 blocks of R0 += 1 that jump on to the next, the last back to the
     // first: the second time round, a chained run brings each to a count of 2.
