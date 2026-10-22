@@ -1,4 +1,3 @@
-#pragma once
 
 // DEF_INSN(opcode, "assembly template", "binary pattern")
 
