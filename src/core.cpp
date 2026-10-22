@@ -203,6 +203,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
                 if (want_metrics) {
                     BcoreCompileMetrics metrics;
                     metrics.object_bytes = block.size;
+                    metrics.object_hash = cp_->code_hash(tier.counter, config);
                     metrics.terminator = "copy-patch";
                     metrics.tier = 0;
                     metrics.copy_patch = true;

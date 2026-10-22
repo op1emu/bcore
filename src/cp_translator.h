@@ -70,6 +70,11 @@ public:
     // halfword it read, for a translation of the same block to read again.
     Block translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config);
     const bcore_tier::CodeLog& words() const { return words_; }
+    // A hash of the last block's code, the same for the same block in any
+    // process (BcoreCompileMetrics::object_hash): FNV-1a over each stencil's
+    // code before relocation, its relocations and the values of its value
+    // holes, but not the addresses its jumps and calls reach.
+    uint64_t code_hash(uint32_t counter, const Config& config) const;
     // Told of the code an arena's first block places beside it: the exit
     // stencils (bcore_cp_exit) and the jumps to the helpers
     // (bcore_cp_jump_<helper>), for a profiler's code map.
@@ -111,6 +116,10 @@ private:
     Arena* arena_for(size_t size);
     bool place(Arena& arena, uint8_t* code, const Piece& piece, const Piece* next, uint32_t packet,
                uint64_t field0, uint32_t counter, const Config& config);
+    // A value hole's value in a piece (packet: its index in the block;
+    // field0: the length of the packet the fall-through stencil follows).
+    static bool value_of(const Piece& piece, const bcore_cp::Reloc& r, uint32_t packet, uint64_t field0,
+                         uint32_t counter, const Config& config, uint64_t& value);
 
     JitEngine& jit_;
     std::function<void(const char*, const void*, size_t)> listener_;
