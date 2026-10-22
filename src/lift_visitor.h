@@ -71,6 +71,24 @@ public:
     void set_careful(bool careful) { careful_ = careful; }
     // IDLE ends the block with CpuState::idle set (Core::set_idle_waits).
     void set_idle_waits(bool waits) { idle_waits_ = waits; }
+    // Stencil mode (tools/stencilgen.cpp): one packet's code compiled before
+    // its PC is known, for the copy-and-patch tier 0 (cp_translator.h). Every
+    // constant the code derives from the PC is then pc_hole + (pc - base),
+    // and an immediate or PC-relative value a 32-bit pattern takes from its
+    // fields is one of the holes `fields` (kFieldHoles of them): the
+    // translator fills the holes in. Outside stencil mode both are plain
+    // constants.
+    static constexpr unsigned kFieldHoles = 4;
+    void set_stencil(llvm::Constant* pc_hole, uint32_t base, llvm::Constant* const* fields) {
+        stencil_pc_ = pc_hole;
+        stencil_base_ = base;
+        for (unsigned i = 0; i < kFieldHoles; ++i) stencil_fields_[i] = fields ? fields[i] : nullptr;
+    }
+    // The value each field hole stands for in this lift (0 for an unused
+    // one), PC-relative ones as their offset from the PC; and which holes
+    // the lift used.
+    const uint32_t* field_values() const { return field_values_; }
+    unsigned fields_used() const { return fields_used_; }
     // Loop mode (BBTranslator's loop blocks): the visitor's cpu pointer is a
     // shadow copy of the guest state the block keeps in an alloca, and `real`
     // the CpuState the host and the helpers see. The shadow holds the fields
@@ -684,6 +702,11 @@ private:
     bool fastmem_ = false;
     bool accesses_cycles_ = false;
     const CpuState* hint_ = nullptr;
+    llvm::Constant* stencil_pc_ = nullptr;  // set_stencil
+    uint32_t stencil_base_ = 0;
+    llvm::Constant* stencil_fields_[kFieldHoles] = {};
+    uint32_t field_values_[kFieldHoles] = {};
+    unsigned fields_used_ = 0;
     bool careful_ = false;
     bool idle_waits_ = false;
     llvm::Value* real_cpu_ = nullptr;  // loop mode: the real CpuState (set_loop_mode)
@@ -803,8 +826,19 @@ private:
     void emit_astat_decompose(llvm::Value* astat);
 
     // Set did_jump=true and pc=target
-    void emit_jump(llvm::Value* target, const char* kind = "jump");
+    // even: the target is known to be even (no alignment check).
+    void emit_jump(llvm::Value* target, const char* kind = "jump", bool even = false);
     void emit_jump_imm(uint32_t target, const char* kind = "jump");
+
+    // A PC the code uses: a constant, or in stencil mode the PC hole plus
+    // its offset from the packet's PC (set_stencil).
+    llvm::Constant* pc_value(uint32_t pc);
+    // An immediate taken from the instruction's fields: a constant, or in
+    // stencil mode field hole `slot`.
+    llvm::Value* field_value(uint32_t value, unsigned slot);
+    // A PC-relative value taken from the fields (a branch target, a loop's
+    // top or bottom): the PC plus field hole `slot` in stencil mode.
+    llvm::Value* pc_field(uint32_t pc, unsigned slot);
     void terminate(const char* kind) { terminated_ = true; exit_kind_ = kind; }
 
     // Compute hwloop-adjusted return address for CALL instructions:

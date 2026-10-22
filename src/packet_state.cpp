@@ -34,6 +34,14 @@ std::optional<Field> field_at(Value* ptr, Value* cpu) {
     return std::nullopt;
 }
 
+// A constant one of the three fields is set to: an integer, or in a stencil
+// (LiftVisitor::set_stencil) an expression of a hole. Constants are
+// uniqued, so two are the same value exactly when they are one object.
+Constant* pc_constant(Value* value) {
+    if (isa<ConstantInt>(value) || isa<ConstantExpr>(value)) return cast<Constant>(value);
+    return nullptr;
+}
+
 // What a call does to pc.
 enum class PcEffect {
     None,     // never writes it
@@ -50,9 +58,9 @@ PcEffect pc_effect(CallInst& call) {
     if (name == "bfin_hwloop_step") {
         // The form after an instruction that jumped passes its own PC twice:
         // did_jump is set, so the step leaves pc alone.
-        auto* at = dyn_cast<ConstantInt>(call.getArgOperand(1));
-        auto* next = dyn_cast<ConstantInt>(call.getArgOperand(2));
-        if (at && next && at->getZExtValue() == next->getZExtValue()) return PcEffect::None;
+        auto* at = pc_constant(call.getArgOperand(1));
+        auto* next = pc_constant(call.getArgOperand(2));
+        if (at && next && at == next) return PcEffect::None;
         return next ? PcEffect::Hwloop : PcEffect::Any;
     }
     // The memory callbacks and the CEC's helpers change pc only by raising
@@ -78,7 +86,7 @@ bool reads_state(Instruction& inst) {
 struct Def {
     enum Kind { Entry, Store, Known, Unresolved, Opaque } kind;
     Instruction* inst = nullptr;     // the store or call
-    ConstantInt* value = nullptr;    // Store with a constant, Known
+    Constant* value = nullptr;       // Store with a constant, Known (pc_constant)
     int resolved = -1;               // Unresolved from a Hwloop call: its Known def
 };
 
@@ -124,7 +132,7 @@ void StateSink::enumerate() {
                 if (auto f = field_at(store->getPointerOperand(), cpu_)) {
                     def_of_[*f][store] = int(defs_[*f].size());
                     defs_[*f].push_back(
-                        {Def::Store, store, dyn_cast<ConstantInt>(store->getValueOperand())});
+                        {Def::Store, store, pc_constant(store->getValueOperand())});
                 }
                 continue;
             }
@@ -140,7 +148,7 @@ void StateSink::enumerate() {
             Def unresolved{Def::Unresolved, call};
             if (effect == PcEffect::Hwloop) {
                 unresolved.resolved = int(defs_[kPc].size());
-                defs_[kPc].push_back({Def::Known, call, cast<ConstantInt>(call->getArgOperand(2))});
+                defs_[kPc].push_back({Def::Known, call, pc_constant(call->getArgOperand(2))});
             }
             def_of_[kPc][call] = int(defs_[kPc].size());
             defs_[kPc].push_back(unresolved);
@@ -280,12 +288,12 @@ void StateSink::rewrite() {
     for (int f = 0; f < kFields; ++f) {
         auto& defs = defs_[f];
         // The one constant every definition reaching a reader stores, if any.
-        auto agreed = [&](const Set& reaching) -> ConstantInt* {
-            ConstantInt* value = nullptr;
+        auto agreed = [&](const Set& reaching) -> Constant* {
+            Constant* value = nullptr;
             for (int id : reaching.set_bits()) {
                 const Def& def = defs[id];
                 if ((def.kind != Def::Store && def.kind != Def::Known) || !def.value) return nullptr;
-                if (value && value->getValue() != def.value->getValue()) return nullptr;
+                if (value && value != def.value) return nullptr;
                 value = def.value;
             }
             return value;
@@ -298,7 +306,7 @@ void StateSink::rewrite() {
         for (size_t id = 0; id < defs.size(); ++id)
             removed[id] = defs[id].kind == Def::Store && defs[id].value && !kept[id];
         for (auto& reader : readers_[f]) {
-            ConstantInt* value = agreed(reader.reaching);
+            Constant* value = agreed(reader.reaching);
             if (!value) continue;
             bool needs = false;
             for (int id : reader.reaching.set_bits()) needs |= removed[id];

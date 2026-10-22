@@ -46,7 +46,11 @@ public:
     // opt_level: the IR pipeline, 0=None, 1=O1, 2=O2, 3=O3.
     // codegen_level: the backend on the same scale; <0 follows opt_level.
     // split: the machine function splitter moves cold paths apart (init()).
-    bool init(int opt_level, int codegen_level, bool split = true);
+    // stencil: for the copy-and-patch tier's stencils (tools/stencilgen.cpp)
+    // rather than for this host: generic x86-64 with the small code model
+    // and static relocations, which fold each hole into the instruction
+    // that uses it, and no vectorizers (whose constants would be data).
+    bool init(int opt_level, int codegen_level, bool split = true, bool stencil = false);
     // The IR pipeline, in place; at opt_level 0 only a loop block's guest
     // memory lowered (guest_memory.h). Every module goes through it before
     // emit.

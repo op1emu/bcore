@@ -30,6 +30,23 @@ BBTranslator::BBTranslator(Memory* mem,
                            bool unlimited, bool fastmem, uint64_t fast_base)
     : mem_(mem), unlimited_(unlimited), fastmem_(fastmem), fast_base_(fast_base) {}
 
+// The external functions the lifter uses.
+void BBTranslator::declare_externs(Module& mod) {
+    auto& ctx = mod.getContext();
+    auto* i8ptr = Type::getInt8PtrTy(ctx);
+    auto* void_ty = Type::getVoidTy(ctx);
+    auto* i32_ty = Type::getInt32Ty(ctx);
+    auto* i8_ty = Type::getInt8Ty(ctx);
+    auto* i16_ty = Type::getInt16Ty(ctx);
+    mod.getOrInsertFunction("bfin_syscall", FunctionType::get(void_ty, {i8ptr, i8ptr}, false));
+    mod.getOrInsertFunction("mem_read8", FunctionType::get(i8_ty, {i8ptr, i32_ty}, false));
+    mod.getOrInsertFunction("mem_read16", FunctionType::get(i16_ty, {i8ptr, i32_ty}, false));
+    mod.getOrInsertFunction("mem_read32", FunctionType::get(i32_ty, {i8ptr, i32_ty}, false));
+    mod.getOrInsertFunction("mem_write8", FunctionType::get(void_ty, {i8ptr, i32_ty, i8_ty}, false));
+    mod.getOrInsertFunction("mem_write16", FunctionType::get(void_ty, {i8ptr, i32_ty, i16_ty}, false));
+    mod.getOrInsertFunction("mem_write32", FunctionType::get(void_ty, {i8ptr, i32_ty, i32_ty}, false));
+}
+
 // A block that may run itself again in a native loop is lifted a second
 // time as a loop block (translate_as(..., loop = true)) where the first
 // lifting says it qualifies: chaining, unlimited and not dry, not careful,
@@ -88,23 +105,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     Value* mem_ptr = &*arg_it++;
     mem_ptr->setName("mem");
 
-    // Declare external functions used by the lifter
-    auto declare_extern = [&](const char* name, FunctionType* ft) {
-        mod->getOrInsertFunction(name, ft);
-    };
-
-    auto* void_ty = Type::getVoidTy(*ctx);
-    auto* i32_ty = Type::getInt32Ty(*ctx);
-    auto* i8_ty = Type::getInt8Ty(*ctx);
-    auto* i16_ty = Type::getInt16Ty(*ctx);
-
-    declare_extern("bfin_syscall", FunctionType::get(void_ty, {i8ptr, i8ptr}, false));
-    declare_extern("mem_read8", FunctionType::get(i8_ty, {i8ptr, i32_ty}, false));
-    declare_extern("mem_read16", FunctionType::get(i16_ty, {i8ptr, i32_ty}, false));
-    declare_extern("mem_read32", FunctionType::get(i32_ty, {i8ptr, i32_ty}, false));
-    declare_extern("mem_write8", FunctionType::get(void_ty, {i8ptr, i32_ty, i8_ty}, false));
-    declare_extern("mem_write16", FunctionType::get(void_ty, {i8ptr, i32_ty, i16_ty}, false));
-    declare_extern("mem_write32", FunctionType::get(void_ty, {i8ptr, i32_ty, i32_ty}, false));
+    declare_externs(*mod);
 
     // A loop block's guest state: the shadow the visitor lifts into, copied
     // from the real state at entry (expand_loop_syncs).
@@ -295,6 +296,14 @@ static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
 // running, and the host compiles it again after the run.
 void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* first_entry,
                                      uint32_t counter, uint32_t threshold) {
+    emit_tier_counter(b, cpu, first_entry, b.getInt32(counter),
+                      b.getInt64(offsetof(TierTable, count) + 4 * uint64_t(counter)), b.getInt32(threshold));
+}
+
+// The same with the counter, its count's offset in the TierTable and the
+// threshold as values: a stencil's holes (emit_stencil_prologue).
+void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* first_entry,
+                                     Value* counter, Value* count_offset, Value* threshold) {
     auto& ctx = b.getContext();
     auto* i8 = b.getInt8Ty();
     auto* i32 = b.getInt32Ty();
@@ -302,10 +311,10 @@ void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* fir
     b.SetInsertPoint(at);
     auto* chain = b.CreateLoad(b.getInt8PtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
     auto* table = b.CreateGEP(i8, chain, b.getInt64(kTierTableOffset), "tier_table");
-    auto* slot = b.CreateGEP(i8, table, b.getInt64(offsetof(TierTable, count) + 4 * uint64_t(counter)));
+    auto* slot = b.CreateGEP(i8, table, count_offset);
     auto* count = b.CreateAdd(b.CreateLoad(i32, slot), b.getInt32(1), "tier_count");
     b.CreateStore(count, slot);
-    Instruction* hot = SplitBlockAndInsertIfThen(b.CreateICmpEQ(count, b.getInt32(threshold)), at, false,
+    Instruction* hot = SplitBlockAndInsertIfThen(b.CreateICmpEQ(count, threshold), at, false,
                                                  weights_rarely(ctx));
     b.SetInsertPoint(hot);
     auto* filed_ptr = b.CreateGEP(i8, table, b.getInt64(offsetof(TierTable, requests)));
@@ -316,7 +325,7 @@ void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* fir
     b.SetInsertPoint(room);
     auto* request = b.CreateGEP(i8, table, b.CreateAdd(b.getInt64(offsetof(TierTable, request)),
                                                        b.CreateMul(b.CreateZExt(filed, b.getInt64Ty()), b.getInt64(4))));
-    b.CreateStore(b.getInt32(counter), request);
+    b.CreateStore(counter, request);
 }
 
 // A loop block's shadow (BBTranslator::set_loop_blocks), once lifted. The
