@@ -76,6 +76,9 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     auto* ft = FunctionType::get(Type::getVoidTy(*ctx), {i8ptr, i8ptr}, false);
     auto* fn = Function::Create(ft, Function::ExternalLinkage, fname, mod.get());
     fn->setCallingConv(CallingConv::GHC);  // see BbFunc
+    // Nothing unwinds through generated code (the host's memory callbacks
+    // do not throw): no unwind tables to emit, load and register.
+    fn->addFnAttr(Attribute::NoUnwind);
 
     auto* entry = BasicBlock::Create(*ctx, "entry", fn);
     IRBuilder<> builder(entry);
@@ -264,6 +267,10 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
 
     if (tier && tier->level == 0 && first_entry)
         emit_tier_counter(builder, cpu_ptr, first_entry, tier->counter, tier->threshold);
+    // A tier-0 block is compiled with FastISel, which cannot select a
+    // return in the GHC convention: every block that ends in one goes to
+    // SelectionDAG instead. One return, one such block.
+    if (tier && tier->level == 0) merge_returns(fn);
 
     // Verify the module (Core::set_verify)
     std::string err_str;
@@ -686,6 +693,23 @@ static Tail sink_tail(ReturnInst* ret, Value* cpu) {
 //
 // A back edge to the block's start in `steady` (the loop registers as the
 // entry guard found them) branches past the guard, to first_entry.
+void BBTranslator::merge_returns(Function* fn) {
+    std::vector<ReturnInst*> returns;
+    for (auto& block : *fn)
+        if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator())) {
+            // A musttail call must stay right before its return.
+            auto* call = dyn_cast_or_null<CallInst>(ret->getPrevNode());
+            if (!call || !call->isMustTailCall()) returns.push_back(ret);
+        }
+    if (returns.size() < 2) return;
+    auto* exit = BasicBlock::Create(fn->getContext(), "return", fn);
+    ReturnInst::Create(fn->getContext(), exit);
+    for (auto* ret : returns) {
+        BranchInst::Create(exit, ret->getParent());
+        ret->eraseFromParent();
+    }
+}
+
 void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* real, Value* mem,
                                    uint32_t entry_pc, BasicBlock* self_loop, BasicBlock* direct,
                                    BasicBlock* first_entry, const std::set<ReturnInst*>* steady) {
