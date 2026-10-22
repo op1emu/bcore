@@ -698,3 +698,38 @@ of 45 IR instructions cost 1.8 ms.
 - The threshold trades JIT time for execution: on the boot, from 300 to
   100000, all JIT CPU 79 -> 32 s and execution 2.1 -> 2.9 s. op1emu uses
   30000.
+
+## Copy-and-patch tier 0
+
+- What a tier-0 block costs is LLVM's, about 1.1 ms for a median block of 8
+  packets, linear in its IR: FastISel and the MC layer, whatever the IR
+  pipeline does. Blocks copied together from stencils compiled at build
+  time take 4 us (median; 9,000 host instructions, mostly the Tier0Record's
+  copy of CpuState and the relocations).
+- The stencils come from the lifter itself (BBTranslator::translate_stencil
+  in stencil mode), so they cannot drift from it: every 16-bit encoding
+  separately (49,808 of 49,920; the rest load a constant pool), and the
+  32-bit patterns with their immediates as holes. Holes for the register
+  fields would have needed the lifter rewritten, since its C++ decides on
+  register numbers (REGMV, ASTAT, push/pop of RETI and USP, the CC forms).
+- Check what you cannot see: a lift at two PCs must be the same IR, a
+  32-bit pattern's lifts with other hole values the same IR with the values
+  its formula gives, and every relocation one the translator fills in.
+  Comparing IR text, number the attribute groups out: a module numbers them
+  as functions come, and a check lifts one function after another.
+- The packet state stays lazy across stencils: each stores its own PC,
+  length and index at its top for the sink to move to their readers, and
+  the jump to the next packet reads nothing. The hot path of a plain ALU
+  instruction then stores no PC at all.
+- Stencil code has no unwind information; the helpers that may reach the
+  host's code are wrapped, catch, set did_jump and a budget of 0 (the block
+  leaves at once), and Core::run throws again. Without a wrapper the
+  exception is std::terminate (tier_test checks).
+- Coverage decides the gain: 16-bit-only blocks were 5% of the boot's tier-0
+  time; with CALL, LDIMM, LSETUP, LDSTidxI and LINK 48.5%, and the CPU
+  thread's compile time fell 47%. Blocks with a parallel packet are nearly
+  all the rest.
+- What the stencils cost at run time: each exit goes through the arena's
+  shared chain exit (3% of a boot's execution samples) and each packet
+  compares the loop bottoms, calling bfin_hwloop_step at one (2.6%); the
+  execution's host instructions still rose only 0.2%.

@@ -49,6 +49,10 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/jit_engine.h/cpp`: LLJIT wrapper that loads the Compiler's object files (`addObject`), with explicit `absoluteSymbols` registration for all extern "C" helpers, and the chain table with the tier table after it (`include/tier_table.h`)
 - `src/compile_worker.h/cpp`: `CompileWorker` — a thread with a Compiler of its own that runs the IR pipeline and backend of promotions (Core::set_tier_background); the dispatching thread lifts, loads and publishes
 - `src/tier_memory.h`: `RecordingMemory`/`ReplayMemory` (namespace `bcore_tier`): a tier-0 compilation logs the instructions it reads, its promotion reads only those
+- `src/cp_translator.h/cpp`: `CpTranslator` — the copy-and-patch tier 0 (Core::set_copy_patch): a block copied together from stencils, holes filled in; helpers wrapped so host exceptions cross no stencil code
+- `src/cp_format.h`, `src/cp_patterns.def`, `src/cp_stencils.cpp`: the stencils' format, the 32-bit patterns that have stencils (with their holes' formulas), and the generated tables in the library
+- `src/bb_stencil.cpp`: BBTranslator's stencils (one packet in LiftVisitor's stencil mode, a block's prologue, its exit)
+- `tools/stencilgen.cpp`: `bcore-stencilgen`, run by the build: lifts, checks and compiles every stencil into `cp_gen/` (report: `cp_gen/cp_stencils.txt`; `--dump WORD` prints a lift); everything but core.cpp is the `bcore-lift` library it links
 - `src/code_arena.h/cpp`: `CodeArena` (one reservation: hot code, cold parts split off by the machine function splitter, data), `CodeArenaPool` (a JitEngine's arenas: an object goes whole into one with room, else a new one, else its own `SectionMemoryManager`, so a full arena never stops the process) and the per-object `ArenaMemoryManager` that JitEngine's `RTDyldObjectLinkingLayer` uses
 - `src/bb_translator.h/cpp`: Basic-block translator — decodes instructions until terminator, produces one LLVM function per BB
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)
