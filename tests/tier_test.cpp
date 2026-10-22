@@ -5,7 +5,8 @@
 // overflows, a PC the chain filter keeps out of the chain table, a block
 // compiled again careful after its loop-bottom guard missed, and code that
 // changed in memory after tier 0 read it (an untiered block keeps running
-// the code it was compiled from, and so does its promotion).
+// the code it was compiled from, and so does its promotion); and cases found
+// in review (below).
 #include "core.h"
 #include "bcore_profile.h"
 #include "../src/cec.h"
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <stdexcept>
 #include <vector>
 
 static void require(bool ok, const char* why) {
@@ -81,7 +83,52 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     return out;
 }
 
+// A host whose memory callback throws: the exception reaches the caller of
+// Core::run through generated code, tiered or not (found in review: block
+// functions were once nounwind, and the process aborted instead).
+class ThrowingMemory : public FlatMemory {
+public:
+    explicit ThrowingMemory(CpuState* cpu) : FlatMemory(0, 0x4000, cpu) {}
+    bool throwing = false;
+    uint32_t rawmem_limit() const override { return 0; }
+    uint32_t read32(uint32_t addr) const override {
+        if (throwing) throw std::runtime_error("host read32 failure");
+        return FlatMemory::read32(addr);
+    }
+};
+
+static void test_throwing_callback() {
+    for (int opt : {0, 1, 2})
+        for (int mode : {0, 1, 2}) {  // untiered; tiered; tiered on the worker
+            CpuState cpu{};
+            ThrowingMemory mem(&cpu);
+            mem.write16(0x100, 0x9000);  // R0 = [P0++]
+            mem.write16(0x102, 0x2fff);  // JUMP.S 0x100
+            Core core(&cpu, &mem);
+            core.set_chaining(true, false);
+            if (mode) core.set_tiering(1);
+            if (mode == 2) core.set_tier_background(true, 1);
+            require(core.init(opt), "init");
+            cec_init(); evt_init();
+            cpu.lb[0] = cpu.lb[1] = 0x3f00;
+            bool caught = false;
+            for (int r = 0; r < 6 && !caught; ++r) {
+                mem.throwing = r >= 3;  // after the promotions
+                cpu.dpregs[8] = 0x200;
+                cpu.chain_budget = 7;
+                try {
+                    require(core.run(0x100), "run");
+                } catch (const std::runtime_error&) {
+                    caught = true;
+                }
+                cpu.did_jump = false;
+            }
+            require(caught, "a memory callback's exception did not reach the host");
+        }
+}
+
 int main() {
+    test_throwing_callback();
     std::vector<Case> cases;
     // 300 blocks of R0 += 1 that jump on to the next, the last back to the
     // first: the second time round, a chained run brings each to a count of 2.
