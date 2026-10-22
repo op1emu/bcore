@@ -127,8 +127,44 @@ static void test_throwing_callback() {
         }
 }
 
+// A page table the Memory shows only after the first compilation (a host
+// that counts every access first, say): a promotion compiled on the worker
+// inlines through it too, so CpuState::page_table must hold it (found in
+// review: it stayed null, and the promoted code read through null).
+class LatePagesMemory : public FlatMemory {
+public:
+    explicit LatePagesMemory(CpuState* cpu) : FlatMemory(0, 0x4000, cpu) { enable_page_table(); }
+    bool shown = false;
+    uint32_t rawmem_limit() const override { return 0; }
+    uint8_t* const* page_table() const override { return shown ? FlatMemory::page_table() : nullptr; }
+};
+
+static void test_late_page_table() {
+    for (int background : {-1, 0, 1}) {
+        CpuState cpu{};
+        LatePagesMemory mem(&cpu);
+        mem.write16(0x100, 0x9000);  // R0 = [P0++]
+        mem.write16(0x102, 0x2fff);  // JUMP.S 0x100
+        mem.write32(0x200, 42);
+        Core core(&cpu, &mem);
+        core.set_tiering(2);
+        if (background >= 0) core.set_tier_background(true, uint64_t(background));
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        for (int r = 0; r < 6; ++r) {
+            if (r == 1) mem.shown = true;
+            cpu.dpregs[8] = 0x200;
+            require(core.run(0x100), "run");
+            require(cpu.dpregs[0] == 42, "a promotion read the wrong word");
+            cpu.did_jump = false;
+        }
+    }
+}
+
 int main() {
     test_throwing_callback();
+    test_late_page_table();
     std::vector<Case> cases;
     // 300 blocks of R0 += 1 that jump on to the next, the last back to the
     // first: the second time round, a chained run brings each to a count of 2.

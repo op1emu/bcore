@@ -160,6 +160,7 @@ private:
     void (*compile(uint32_t pc, bool careful, Tier0Record* promote = nullptr))(CpuState*, Memory*);
     // Compiles again at tier 1 the blocks that asked to be (set_tiering).
     void promote();
+    void note_page_table();
     // Lifts a promotion for the worker (set_tier_background).
     void queue_promotion(Tier0Record& record, uint32_t counter);
     // Loads and publishes the worker's promotions that are due (all: every

@@ -95,11 +95,16 @@ void Core::applyModuleTarget() {
     translator_->setModuleTarget(compiler_->dataLayout(), compiler_->targetTriple());
 }
 
-BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
-    // The translation below inlines accesses through this table if there
-    // is one; the code finds it in CpuState (see Memory::page_table()).
+// A translation inlines accesses through this table if there is one; the
+// code finds it in CpuState (see Memory::page_table()), which Core::run sets
+// from here. Before every lift, the worker's promotions' too.
+void Core::note_page_table() {
     if (uint8_t* const* table = mem_->page_table())
         page_table_ = table;
+}
+
+BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
+    note_page_table();
     // Tiered (set_tiering): a promotion reads what its tier-0 compilation
     // read; a tier-0 compilation records it, while the engine has counters.
     BBTranslator::Tier tier;
@@ -390,6 +395,7 @@ void Core::promote() {
 
 void Core::queue_promotion(Tier0Record& record, uint32_t counter) {
     const uint32_t pc = record.pc;
+    note_page_table();  // its code may inline through it, as compile()'s
     bcore_tier::ReplayMemory replay(*mem_, record.code);
     BBTranslator::Tier tier;
     tier.level = 1;
