@@ -647,3 +647,47 @@ from the window at entry like an affine access (one mapped page holding
 [B, B + L) plus the width) and lowers to page + (addr - page_va).
 loop_block_test randomizes I1's buffer and step, larger than the buffer
 included, against plain blocks.
+
+## Compile time: tiers, and what did not pay
+
+op1emu's boot to its main display spent 229 s compiling 21,411 blocks and
+1.6 s running them. Blocks that ran fewer than 1000 times took 83% of the
+compile time and executed 0.9% of the packets; 8,334 ran once. Even a block
+of 45 IR instructions cost 1.8 ms.
+- ORC's SimpleCompiler builds a new legacy PassManager and calls
+  addPassesToEmitMC for every module: 6.7 s of the 229. Compiler (compiler.h)
+  builds it once over a persistent raw_svector_ostream and runs it module
+  after module, which MachineModuleInfoWrapperPass supports: its
+  doInitialization/doFinalization start and reset the MMI and MCContext.
+  The objects are byte-identical; LLJIT gets them as object files.
+- CodeGenOpt::Less produces byte-identical code to Default on x86-64 in
+  LLVM 15: a level that changes nothing.
+- Tier 0 is the plain block, no IR pipeline, CodeGenOpt::None (FastISel,
+  RegAllocFast) and no function splitter: about a quarter of the full cost.
+  FastISel selects bottom-up and gives the rest of a basic block to
+  SelectionDAG at the first instruction it cannot select; X86FastISel
+  selects no return in the GHC convention, so every basic block ending in
+  `ret` was SelectionDAG's. One return per tier-0 block: -2.4%.
+- A promotion must run the code its tier-0 block ran and see the guest state
+  that block was compiled with: the lift reads code through the host, whose
+  reads may have side effects and whose memory may have changed since.
+  RecordingMemory logs every halfword the tier-0 lift reads; the promotion
+  reads through a ReplayMemory that answers from that log only, with a copy
+  of the CpuState the tier-0 lift took its hints from.
+- Counters live after the chain table (TierTable, reached through
+  CpuState::chain_table), indexed by tier-0 compilation, not by chain slot:
+  a slot is shared by colliding PCs and absent for PCs the filter rejects.
+- On a worker thread the lift stays on the dispatching thread (the host's
+  reads again) and so do loading and publishing (the JIT and the chain
+  table are single-threaded). With guest time in packets, where a
+  promotion's code replaces the tier-0 code must not depend on the host's
+  speed: SteadyLoopSkip, for one, skips device reads only in tier-1 code.
+  publish_after puts that point a fixed number of packets after the request
+  and makes the dispatching thread wait for the worker there.
+- Batching promotions into one module (one context, Linker, one object) was
+  built and measured: the worker's CPU went up 6%, waits too. Once the
+  backend's pipeline is built once, what a small block costs is per
+  function, and filling a batch delays its publication.
+- The threshold trades JIT time for execution: on the boot, from 300 to
+  100000, all JIT CPU 79 -> 32 s and execution 2.1 -> 2.9 s. op1emu uses
+  30000.
