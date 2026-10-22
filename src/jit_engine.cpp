@@ -1,54 +1,22 @@
 #include "jit_engine.h"
-#include "guest_memory.h"
-#include "guest_speculation.h"
-#include "steady_skip.h"
-#include <llvm/Transforms/Vectorize/LoopVectorize.h>
 
 #include <cstdio>
 #include <atomic>
 #include <cstring>
-#include <mutex>
 
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/Mangling.h>
 #include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
-#include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/PassManager.h>
-#include <llvm/Passes/PassBuilder.h>
-#include <llvm/Support/CodeGen.h>
-#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
-#include <llvm/Target/TargetMachine.h>
 
 #include "code_arena.h"
 #include "syscall_emu.h"
 #include "cec.h"
 #include "cpu_state.h"
-
-// A block function's entry count (addModule), and the count under which the
-// splitter calls a basic block cold: a path behind a rare branch (weighted
-// 1:2^20) counts 2^10 at most, one behind as many as 19 even branches still
-// 2^11. Process-wide LLVM options, set once; without them the splitter would
-// ask for a profile summary instead.
-static constexpr uint64_t kEntryCount = uint64_t(1) << 30;
-static constexpr const char* kColdCount = "2048";
-
-static void split_by_counts() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        auto& options = llvm::cl::getRegisteredOptions();
-        auto set = [&](const char* name, const char* value) {
-            auto it = options.find(name);
-            if (it != options.end()) it->second->addOccurrence(0, name, value);
-        };
-        set("mfs-psi-cutoff", "0");
-        set("mfs-count-threshold", kColdCount);
-    });
-}
 
 JitEngine::JitEngine() = default;
 JitEngine::~JitEngine() = default;
@@ -60,60 +28,17 @@ static llvm::JITEvaluatedSymbol sym_from_ptr(void* ptr) {
         llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable);
 }
 
-bool JitEngine::init(int opt_level, int codegen_level) {
-    opt_level_ = opt_level;
+// Compiles bcore_enter only: blocks come as object files (addObject) from
+// a Compiler.
+bool JitEngine::init() {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
-
-    // The IR pipeline and the backend are separate knobs: the backend level
-    // decides instruction selection and register allocation, the IR pipeline
-    // what the backend is given, and each has its own compile-time cost.
-    const int cg = codegen_level < 0 ? opt_level : codegen_level;
-    llvm::CodeGenOpt::Level cg_level =
-        cg <= 0 ? llvm::CodeGenOpt::None :
-        cg == 1 ? llvm::CodeGenOpt::Less :
-        cg == 3 ? llvm::CodeGenOpt::Aggressive :
-                  llvm::CodeGenOpt::Default;
 
     auto jtmb_or_err = llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!jtmb_or_err) {
         llvm::errs() << "Failed to detect host: " << jtmb_or_err.takeError() << "\n";
         return false;
     }
-    jtmb_or_err->setCodeGenOptLevel(cg_level);
-
-    // The IR pipeline's TargetMachine comes from a copy of the compiler's
-    // builder, so its TTI describes exactly the CPU and features the code will
-    // be generated for. Without one, PassBuilder's TargetIRAnalysis is the
-    // generic implementation: zero vector registers for LoopVectorize/SLP, no
-    // x86 unrolling preferences, generic SimplifyCFG/LICM/JumpThreading costs.
-    // Single-threaded use only, like all of bcore's compilation (X86's
-    // subtarget cache in TargetMachine is unlocked).
-    {
-        auto machine = llvm::orc::JITTargetMachineBuilder(*jtmb_or_err).createTargetMachine();
-        if (!machine) {
-            llvm::errs() << "Failed to create pass TargetMachine: " << machine.takeError() << "\n";
-            return false;
-        }
-        pass_machine_ = std::move(*machine);
-    }
-    // Clang's -O1 leaves both vectorizers off and -O2/-O3 turn both on; the
-    // PipelineTuningOptions defaults (loop vectorization on, SLP off) match
-    // neither, so follow clang.
-    llvm::PipelineTuningOptions tuning;
-    tuning.LoopVectorization = opt_level >= 2;
-    tuning.LoopInterleaving = opt_level >= 2;
-    tuning.SLPVectorization = opt_level >= 2;
-    pb_ = std::make_unique<llvm::PassBuilder>(pass_machine_.get(), tuning);
-
-    // The machine function splitter moves a block's cold basic blocks into a
-    // section of their own (.text.split.*), which the arena keeps apart from
-    // the hot code, so that hot paths lie densely next to each other. It acts
-    // on functions with profile counts: addModule gives every block one, and
-    // the lifter's branch weights (rarely() in lift_visitor.cpp) make its rare
-    // paths' counts fall under the threshold set here.
-    jtmb_or_err->getOptions().EnableMachineFunctionSplitter = true;
-    split_by_counts();
 
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(std::move(*jtmb_or_err));
@@ -218,104 +143,10 @@ bool JitEngine::defineEnter() {
     return true;
 }
 
-void JitEngine::optimize_module(llvm::Module& mod) {
-    if (opt_level_ == 0) return;
-
-    llvm::OptimizationLevel lvl =
-        opt_level_ == 1 ? llvm::OptimizationLevel::O1 :
-        opt_level_ == 3 ? llvm::OptimizationLevel::O3 :
-                          llvm::OptimizationLevel::O2;
-
-    llvm::LoopAnalysisManager     lam;
-    llvm::FunctionAnalysisManager fam;
-    llvm::CGSCCAnalysisManager    cgam;
-    llvm::ModuleAnalysisManager   mam;
-
-    // PassBuilder(TM) registers the same TargetIRAnalysis itself; registering
-    // it first makes that explicit (the later default registration is then a
-    // no-op).
-    fam.registerPass([&] { return pass_machine_->getTargetIRAnalysis(); });
-    pb_->registerModuleAnalyses(mam);
-    pb_->registerCGSCCAnalyses(cgam);
-    pb_->registerFunctionAnalyses(fam);
-    pb_->registerLoopAnalyses(lam);
-    pb_->crossRegisterProxies(lam, fam, cgam, mam);
-
-    // A loop block's guest memory (guest_memory.h): its loops in canonical
-    // form and its shadow in SSA values first, so that SCEV sees the
-    // registers as inductions, then proven copies, then the rest as plain
-    // accesses. The default pipeline then cleans up after both.
-    const bool guest_memory = has_guest_memory(mod);  // lower_guest_memory takes the declarations
-    if (guest_memory) {
-        llvm::ModulePassManager pre;
-        llvm::cantFail(pb_->parsePassPipeline(
-            pre, "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
-        pre.run(mod, mam);
-        llvm::ModulePassManager versioning;
-        versioning.addPass(llvm::createModuleToFunctionPassAdaptor(GuestLoopVersioning()));
-        versioning.run(mod, mam);
-        lower_guest_memory(mod);
-        // The proven copies cleaned up, their saturating sums speculated
-        // (guest_speculation.h), and the copies that asked for it
-        // vectorized: only those, whatever the opt level.
-        llvm::ModulePassManager spec;
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg,loop-simplify,lcssa)"));
-        spec.addPass(llvm::createModuleToFunctionPassAdaptor(SatReductionSpeculation()));
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(adce,instcombine,loop-simplify,lcssa)"));
-        spec.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::LoopVectorizePass(
-            llvm::LoopVectorizeOptions().setVectorizeOnlyWhenForced(true).setInterleaveOnlyWhenForced(true))));
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg)"));
-        spec.run(mod, mam);
-        mam.clear();
-        fam.clear();
-    }
-    // Loops that wait skip to their last iteration (steady_skip.h): last, on
-    // the loops as the passes above left them (the speculative and proven
-    // copies count by their addresses, and stay out).
-    bool loop_blocks = false;
-    for (auto& f : mod) loop_blocks |= f.hasFnAttribute("bcore-loop-block");
-    if (steady_skip_ && loop_blocks) {
-        llvm::ModulePassManager steady;
-        // A loop block without guest memory had none of the above: its
-        // shadow in SSA values first.
-        llvm::cantFail(pb_->parsePassPipeline(steady, guest_memory
-            ? "function(loop-simplify,lcssa)"
-            : "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
-        steady.addPass(llvm::createModuleToFunctionPassAdaptor(SteadyLoopSkip(steady_skip_ == 1)));
-        steady.run(mod, mam);
-        mam.clear();
-        fam.clear();
-    }
-    // Rebuild per-module pipeline each call (analysis managers are fresh).
-    // passBuilder itself is reused across calls (avoids plugin registration overhead).
-    llvm::ModulePassManager mpm = pb_->buildPerModuleDefaultPipeline(lvl);
-    if (!post_pipeline_.empty())
-        llvm::cantFail(pb_->parsePassPipeline(mpm, post_pipeline_));  // checked by set_post_pipeline
-    mpm.run(mod, mam);
-}
-
-bool JitEngine::set_post_pipeline(const std::string& pipeline) {
-    if (!pipeline.empty()) {
-        llvm::ModulePassManager check;
-        if (auto err = pb_->parsePassPipeline(check, pipeline)) {
-            llvm::consumeError(std::move(err));
-            return false;
-        }
-    }
-    post_pipeline_ = pipeline;
-    return true;
-}
-
-bool JitEngine::addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
-                          std::unique_ptr<llvm::LLVMContext> ctx,
+bool JitEngine::addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
                           uint32_t fallthrough_pc, bool careful) {
-    // For the backend only, after the IR pipeline (see init()).
-    for (llvm::Function& function : *module)
-        if (!function.isDeclaration()) function.setEntryCount(kEntryCount);
-    auto tsm = llvm::orc::ThreadSafeModule(std::move(module), std::move(ctx));
-
-    if (auto err = jit_->addIRModule(std::move(tsm))) {
-        llvm::errs() << "Failed to add module for PC=0x" << llvm::format_hex(pc, 8)
+    if (auto err = jit_->addObjectFile(std::move(object))) {
+        llvm::errs() << "Failed to add object for PC=0x" << llvm::format_hex(pc, 8)
                      << ": " << err << "\n";
         return false;
     }
