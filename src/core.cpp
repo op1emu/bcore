@@ -66,6 +66,7 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_count_chained(count_chained_);
     translator_->set_lazy_state(lazy_state_);
     translator_->set_loop_blocks(loop_blocks_);
+    translator_->set_verify(verify_);
     translator_->set_idle_waits(idle_waits_);
     translator_->set_steady_skip(steady_skip_ != 0);
     applyModuleTarget();
@@ -367,6 +368,11 @@ void Core::set_lazy_state(bool lazy) {
 void Core::set_loop_blocks(bool loop) {
     loop_blocks_ = loop;
     if (translator_) translator_->set_loop_blocks(loop_blocks_);
+}
+
+void Core::set_verify(bool verify) {
+    verify_ = verify;
+    if (translator_) translator_->set_verify(verify_);
 }
 
 void Core::set_steady_skip(int mode) {

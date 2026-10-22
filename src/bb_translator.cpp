@@ -257,10 +257,10 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
         if (loop->circular) fn->addFnAttr(kCircularAttr, std::to_string(__builtin_popcount(loop->circular)));
     }
 
-    // Verify the module
+    // Verify the module (Core::set_verify)
     std::string err_str;
     raw_string_ostream err_stream(err_str);
-    if (verifyModule(*mod, &err_stream)) {
+    if (verify_ && verifyModule(*mod, &err_stream)) {
         fprintf(stderr, "Module verification failed for %s:\n%s\n",
                 fname, err_str.c_str());
     }
