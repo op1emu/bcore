@@ -257,6 +257,12 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         tier0_current_[pc] = tier.counter;
         tier0_latest_[pc] = tier.counter;
         tier0_.push_back(std::move(record));
+    } else if (fn && !promote) {
+        // Compiled anew without a tier-0 record (tiering since turned off,
+        // or out of counters): no promotion queued from earlier code may
+        // replace it.
+        tier0_current_.erase(pc);
+        tier0_latest_.erase(pc);
     }
 #if BCORE_ENABLE_PROFILE
     const uint64_t t1 = bcore_profile::monotonic_ns();
