@@ -14,6 +14,14 @@
 
 namespace llvm { class MCContext; class TargetMachine; }
 
+// What a compiled module is made of (BcoreCompileMetrics, BcoreStats).
+struct ModuleCounts {
+    uint64_t ir_instructions = 0, ir_blocks = 0;
+    uint64_t loop_blocks = 0, loops_proven = 0, loops_speculated = 0, loops_vectorized = 0;
+    uint64_t loops_steady = 0, dag_circular = 0;
+};
+ModuleCounts count_module(const llvm::Module& mod);
+
 // Turns a block's module into an object file: the IR pipeline, then the
 // backend. Everything a module does not change is built once and kept: the
 // TargetMachine, the pass builder and its analysis managers, and the

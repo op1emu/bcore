@@ -1,4 +1,5 @@
 #include "core.h"
+#include "compile_worker.h"
 #include "compiler.h"
 #include "guest_memory.h"
 #include "steady_skip.h"
@@ -83,6 +84,7 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_idle_waits(idle_waits_);
     translator_->set_steady_skip(steady_skip_ != 0);
     applyModuleTarget();
+    if (tier_background_) startWorker();
 
     return true;
 }
@@ -248,6 +250,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         fn = jit_->lookup(pc);
     if (fn && record) {
         tier0_current_[pc] = tier.counter;
+        tier0_latest_[pc] = tier.counter;
         tier0_.push_back(std::move(record));
     }
 #if BCORE_ENABLE_PROFILE
@@ -281,6 +284,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
 }
 
 bool Core::run(uint32_t pc) {
+    if (!pending_.empty()) collect_promotions();
     BbFunc fn = jit_->lookup(pc);
     if (!fn) {
         fn = compile(pc, false);
@@ -339,6 +343,8 @@ bool Core::run(uint32_t pc) {
 #if BCORE_ENABLE_PROFILE
     profile_->stats.blocks_executed += 1 + cpu_->chain_blocks;
 #endif
+    // The run's packets: those of its chained blocks and the last block's.
+    packets_run_ += uint64_t(cpu_->chain_packets) + cpu_->packets;
     if (tier_threshold_ && jit_->tierTable()->requests) promote();
     return true;
 }
@@ -367,6 +373,10 @@ void Core::promote() {
         auto current = tier0_current_.find(record->pc);
         if (current == tier0_current_.end() || current->second != counter) continue;
         tier0_current_.erase(current);
+        if (worker_) {
+            queue_promotion(*record, counter);
+            continue;
+        }
         // Failing, the tier-0 block keeps running; its count goes on, unread.
         const bool promoted = compile(record->pc, record->careful, record.get()) != nullptr;
 #if BCORE_ENABLE_PROFILE
@@ -378,7 +388,162 @@ void Core::promote() {
     }
 }
 
+void Core::queue_promotion(Tier0Record& record, uint32_t counter) {
+    const uint32_t pc = record.pc;
+    bcore_tier::ReplayMemory replay(*mem_, record.code);
+    BBTranslator::Tier tier;
+    tier.level = 1;
+    tier.code = &replay;
+#if BCORE_ENABLE_PROFILE
+    BcoreEventSink* sink = profile_->sink;
+    const bool want_metrics = sink && sink->wantsCompileMetrics();
+    if (sink) sink->onTranslateBegin(pc);
+    const uint64_t t0 = bcore_profile::monotonic_ns();
+    struct FailOnUnwind {
+        BcoreEventSink* sink;
+        uint32_t pc;
+        uint64_t t0;
+        bool armed = true;
+        ~FailOnUnwind() {
+            if (armed && sink) sink->onTranslateFailure(pc, bcore_profile::monotonic_ns() - t0);
+        }
+    } fail_on_unwind{sink, pc, t0};
+#endif
+    auto result = translator_->translate(pc, &record.hint, record.careful, &tier);
+    const bool ok = !replay.missed() && result.module;
+    CompileWorker::Job job;
+    if (ok) {
+        job.pc = pc;
+        job.counter = counter;
+        job.generation = generation_;
+        job.fallthrough_pc = result.fallthrough_pc;
+        job.exit_kind = result.exit_kind;
+        for (const llvm::Function& function : *result.module)
+            if (!function.isDeclaration()) job.name = function.getName().str();
+    }
+#if BCORE_ENABLE_PROFILE
+    const uint64_t t1 = bcore_profile::monotonic_ns();
+    fail_on_unwind.armed = false;
+    BcoreCompileMetrics metrics;
+    if (ok && want_metrics) {
+        const ModuleCounts counts = count_module(*result.module);
+        metrics.ir_instructions = counts.ir_instructions;
+        metrics.ir_blocks = counts.ir_blocks;
+        metrics.collect_ns = bcore_profile::monotonic_ns() - t1;
+        metrics.terminator = result.exit_kind;
+        metrics.tier = 1;
+        metrics.background = 1;
+    }
+    if (!ok) profile_->stats.promotions_dropped++;
+    profile_->stats.translate_ns_total += t1 - t0;
+    if (sink) {
+        sink->onCompileStage(pc, "lift", t0, t1, ok);
+        if (ok && want_metrics) sink->onCompileMetrics(pc, metrics);
+        if (ok) sink->onTranslateEnd(pc, t1 - t0);
+        else sink->onTranslateFailure(pc, t1 - t0);
+    }
+#endif
+    if (!ok) return;
+    job.context = std::move(result.context);
+    job.module = std::move(result.module);
+    pending_.push_back({pc, counter, packets_run_ + publish_after_});
+    worker_->submit(std::move(job));
+}
+
+void Core::collect_promotions(bool all) {
+    while (!pending_.empty()) {
+        const bool deterministic = all || publish_after_ != 0;
+        if (!all && deterministic && packets_run_ < pending_.front().due) return;
+        CompileWorker::Result result;
+#if BCORE_ENABLE_PROFILE
+        const uint64_t wait_begin = bcore_profile::monotonic_ns();
+#endif
+        if (!worker_->take(result, deterministic)) return;
+#if BCORE_ENABLE_PROFILE
+        if (deterministic) profile_->stats.tier_wait_ns += bcore_profile::monotonic_ns() - wait_begin;
+#endif
+        pending_.pop_front();
+        const uint32_t pc = result.job.pc;
+        // Stale: the engine was replaced (invalidate takes those), or the
+        // block compiled again at tier 0 since (careful, after a guard miss;
+        // that one promotes itself).
+        auto latest = tier0_latest_.find(pc);
+        const bool use = result.object && result.job.generation == generation_ && latest != tier0_latest_.end() &&
+                         latest->second == result.job.counter;
+#if BCORE_ENABLE_PROFILE
+        BcoreEventSink* sink = profile_->sink;
+        if (sink) {
+            BcoreBackgroundCompile work;
+            work.begin_ns = result.begin_ns;
+            work.end_ns = result.end_ns;
+            work.cpu_ns = result.cpu_ns;
+            work.ok = result.object != nullptr;
+            work.discarded = !use;
+            sink->onBackgroundCompile(pc, work);
+        }
+        if (!use) profile_->stats.promotions_discarded++;
+#endif
+        if (!use) continue;
+#if BCORE_ENABLE_PROFILE
+        const bool want_metrics = sink && sink->wantsCompileMetrics();
+        if (sink) sink->onTranslateBegin(pc);
+        const uint64_t t0 = bcore_profile::monotonic_ns();
+        profile_->want_object_shapes = want_metrics;
+        profile_->capture_ns = 0;
+#endif
+        BbFunc fn = nullptr;
+        if (jit_->addObject(pc, std::move(result.object), result.job.fallthrough_pc, result.job.name))
+            fn = jit_->lookup(pc);
+#if BCORE_ENABLE_PROFILE
+        const uint64_t t1 = bcore_profile::monotonic_ns();
+        auto& stats = profile_->stats;
+        stats.loop_blocks += result.loop_blocks;
+        stats.loops_proven += result.loops_proven;
+        stats.loops_speculated += result.loops_speculated;
+        stats.loops_vectorized += result.loops_vectorized;
+        stats.loops_steady += result.loops_steady;
+        stats.dag_circular += result.dag_circular;
+        BcoreCompileMetrics metrics;
+        metrics.collect_ns = profile_->capture_ns;
+        const uint64_t elapsed = t1 - t0 - metrics.collect_ns;
+        stats.translate_ns_total += elapsed;
+        if (fn) {
+            stats.blocks_translated++;
+            stats.blocks_promoted++;
+        } else {
+            stats.promotions_dropped++;
+        }
+        if (sink) {
+            sink->onCompileStage(pc, "materialize", t0, t1, fn != nullptr);
+            if (fn && want_metrics) {
+                metrics.ir_instructions = result.ir_instructions;
+                metrics.ir_blocks = result.ir_blocks;
+                metrics.terminator = result.job.exit_kind;
+                metrics.tier = 1;
+                metrics.background = 2;
+                auto [bytes, material] = profile_->takeObjectShape(pc);
+                metrics.object_bytes = bytes;
+                const uint64_t hash_begin = bcore_profile::monotonic_ns();
+                metrics.object_hash = bcore_profile::hash_material(material);
+                metrics.collect_ns += bcore_profile::monotonic_ns() - hash_begin;
+                sink->onCompileMetrics(pc, metrics);
+            }
+            if (fn) sink->onTranslateEnd(pc, elapsed);
+            else sink->onTranslateFailure(pc, elapsed);
+        }
+#else
+        (void)fn;
+#endif
+    }
+}
+
 void Core::invalidate() {
+    // The worker's promotions were lifted for the old engine: their code is
+    // not used (and the worker stops before the backend of one in flight).
+    if (worker_) {
+        worker_->set_generation(++generation_);
+        collect_promotions(/*all=*/true);
+    }
     jit_ = std::make_shared<JitEngine>();
     // Init cannot fail here unless it failed in Core::init already (same host,
     // same levels); if it ever does, stop rather than dereference a null LLJIT.
@@ -389,6 +554,7 @@ void Core::invalidate() {
     // The new engine's tier table starts at zero, with none of these blocks.
     tier0_.clear();
     tier0_current_.clear();
+    tier0_latest_.clear();
 #if BCORE_ENABLE_PROFILE
     // The old engine's objects are gone; drop their map entries before the
     // host can observe stale addresses, then re-arm the listeners (including
@@ -452,6 +618,10 @@ const char* const Core::kDefaultPostPipeline = "function(dse)";
 bool Core::set_post_pipeline(const std::string& pipeline) {
     if (!compiler_ || !compiler_->set_post_pipeline(pipeline)) return false;
     post_pipeline_ = pipeline;
+    if (worker_) {
+        stopWorker();  // its compiler has the old one
+        startWorker();
+    }
     return true;
 }
 
@@ -476,6 +646,29 @@ void Core::set_tiering(uint32_t threshold) {
     tier_threshold_ = threshold;
 }
 
+void Core::set_tier_background(bool background, uint64_t publish_after, std::function<void()> on_start) {
+    stopWorker();
+    tier_background_ = background;
+    publish_after_ = publish_after;
+    worker_start_ = std::move(on_start);
+    if (tier_background_ && compiler_) startWorker();
+}
+
+// Publishes what is underway, then stops the worker.
+void Core::stopWorker() {
+    if (!worker_) return;
+    collect_promotions(/*all=*/true);
+    worker_.reset();
+}
+
+void Core::startWorker() {
+    auto compiler = std::make_unique<Compiler>();
+    if (!compiler->init(opt_level_, codegen_level_) || !compiler->set_post_pipeline(post_pipeline_)) return;
+    compiler->set_steady_skip(steady_skip_);
+    worker_ = std::make_unique<CompileWorker>(std::move(compiler), worker_start_);
+    worker_->set_generation(generation_);
+}
+
 void Core::set_verify(bool verify) {
     verify_ = verify;
     if (translator_) translator_->set_verify(verify_);
@@ -484,6 +677,10 @@ void Core::set_verify(bool verify) {
 void Core::set_steady_skip(int mode) {
     steady_skip_ = mode;
     if (compiler_) compiler_->set_steady_skip(steady_skip_);
+    if (worker_) {
+        stopWorker();
+        startWorker();
+    }
     if (translator_) translator_->set_steady_skip(steady_skip_ != 0);
 }
 

@@ -52,13 +52,16 @@ struct Case {
     std::function<bool(uint32_t)> filter;
 };
 
-static Outcome run(const Case& c, int opt, uint32_t threshold) {
+// background: -1 promotions on this thread; else on the worker, published
+// after that many packets (0: as soon as the worker is done).
+static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1) {
     CpuState cpu{};
     FlatMemory mem(0, 0x4000, &cpu);
     c.load(mem);
     Core core(&cpu, &mem);
     core.set_chaining(true, false);
     core.set_tiering(threshold);
+    if (background >= 0) core.set_tier_background(true, uint64_t(background));
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
     cec_init(); evt_init();
@@ -115,15 +118,16 @@ int main() {
     cases.push_back({"guard miss", self, bottoms, 0x100, 20, 37, nullptr});
 
     unsigned compared = 0;
-    uint64_t promoted = 0, overflows = 0;
+    uint64_t promoted = 0, overflows = 0, background_promoted = 0;
     for (const Case& c : cases)
         for (int opt : {0, 1, 2}) {
             const Outcome want = run(c, opt, 0);
-            for (uint32_t threshold : {1u, 2u, 7u}) {
-                const Outcome got = run(c, opt, threshold);
+            for (uint32_t threshold : {1u, 2u, 7u})
+            for (int background : {-1, 0, 1, 50}) {
+                const Outcome got = run(c, opt, threshold, background);
                 if (!(got == want)) {
-                    fprintf(stderr, "FAIL: %s -O%d threshold %u: %zu/%zu runs\n", c.name, opt, threshold,
-                            want.runs.size(), got.runs.size());
+                    fprintf(stderr, "FAIL: %s -O%d threshold %u background %d: %zu/%zu runs\n", c.name, opt,
+                            threshold, background, want.runs.size(), got.runs.size());
                     for (size_t i = 0; i < want.runs.size() && i < got.runs.size(); ++i)
                         if (!(want.runs[i] == got.runs[i]))
                             fprintf(stderr, "  run %zu: pc %x/%x packets %u/%u chain %u/%u blocks %u/%u\n", i,
@@ -141,12 +145,14 @@ int main() {
                 promoted += got.stats.blocks_promoted;
                 overflows += got.stats.tier_request_overflows;
                 require(got.stats.promotions_dropped == 0, "a promotion read code its tier-0 block had not");
+                if (background > 0) background_promoted += got.stats.blocks_promoted;
                 ++compared;
             }
         }
 #if BCORE_ENABLE_PROFILE
     require(promoted > 0, "no block was promoted");
     require(overflows > 0, "no run filed more requests than the table holds");
+    require(background_promoted > 0, "no block was promoted on the worker");
 #endif
     printf("tier test passed (%u cases, %llu promotions, %llu request overflows)\n", compared,
            (unsigned long long)promoted, (unsigned long long)overflows);

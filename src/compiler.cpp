@@ -1,4 +1,5 @@
 #include "compiler.h"
+#include "bb_translator.h"
 #include "guest_memory.h"
 #include "guest_speculation.h"
 #include "steady_skip.h"
@@ -202,3 +203,34 @@ bool Compiler::set_post_pipeline(const std::string& pipeline) {
 
 std::string Compiler::dataLayout() const { return machine_->createDataLayout().getStringRepresentation(); }
 std::string Compiler::targetTriple() const { return machine_->getTargetTriple().str(); }
+
+ModuleCounts count_module(const llvm::Module& mod) {
+    ModuleCounts counts;
+    for (const llvm::Function& f : mod) {
+        if (f.isDeclaration()) continue;
+        for (const llvm::BasicBlock& block : f) {
+            ++counts.ir_blocks;
+            counts.ir_instructions += block.size();
+        }
+        if (f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) counts.loop_blocks++;
+        counts.loops_proven += attribute_count(f, kLoopsProvenAttr);
+        counts.loops_speculated += attribute_count(f, kLoopsSpeculatedAttr);
+        counts.loops_steady += attribute_count(f, kLoopsSteadyAttr);
+        counts.dag_circular += attribute_count(f, BBTranslator::kCircularAttr);
+        // A vectorized loop: its latch says so (as does its scalar
+        // remainder's) and does vector work.
+        for (const llvm::BasicBlock& block : f) {
+            auto* loop = block.getTerminator() ? block.getTerminator()->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
+            if (!loop) continue;
+            bool vectorized = false, vector = false;
+            for (auto& op : loop->operands())
+                if (auto* node = llvm::dyn_cast<llvm::MDNode>(op.get()); node && node->getNumOperands() &&
+                    llvm::isa<llvm::MDString>(node->getOperand(0)) &&
+                    llvm::cast<llvm::MDString>(node->getOperand(0))->getString() == "llvm.loop.isvectorized")
+                    vectorized = true;
+            for (auto& inst : block) vector |= inst.getType()->isVectorTy();
+            if (vectorized && vector) counts.loops_vectorized++;
+        }
+    }
+    return counts;
+}
