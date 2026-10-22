@@ -84,7 +84,7 @@ struct BcoreCompileMetrics {
     int background           = 0;
     // A tier-0 block made of stencils (Core::set_copy_patch): no IR (the
     // sizes are 0), terminator "copy-patch", object_bytes its code's size,
-    // object_hash 0.
+    // object_hash over its stencils' code, relocations and hole values.
     bool copy_patch          = false;
 };
 

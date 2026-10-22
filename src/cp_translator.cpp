@@ -250,21 +250,8 @@ bool CpTranslator::place(Arena& arena, uint8_t* code, const Piece& piece, const 
         const Reloc& r = kRelocs[s.relocs + i];
         if (r.offset >= piece.size) continue;  // in the dropped jump to the next packet
         uint64_t value = 0;
-        if (r.hole == kHolePc) {
-            value = piece.pc;
-        } else if (r.hole == kHolePacket) {
-            value = packet;
-        } else if (r.hole >= kHoleField0 && r.hole < kHoleField0 + 4) {
-            const unsigned f = r.hole - kHoleField0;
-            if (piece.selected >= 0) value = field_hole_value(kSelected32[piece.selected].fields[f], piece.insn, piece.pc);
-            else if (f == 0) value = field0;
-            else return false;
-        } else if (r.hole == kHoleCounter) {
-            value = counter;
-        } else if (r.hole == kHoleCountOffset) {
-            value = offsetof(TierTable, count) + 4 * uint64_t(counter);
-        } else if (r.hole == kHoleThreshold) {
-            value = config.threshold;
+        if (r.hole < kHoleCont) {
+            if (!value_of(piece, r, packet, field0, counter, config, value)) return false;
         } else if (r.hole == kHoleCont) {
             if (!next) return false;
             value = reinterpret_cast<uintptr_t>(code + next->at);
@@ -278,6 +265,52 @@ bool CpTranslator::place(Arena& arena, uint8_t* code, const Piece& piece, const 
         if (!patch(at, r, value)) return false;
     }
     return true;
+}
+
+bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet, uint64_t field0,
+                            uint32_t counter, const Config& config, uint64_t& value) {
+    if (r.hole == kHolePc) {
+        value = piece.pc;
+    } else if (r.hole == kHolePacket) {
+        value = packet;
+    } else if (r.hole >= kHoleField0 && r.hole < kHoleField0 + 4) {
+        const unsigned f = r.hole - kHoleField0;
+        if (piece.selected >= 0) value = field_hole_value(kSelected32[piece.selected].fields[f], piece.insn, piece.pc);
+        else if (f == 0) value = field0;
+        else return false;
+    } else if (r.hole == kHoleCounter) {
+        value = counter;
+    } else if (r.hole == kHoleCountOffset) {
+        value = offsetof(TierTable, count) + 4 * uint64_t(counter);
+    } else if (r.hole == kHoleThreshold) {
+        value = config.threshold;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+uint64_t CpTranslator::code_hash(uint32_t counter, const Config& config) const {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const void* data, size_t size) {
+        for (size_t i = 0; i < size; ++i) h = (h ^ static_cast<const uint8_t*>(data)[i]) * 1099511628211ull;
+    };
+    const uint64_t last_len = pieces_.size() > 1 ? pieces_[pieces_.size() - 2].stencil->bytes : 0;
+    for (size_t i = 0; i < pieces_.size(); ++i) {
+        const Piece& p = pieces_[i];
+        const Stencil& s = *p.stencil;
+        mix(kCode + s.code, p.size);
+        const bool fallthrough = p.stencil == &kStencils[kFallthrough] && i > 0;
+        const uint32_t packet = fallthrough ? uint32_t(i - 1) : uint32_t(i);
+        for (uint32_t k = 0; k < s.reloc_count; ++k) {
+            const Reloc& r = kRelocs[s.relocs + k];
+            if (r.offset >= p.size) continue;
+            mix(&r, sizeof r);
+            uint64_t value = 0;
+            if (r.hole < kHoleCont && value_of(p, r, packet, last_len, counter, config, value)) mix(&value, sizeof value);
+        }
+    }
+    return h ? h : 1;
 }
 
 CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config) {
