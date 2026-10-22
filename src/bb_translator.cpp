@@ -76,9 +76,8 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     auto* ft = FunctionType::get(Type::getVoidTy(*ctx), {i8ptr, i8ptr}, false);
     auto* fn = Function::Create(ft, Function::ExternalLinkage, fname, mod.get());
     fn->setCallingConv(CallingConv::GHC);  // see BbFunc
-    // Nothing unwinds through generated code (the host's memory callbacks
-    // do not throw): no unwind tables to emit, load and register.
-    fn->addFnAttr(Attribute::NoUnwind);
+    // Not nounwind: a host's memory callback may throw, and the exception
+    // unwinds through generated code to the host's Core::run.
 
     auto* entry = BasicBlock::Create(*ctx, "entry", fn);
     IRBuilder<> builder(entry);
