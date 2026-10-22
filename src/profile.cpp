@@ -10,6 +10,17 @@
 #include <ctime>
 #include <mutex>
 
+#if BCORE_ENABLE_PROFILE && BCORE_PERF_JIT_EVENTS && defined(__linux__)
+#define BCORE_CP_JITDUMP 1
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 // Needed unconditionally: ProfileState's destructor must see the complete
 // llvm::JITEventListener type even when BCORE_ENABLE_PROFILE=0 (the unique_ptr
 // members are simply never populated then).
@@ -43,7 +54,12 @@ uint64_t monotonic_ns() {
 
 ProfileState::ProfileState() = default;
 // Out of line: destroying map_listener needs the complete listener type.
-ProfileState::~ProfileState() = default;
+ProfileState::~ProfileState() {
+#if BCORE_CP_JITDUMP
+    if (cp_jitdump_marker) munmap(cp_jitdump_marker, size_t(sysconf(_SC_PAGESIZE)));
+    if (cp_jitdump_fd >= 0) ::close(cp_jitdump_fd);
+#endif
+}
 
 void ProfileState::clearBlocks() {
     std::lock_guard<std::mutex> lk(blocks_mutex);
@@ -61,6 +77,101 @@ void ProfileState::recordBlock(uint64_t object_key, uint64_t addr, uint64_t size
     if (old != blocks.end()) retire(addr, old->second, now);
     blocks[addr] = Block{size, guest_pc, variant, now};
     blocks_by_object[object_key].push_back(addr);
+}
+
+#if BCORE_CP_JITDUMP
+namespace {
+// The jitdump format (perf's Documentation/jitdump-specification.txt).
+struct JitdumpHeader {
+    uint32_t magic = 0x4A695444;  // "JiTD"
+    uint32_t version = 1;
+    uint32_t total_size = sizeof(JitdumpHeader);
+    uint32_t elf_mach = 62;  // EM_X86_64
+    uint32_t pad1 = 0;
+    uint32_t pid = 0;
+    uint64_t timestamp = 0;
+    uint64_t flags = 0;
+};
+struct JitdumpCodeLoad {
+    uint32_t id = 0;  // JIT_CODE_LOAD
+    uint32_t total_size = 0;
+    uint64_t timestamp = 0;
+    uint32_t pid = 0, tid = 0;
+    uint64_t vma = 0, code_addr = 0, code_size = 0, code_index = 0;
+};
+
+bool write_all(int fd, const void* data, size_t size) {
+    const char* p = static_cast<const char*>(data);
+    while (size) {
+        const ssize_t n = ::write(fd, p, size);
+        if (n <= 0) return false;
+        p += n;
+        size -= size_t(n);
+    }
+    return true;
+}
+
+// jit-<pid>.dump in a directory of its own under $JITDUMPDIR/.debug/jit (or
+// $HOME's), as LLVM's writer places its own: perf finds a jitdump by that
+// name when the process maps it executable (the marker).
+int open_jitdump(void** marker) {
+    const char* base = getenv("JITDUMPDIR");
+    if (!base) base = getenv("HOME");
+    if (!base) return -1;
+    std::string dir = std::string(base) + "/.debug";
+    mkdir(dir.c_str(), 0755);
+    dir += "/jit";
+    mkdir(dir.c_str(), 0755);
+    std::string temp = dir + "/bcore-cp-XXXXXX";
+    if (!mkdtemp(temp.data())) return -1;
+    const std::string path = temp + "/jit-" + std::to_string(getpid()) + ".dump";
+    const int fd = ::open(path.c_str(), O_CREAT | O_TRUNC | O_RDWR, 0666);
+    if (fd < 0) return -1;
+    JitdumpHeader header;
+    header.pid = uint32_t(getpid());
+    header.timestamp = monotonic_ns();
+    if (!write_all(fd, &header, sizeof header)) {
+        ::close(fd);
+        return -1;
+    }
+    *marker = mmap(nullptr, size_t(sysconf(_SC_PAGESIZE)), PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
+    if (*marker == MAP_FAILED) {
+        *marker = nullptr;
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+}  // namespace
+#endif
+
+void ProfileState::recordCodeLoad(const char* name, const void* code, uint64_t size) {
+#if BCORE_CP_JITDUMP
+    if (!want_perf_jitdump || cp_jitdump_fd == -2) return;
+    if (cp_jitdump_fd < 0) {
+        cp_jitdump_fd = open_jitdump(&cp_jitdump_marker);
+        if (cp_jitdump_fd < 0) {
+            cp_jitdump_fd = -2;
+            return;
+        }
+    }
+    const size_t name_size = strlen(name) + 1;
+    JitdumpCodeLoad record;
+    record.total_size = uint32_t(sizeof record + name_size + size);
+    record.timestamp = monotonic_ns();
+    record.pid = uint32_t(getpid());
+    record.tid = uint32_t(syscall(SYS_gettid));
+    record.vma = record.code_addr = reinterpret_cast<uintptr_t>(code);
+    record.code_size = size;
+    record.code_index = cp_jitdump_index++;
+    if (!write_all(cp_jitdump_fd, &record, sizeof record) || !write_all(cp_jitdump_fd, name, name_size) ||
+        !write_all(cp_jitdump_fd, code, size))
+        cp_jitdump_fd = -2;
+#else
+    (void)name;
+    (void)code;
+    (void)size;
+#endif
 }
 
 std::pair<uint64_t, std::vector<uint8_t>> ProfileState::takeObjectShape(uint32_t guest_pc) {

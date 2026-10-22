@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -69,6 +70,12 @@ public:
     // halfword it read, for a translation of the same block to read again.
     Block translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config);
     const bcore_tier::CodeLog& words() const { return words_; }
+    // Told of the code an arena's first block places beside it: the exit
+    // stencils (bcore_cp_exit) and the jumps to the helpers
+    // (bcore_cp_jump_<helper>), for a profiler's code map.
+    void set_code_listener(std::function<void(const char*, const void*, size_t)> listener) {
+        listener_ = std::move(listener);
+    }
 
     // Set while a thread runs blocks: the CpuState a wrapper stops when it
     // catches an exception. rethrow() throws what was caught, if anything.
@@ -106,6 +113,7 @@ private:
                uint64_t field0, uint32_t counter, const Config& config);
 
     JitEngine& jit_;
+    std::function<void(const char*, const void*, size_t)> listener_;
     std::vector<std::unique_ptr<Arena>> arenas_;
     std::vector<Piece> pieces_;
     bcore_tier::CodeLog words_;
