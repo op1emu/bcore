@@ -53,6 +53,7 @@ add_library(bfin-core STATIC
     src/compiler.cpp
     src/compile_worker.cpp
     src/bb_translator.cpp
+    src/bb_stencil.cpp
     src/packet_state.cpp
     src/guest_memory.cpp
     src/guest_speculation.cpp

@@ -101,8 +101,49 @@ public:
     // See Core::set_lazy_state.
     void set_lazy_state(bool lazy) { lazy_state_ = lazy; }
 
+    // Stencils for the copy-and-patch tier 0 (cp_translator.h), which
+    // tools/stencilgen.cpp builds (bb_stencil.cpp). A stencil leaves holes
+    // in its code, constant expressions of globals whose relocations say
+    // where the translator fills them in.
+    struct StencilHoles {
+        llvm::Constant* pc = nullptr;      // i32: the packet's PC
+        llvm::Constant* packet = nullptr;  // i32: its index in the block, from 1
+        llvm::Constant* fields[LiftVisitor::kFieldHoles] = {};  // i32 (LiftVisitor::set_stencil)
+        llvm::Function* cont = nullptr;    // the next packet's code
+        llvm::Function* exit = nullptr;    // where every path that leaves the block goes
+    };
+    struct StencilLift {
+        llvm::Function* fn = nullptr;
+        int bytes = 0;            // the packet's length
+        bool terminated = false;  // no path goes on to the next packet
+        bool cycles = false;      // reads or writes CYCLES (see emit_stencil_prologue)
+        uint32_t field_values[LiftVisitor::kFieldHoles] = {};  // LiftVisitor::field_values
+        unsigned fields_used = 0;
+    };
+    // The packet at pc, read through this translator's Memory, as the
+    // function `name`, compiled as packet `holes.packet` of a careful block
+    // with no hint would be (both hold whatever the guest state): the path
+    // that goes on to the next packet ends in a musttail call of
+    // holes.cont, every other in one of holes.exit. pc gives the offsets of
+    // the PCs the code uses from the hole holes.pc.
+    StencilLift translate_stencil(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes);
+    // A copy-and-patch block's start: its tier counter (emit_tier_counter,
+    // with holes for the counter, its count's offset and the threshold),
+    // CYCLES with host_cycles (emit_host_cycles), then a musttail call of cont.
+    llvm::Function* emit_stencil_prologue(llvm::Module& mod, const char* name, llvm::Constant* counter,
+                                          llvm::Constant* count_offset, llvm::Constant* threshold, bool host_cycles,
+                                          llvm::Function* cont);
+    // The exit of a copy-and-patch block: its chain exit (set_chaining,
+    // set_count_chained) with the next PC and the packet index the CpuState
+    // holds, as a block's exit at a PC known only at run time; without
+    // chaining a return.
+    llvm::Function* emit_stencil_exit(llvm::Module& mod, const char* name);
+    // A function of the blocks' type and convention (BbFunc, jit_engine.h).
+    static llvm::Function* declare_block(llvm::Module& mod, const char* name);
+    static void declare_externs(llvm::Module& mod);
+
 private:
-    void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
+    static void emit_host_cycles(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry);
     llvm::BasicBlock* emit_lb_guard(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,
                                     const LiftVisitor& visitor, llvm::BasicBlock* first_entry, uint32_t first_pc, uint32_t last_pc,
                                     const uint32_t hint_lb[2], const uint32_t hint_lt[2], unsigned pinned,
@@ -119,6 +160,8 @@ private:
                                    const LoopPlan* loop, LoopPlan* plan, const Tier* tier);
     static void emit_tier_counter(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry,
                                   uint32_t counter, uint32_t threshold);
+    static void emit_tier_counter(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry,
+                                  llvm::Value* counter, llvm::Value* count_offset, llvm::Value* threshold);
     static bool expand_loop_syncs(llvm::Function* fn, llvm::AllocaInst* shadow, llvm::Value* real, bool steady_skip);
     // direct: a block whose return stays a return.
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,

@@ -40,7 +40,7 @@ static void split_by_counts() {
 Compiler::Compiler() = default;
 Compiler::~Compiler() = default;
 
-bool Compiler::init(int opt_level, int codegen_level, bool split) {
+bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) {
     opt_level_ = opt_level;
     split_ = split;
     llvm::InitializeNativeTarget();
@@ -56,10 +56,18 @@ bool Compiler::init(int opt_level, int codegen_level, bool split) {
         cg == 3 ? llvm::CodeGenOpt::Aggressive :
                   llvm::CodeGenOpt::Default;
 
-    auto builder = llvm::orc::JITTargetMachineBuilder::detectHost();
+    auto builder = stencil
+        ? llvm::Expected<llvm::orc::JITTargetMachineBuilder>(
+              llvm::orc::JITTargetMachineBuilder(llvm::Triple("x86_64-unknown-linux-gnu")))
+        : llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!builder) {
         llvm::errs() << "Failed to detect host: " << builder.takeError() << "\n";
         return false;
+    }
+    if (stencil) {
+        builder->setCPU("x86-64");
+        builder->setCodeModel(llvm::CodeModel::Small);
+        builder->setRelocationModel(llvm::Reloc::Static);
     }
     builder->setCodeGenOptLevel(cg_level);
     // The machine function splitter moves a block's cold basic blocks into a
@@ -86,9 +94,9 @@ bool Compiler::init(int opt_level, int codegen_level, bool split) {
     // PipelineTuningOptions defaults (loop vectorization on, SLP off) match
     // neither, so follow clang.
     llvm::PipelineTuningOptions tuning;
-    tuning.LoopVectorization = opt_level >= 2;
-    tuning.LoopInterleaving = opt_level >= 2;
-    tuning.SLPVectorization = opt_level >= 2;
+    tuning.LoopVectorization = opt_level >= 2 && !stencil;
+    tuning.LoopInterleaving = opt_level >= 2 && !stencil;
+    tuning.SLPVectorization = opt_level >= 2 && !stencil;
     pb_ = std::make_unique<llvm::PassBuilder>(machine_.get(), tuning);
     // PassBuilder(TM) registers the same TargetIRAnalysis itself; registering
     // it first makes that explicit (the later default registration is then a
