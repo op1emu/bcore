@@ -1,8 +1,9 @@
 // SteadyLoopSkip (Core::set_steady_skip): a loop block's loop that only waits
 // -- polling a flag in RAM, a device register that will not change before the
 // run ends, a hardware loop that counts down -- goes to its last iteration.
-// It must be exact: every program runs to the same registers, packets, chain
-// counts and memory with the skip as without, for budgets that end the run
+// It must be exact: every program runs to the same architectural state (every
+// register, the ASTAT bits, the accumulators, DAG and loop registers), packets,
+// chain counts and memory with the skip as without, for budgets that end the run
 // inside the loop and past it, and a device whose reads the host cannot
 // promise would repeat is read as often as without. Where the reads can
 // repeat, the skip must make far fewer of them.
@@ -10,6 +11,7 @@
 #include "bcore_profile.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -70,8 +72,16 @@ private:
     std::vector<uint8_t*> table_;
 };
 
+// CpuState from dpregs through the ASTAT bits: the guest's whole register
+// state, a word a field (pc, the loop registers and the accumulators among
+// them); then what the run counted.
+static constexpr size_t kArchBegin = offsetof(CpuState, dpregs);
+static constexpr size_t kArchEnd = offsetof(CpuState, astat_reserved) + sizeof(uint32_t);
+static constexpr size_t kArchWords = (kArchEnd - kArchBegin) / sizeof(uint32_t);
+static_assert((kArchEnd - kArchBegin) % sizeof(uint32_t) == 0, "whole words");
+
 struct Outcome {
-    std::vector<uint32_t> regs;
+    std::vector<uint32_t> regs;  // kArchWords of CpuState, then the counts
     std::vector<uint8_t> memory;
     uint64_t reads, steady;
 };
@@ -105,9 +115,9 @@ static Outcome run(int mode, std::initializer_list<uint16_t> code, uint32_t devi
         pc = cpu.pc;
     }
     Outcome o;
-    for (uint32_t r : cpu.dpregs) o.regs.push_back(r);
-    o.regs.insert(o.regs.end(), {cpu.lc[0], cpu.lt[0], cpu.lb[0], cpu.pc, cpu.packets, cpu.chain_packets, cpu.cc,
-                                 uint32_t(total)});
+    o.regs.resize(kArchWords);
+    std::memcpy(o.regs.data(), reinterpret_cast<const char*>(&cpu) + kArchBegin, kArchEnd - kArchBegin);
+    o.regs.insert(o.regs.end(), {cpu.packets, cpu.chain_packets, cpu.chain_blocks, uint32_t(total)});
     o.memory = mem.data();
     o.reads = mem.reads;
     o.steady = cpu.steady_iterations;
@@ -151,9 +161,13 @@ int main() {
                         const Outcome on = run(2, p.code, p.device, stable, lc, budget, opt);
                         if (off.regs != on.regs || off.memory != on.memory || off.regs != dry.regs) {
                             fprintf(stderr, "%s lc=%u budget=%u stable=%d opt=%d\n", p.name, lc, budget, stable, opt);
-                            for (size_t i = 0; i < off.regs.size(); ++i)
-                                if (off.regs[i] != on.regs[i])
-                                    fprintf(stderr, "  [%zu] %u vs %u\n", i, off.regs[i], on.regs[i]);
+                            for (const Outcome* other : {&on, &dry})
+                                for (size_t i = 0; i < off.regs.size(); ++i)
+                                    if (off.regs[i] != other->regs[i])
+                                        fprintf(stderr, "  %s: %s %zu: %u vs %u\n", other == &on ? "on" : "dry",
+                                                i < kArchWords ? "CpuState offset" : "count",
+                                                i < kArchWords ? kArchBegin + i * 4 : i - kArchWords, off.regs[i],
+                                                other->regs[i]);
                             require(false, "the skip changes nothing the guest can see");
                         }
                         require(dry.reads == off.reads, "dry reads as often");

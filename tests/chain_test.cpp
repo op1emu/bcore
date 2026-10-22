@@ -85,8 +85,9 @@ static void test_budget(int opt) {
 }
 
 // With set_idle_waits an IDLE ends its block and the run, with
-// CpuState::idle set and pc past it; without, or while the host's wake flag
-// is set, it does nothing.
+// CpuState::idle set and pc past it; without, while the host's wake flag or
+// cec_pending is set, or where a hardware loop may end at it, it does
+// nothing.
 static void test_idle(int opt) {
     {
         Chained c(opt);
@@ -113,6 +114,41 @@ static void test_idle(int opt) {
         } else {
             require(retired >= 1000 && !c.cpu.idle, "IDLE is a NOP");
         }
+    }
+    {
+        // An interrupt to check (cec_pending): the core goes on to take it.
+        Chained c(opt);
+        c.core.set_idle_waits(true);
+        c.code(0x100, {kIncR0, 0x0020, 0x2ffe});  // R0 += 1; IDLE; JUMP.S 0x100
+        bcore_cec_pending = true;
+        require(c.run(0x100, 1000) >= 1000 && !c.cpu.idle, "cec_pending: IDLE is a NOP");
+        bcore_cec_pending = false;
+        c.cpu.dpregs[0] = 0;
+        require(c.run(0x100, 1000) == 2 && c.cpu.idle && c.cpu.dpregs[0] == 1, "none: the same code waits");
+    }
+    // A hardware loop that ends at the IDLE: its next PC is the loop's, so
+    // the IDLE is a NOP and the loop runs its iterations. Known when the
+    // block is compiled, or found by the entry guard of a block compiled to
+    // wait there, which misses and runs the block compiled again careful.
+    for (bool compiledToWait : {false, true}) {
+        Chained c(opt);
+        c.core.set_idle_waits(true);
+        c.code(0x100, {kIncR0, 0x0020, 0x0010});  // R0 += 1; IDLE (loop bottom); RTS
+        c.cpu.rets = 0x800;
+        if (compiledToWait) {
+            require(c.run(0x100, 1000) == 2 && c.cpu.idle && c.cpu.pc == 0x104, "no loop: the IDLE waits");
+            c.cpu.dpregs[0] = 0;
+        }
+        c.cpu.lt[0] = 0x100; c.cpu.lb[0] = 0x102; c.cpu.lc[0] = 3;
+        c.cpu.pc = 0x100;
+        for (int runs = 0; c.cpu.pc != 0x800 && runs < 100; ++runs) {
+            c.run(c.cpu.pc, 1000);
+            require(!c.cpu.idle, "an IDLE at a loop bottom does not wait");
+        }
+        require(c.cpu.pc == 0x800 && c.cpu.dpregs[0] == 3 && c.cpu.lc[0] == 0, "three iterations, then RTS");
+#if BCORE_ENABLE_PROFILE
+        if (compiledToWait) require(c.core.stats().lb_guard_misses > 0, "the waiting block's guard missed");
+#endif
     }
 }
 
