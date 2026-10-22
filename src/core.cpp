@@ -188,6 +188,12 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
             fail_on_unwind.armed = false;
             profile_->recordBlock((uint64_t(1) << 63) | reinterpret_cast<uintptr_t>(block.fn),
                                   reinterpret_cast<uintptr_t>(block.fn), block.size, pc, /*variant=*/1);
+            {
+                // Named as a tier-0 block compiled by LLVM is.
+                char name[32];
+                snprintf(name, sizeof name, "bb_0x%08x%s", pc, careful ? ".careful" : "");
+                profile_->recordCodeLoad(name, reinterpret_cast<const void*>(block.fn), block.size);
+            }
             profile_->stats.translate_ns_total += t1 - t0;
             profile_->stats.blocks_translated++;
             profile_->stats.copy_patch_blocks++;
@@ -624,7 +630,14 @@ void Core::set_copy_patch(bool enable) {
     copy_patch_ = enable;
 #if BCORE_COPY_PATCH
     cp_.reset();
-    if (enable && jit_) cp_ = std::make_unique<CpTranslator>(*jit_);
+    if (enable && jit_) {
+        cp_ = std::make_unique<CpTranslator>(*jit_);
+#if BCORE_ENABLE_PROFILE
+        cp_->set_code_listener([this](const char* name, const void* code, size_t size) {
+            profile_->recordCodeLoad(name, code, size);
+        });
+#endif
+    }
 #endif
 }
 

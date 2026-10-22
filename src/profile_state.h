@@ -88,6 +88,15 @@ struct ProfileState {
     // Core teardown is a free() on a non-heap pointer (reproduced: glibc
     // "free(): invalid pointer", SIGABRT, during shutdown).
     llvm::JITEventListener* perf_listener = nullptr;
+
+    // Code that comes from no object file (the copy-and-patch tier 0) in a
+    // jitdump of its own for `perf inject --jit`, beside LLVM's (whose writer
+    // takes objects only): while want_perf_jitdump is set, with
+    // BCORE_PERF_JIT_EVENTS on Linux; a no-op otherwise.
+    void recordCodeLoad(const char* name, const void* code, uint64_t size);
+    int cp_jitdump_fd = -1;     // -2: could not be opened
+    void* cp_jitdump_marker = nullptr;
+    uint64_t cp_jitdump_index = 0;
 };
 
 // (Re)creates and registers listeners on a fresh JitEngine. Called by

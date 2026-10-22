@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <string>
 
 #include "cec.h"
 #include "code_arena.h"
@@ -225,6 +226,7 @@ CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
         memcpy(at + 6, &kHelperFns[i], 8);
         memset(at + 14, 0xcc, kTrampoline - 14);
         a->helpers[i] = at;
+        if (listener_) listener_(("bcore_cp_jump_" + std::string(kHelpers[i])).c_str(), at, kTrampoline);
     }
     for (int e = 0; e < 5; ++e) {
         const Stencil& s = kStencils[kExits[e]];
@@ -232,6 +234,7 @@ CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
         if (!at || s.reloc_count) return nullptr;  // the exits' code fills in nothing
         memcpy(at, kCode + s.code, s.size);
         a->exits[e] = at;
+        if (listener_) listener_("bcore_cp_exit", at, s.size);
     }
     arenas_.push_back(std::move(a));
     return arenas_.back().get();
