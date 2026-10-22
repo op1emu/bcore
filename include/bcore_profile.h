@@ -32,7 +32,7 @@ struct BcoreBlockInfo {
     const void* host_addr;  // first byte of emitted machine code
     uint64_t    host_size;  // exact byte size (0 = unknown; listener unavailable)
     uint32_t    guest_pc;   // guest address of the block entry point
-    uint32_t    variant;    // 0 = default variant; reserved for multi-variant engines
+    uint32_t    variant;    // 0 = compiled by LLVM; 1 = copy-and-patch tier 0 (Core::set_copy_patch)
     uint64_t    loaded_ns = 0;   // CLOCK_MONOTONIC; 0 = history unavailable
     uint64_t    unloaded_ns = 0; // exclusive lifetime end; 0 = still live
 };
@@ -82,6 +82,10 @@ struct BcoreCompileMetrics {
     // for loading the worker's code (the sizes and hash of that code); the
     // worker's own time comes through onBackgroundCompile. 0 otherwise.
     int background           = 0;
+    // A tier-0 block made of stencils (Core::set_copy_patch): no IR (the
+    // sizes are 0), terminator "copy-patch", object_bytes its code's size,
+    // object_hash 0.
+    bool copy_patch          = false;
 };
 
 // The worker thread's part of a promotion (Core::set_tier_background):
@@ -196,6 +200,11 @@ struct BcoreStats {
     // worker at a deterministic publication point.
     uint64_t promotions_discarded = 0;
     uint64_t tier_wait_ns       = 0;
+    // Core::set_copy_patch: tier-0 blocks made of stencils, and those the
+    // copy-and-patch translator gave to LLVM (an instruction with no
+    // stencil, a parallel packet, IDLE with idle waits).
+    uint64_t copy_patch_blocks  = 0;
+    uint64_t copy_patch_fallbacks = 0;
     // Loops given SteadyLoopSkip's test (Core::set_steady_skip).
     uint64_t loops_steady       = 0;
     // DAG registers loop blocks took to stay in their circular buffers

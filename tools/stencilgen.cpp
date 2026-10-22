@@ -25,6 +25,7 @@
 //     has any other gets no stencil (its blocks compile with LLVM).
 
 #include <algorithm>
+#include <cstddef>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +41,7 @@
 
 #include <llvm/BinaryFormat/ELF.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
@@ -693,6 +695,7 @@ int main(int argc, char** argv) {
     // The prologues and exits.
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5);
+    uint32_t fallthrough = 0;
     std::string special_error;
     {
         Worker worker;
@@ -713,6 +716,24 @@ int main(int argc, char** argv) {
             worker.translator().set_count_chained(e == 2 || e == 4);
             worker.translator().emit_stencil_exit(mod, names[e]);
         }
+        // A block cut at its last packet (BBTranslator's packet cap) leaves
+        // with the next PC and the packet's length and index stored, as a
+        // block's return does: holes pc, field 0 and packet.
+        {
+            auto* fn = BBTranslator::declare_block(mod, "fallthrough");
+            fn->addFnAttr(Attribute::NoUnwind);
+            IRBuilder<> b(BasicBlock::Create(ctx, "entry", fn));
+            auto store = [&](Constant* value, size_t offset) {
+                b.CreateStore(value, b.CreateGEP(b.getInt8Ty(), fn->getArg(0), b.getInt64(offset)));
+            };
+            store(value_hole(mod, kHolePc, 0, 1ull << 32, i32), offsetof(CpuState, pc));
+            store(value_hole(mod, kHoleField0, 0, 1ull << 32, i32), offsetof(CpuState, insn_len));
+            store(value_hole(mod, kHolePacket, 1, 257, i32), offsetof(CpuState, packets));
+            auto* call = b.CreateCall(code_hole(mod, kExitName), {fn->getArg(0), fn->getArg(1)});
+            call->setCallingConv(CallingConv::GHC);
+            call->setTailCallKind(CallInst::TCK_MustTail);
+            b.CreateRetVoid();
+        }
         std::map<std::string, Code> code;
         worker.compile(mod, code);
         auto add = [&](const char* name) -> uint32_t {
@@ -726,6 +747,7 @@ int main(int argc, char** argv) {
         prologue[0] = add("prologue");
         prologue[1] = add("prologue_cycles");
         for (int e = 0; e < 5; ++e) exits[e] = add(names[e]);
+        fallthrough = add("fallthrough");
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -804,6 +826,7 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kPrologue[2] = {%u, %u};  // host cycles off, on\n", prologue[0], prologue[1]);
     fprintf(f, "const uint32_t kExits[5] = {%u, %u, %u, %u, %u};  // return, chain, count, dry, dry count\n",
             exits[0], exits[1], exits[2], exits[3], exits[4]);
+    fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
     fprintf(f, "}  // namespace bcore_cp\n");
     fclose(f);
 

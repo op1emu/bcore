@@ -54,12 +54,12 @@ void ProfileState::clearBlocks() {
 }
 
 void ProfileState::recordBlock(uint64_t object_key, uint64_t addr, uint64_t size,
-                               uint32_t guest_pc) {
+                               uint32_t guest_pc, uint32_t variant) {
     std::lock_guard<std::mutex> lk(blocks_mutex);
     const auto now = history_capacity ? monotonic_ns() : 0;
     auto old = blocks.find(addr);
     if (old != blocks.end()) retire(addr, old->second, now);
-    blocks[addr] = Block{size, guest_pc, /*variant=*/0, now};
+    blocks[addr] = Block{size, guest_pc, variant, now};
     blocks_by_object[object_key].push_back(addr);
 }
 

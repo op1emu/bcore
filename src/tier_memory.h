@@ -83,4 +83,21 @@ private:
     mutable bool missed_ = false;
 };
 
+// Answers halfword reads at the addresses of `words` from them, and passes
+// the others on: a translation of code another one read first (a
+// copy-and-patch block that its LLVM fallback compiles, Core::compile)
+// reads no halfword from the host twice.
+class PrefetchedMemory : public ForwardingMemory {
+public:
+    PrefetchedMemory(Memory& real, const CodeLog& words) : ForwardingMemory(real), words_(words) {}
+    uint16_t read16(uint32_t addr) const override {
+        for (const auto& [at, value] : words_)
+            if (at == addr) return value;
+        return real_.read16(addr);
+    }
+
+private:
+    const CodeLog& words_;
+};
+
 }  // namespace bcore_tier
