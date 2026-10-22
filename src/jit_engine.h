@@ -11,6 +11,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 
 #include "chain_table.h"
+#include "tier_table.h"
 #include "cpu_state.h"
 #include "mem.h"
 
@@ -41,10 +42,11 @@ public:
     ~JitEngine();
 
     bool init();
-    // careful: the object's function is bb_0x<pc>.careful
-    // (BBTranslator::translate), and replaces the one compiled for pc.
+    // The object's function name (bb_0x<pc>, or a variant such as
+    // bb_0x<pc>.careful: BBTranslator::translate) replaces whatever was
+    // compiled for pc.
     bool addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
-                   uint32_t fallthrough_pc, bool careful = false);
+                   uint32_t fallthrough_pc, const std::string& name);
     BbFunc lookup(uint32_t pc);
     bool empty() const { return cache_.empty(); }
     // Runs fn (from lookup()) on cpu and mem.
@@ -53,7 +55,9 @@ public:
     // is compiled, unless the filter rejects its PC; a block that loses its
     // slot to another with the same index gets it back when the host looks
     // it up. A new engine (Core::invalidate) starts with an empty table.
-    const ChainSlot* chainTable() const { return chain_.get(); }
+    const ChainSlot* chainTable() const { return chain_; }
+    // The tier-0 counters (TierTable), after the chain table.
+    TierTable* tierTable() const { return area_ ? &area_->tier : nullptr; }
     // PCs the filter rejects are never in the table, so generated code never
     // runs them itself: the host runs every block that starts there. Setting
     // it empties the table; a block is published again when the host next
@@ -83,7 +87,13 @@ public:
 private:
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::unordered_map<uint32_t, BBInfo> cache_;
-    std::unique_ptr<ChainSlot[]> chain_;
+    // The chain table, and the tier table after it (kTierTableOffset).
+    struct ChainArea {
+        ChainSlot slots[size_t(1) << kChainBits];
+        TierTable tier;
+    };
+    std::unique_ptr<ChainArea> area_;
+    ChainSlot* chain_ = nullptr;
     std::function<bool(uint32_t)> chain_filter_;
     void publishChain(uint32_t pc, BbFunc fn);
     bool defineEnter();

@@ -73,6 +73,9 @@ struct BcoreCompileMetrics {
     // counts summed by terminator are therefore a static classification of
     // the executed blocks, not their runtime exit reasons.
     const char* terminator   = "packet-cap";
+    // Core::set_tiering: -1 for an untiered compilation, 0 for a tier-0
+    // block (counting, cheap to compile), 1 for its promotion.
+    int tier                 = -1;
 };
 
 // Typed event sink for the translation (cache-miss) path. All callbacks
@@ -159,6 +162,13 @@ struct BcoreStats {
     uint64_t loops_proven       = 0;
     uint64_t loops_speculated   = 0;
     uint64_t loops_vectorized   = 0;
+    // Tiered compilation (Core::set_tiering): tier-0 blocks compiled again
+    // at tier 1 (each also in blocks_translated), promotions given up (the
+    // tier-0 block keeps running), and the times more blocks asked to be
+    // promoted after one run than TierTable holds requests for.
+    uint64_t blocks_promoted    = 0;
+    uint64_t promotions_dropped = 0;
+    uint64_t tier_request_overflows = 0;
     // Loops given SteadyLoopSkip's test (Core::set_steady_skip).
     uint64_t loops_steady       = 0;
     // DAG registers loop blocks took to stay in their circular buffers

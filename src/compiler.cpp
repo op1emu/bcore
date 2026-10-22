@@ -39,8 +39,9 @@ static void split_by_counts() {
 Compiler::Compiler() = default;
 Compiler::~Compiler() = default;
 
-bool Compiler::init(int opt_level, int codegen_level) {
+bool Compiler::init(int opt_level, int codegen_level, bool split) {
     opt_level_ = opt_level;
+    split_ = split;
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
@@ -66,8 +67,8 @@ bool Compiler::init(int opt_level, int codegen_level) {
     // on functions with profile counts: emit gives every block one, and
     // the lifter's branch weights (rarely() in lift_visitor.cpp) make its rare
     // paths' counts fall under the threshold set here.
-    builder->getOptions().EnableMachineFunctionSplitter = true;
-    split_by_counts();
+    builder->getOptions().EnableMachineFunctionSplitter = split;
+    if (split) split_by_counts();
     auto machine = builder->createTargetMachine();
     if (!machine) {
         llvm::errs() << "Failed to create TargetMachine: " << machine.takeError() << "\n";
@@ -176,9 +177,10 @@ void Compiler::optimize(llvm::Module& mod) {
 }
 
 std::unique_ptr<llvm::MemoryBuffer> Compiler::emit(llvm::Module& mod) {
-    // For the backend only, after the IR pipeline (see init()).
-    for (llvm::Function& function : mod)
-        if (!function.isDeclaration()) function.setEntryCount(kEntryCount);
+    // For the splitter only, after the IR pipeline (see init()).
+    if (split_)
+        for (llvm::Function& function : mod)
+            if (!function.isDeclaration()) function.setEntryCount(kEntryCount);
     object_.clear();
     backend_->run(mod);
     if (object_.empty()) return nullptr;

@@ -202,7 +202,7 @@ struct Outcome {
 };
 
 static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, bool pages, bool loops,
-                   bool clobber = false, int steady = 0) {
+                   bool clobber = false, int steady = 0, uint32_t tier = 0) {
     CpuState cpu{};
     RecordingMemory mem(&cpu, pages, clobber);
     load(mem, p);
@@ -213,6 +213,7 @@ static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, boo
     core.set_chaining(chained, false);
     core.set_loop_blocks(loops);
     core.set_steady_skip(steady);
+    core.set_tiering(tier);
     require(core.init(opt), "init");
 
     // Supervisor at IVG15, interrupts enabled, as in the firmware.
@@ -365,7 +366,7 @@ int main() {
     printf("clobbering callback cases passed (%u)\n", clobbering);
     std::mt19937 rng(7);
     unsigned cases = 0, raised = 0, long_runs = 0;
-    uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0, circular = 0;
+    uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0, circular = 0, promoted = 0;
     for (int program_no = 0; program_no < 48; ++program_no) {
         Program p;
         p.hardware = program_no % 2 == 0;
@@ -390,13 +391,23 @@ int main() {
                         // Every other program with SteadyLoopSkip too, which
                         // must change nothing: a device read is a recorded
                         // access, so the recorder counts every one unstable.
-                        const Outcome got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0);
+                        Outcome got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0);
                         circular += got.stats.dag_circular;
+                        // Tiered (Core::set_tiering) as well, every block
+                        // promoted after its first start, its second or its
+                        // seventh: the same again.
+                        static const uint32_t kThresholds[] = {1, 2, 7};
+                        uint32_t tiered = 0;
+                        if (want == got) {
+                            tiered = kThresholds[(program_no + budget) % 3];
+                            got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0, tiered);
+                            promoted += got.stats.blocks_promoted;
+                        }
                         if (!(want == got)) {
-                            fprintf(stderr, "FAIL: program %d (%s, lc %u) -O%d%s%s budget %u: %zu/%zu runs, "
+                            fprintf(stderr, "FAIL: program %d (%s, lc %u) -O%d%s%s budget %u tier threshold %u: %zu/%zu runs, "
                                             "%zu/%zu accesses, pc %x/%x\n",
                                     program_no, p.hardware ? "hardware" : "jump", p.lc, opt,
-                                    pages ? " pages" : "", chained ? " chained" : "", budget, want.runs.size(),
+                                    pages ? " pages" : "", chained ? " chained" : "", budget, tiered, want.runs.size(),
                                     got.runs.size(), want.seen.size(), got.seen.size(), want.pc, got.pc);
                             for (size_t i = 0; i < want.runs.size() && i < got.runs.size(); ++i)
                                 if (!(want.runs[i] == got.runs[i]))
@@ -475,6 +486,7 @@ int main() {
     require(loop_blocks > 0 && proven > 0, "no MAC loop became a loop block with its memory proven");
     require(speculated > 0 && vectorized > 0, "no MAC loop's sum was speculated and vectorized");
     require(circular > 0, "no loop block took I1 to stay in its circular buffer");
+    require(promoted > 0, "no tier-0 block was promoted");
 #endif
     require(long_runs > 0, "no chained run looped");
     printf("loop block test passed (%u cases, %u raised, %u long runs; MAC loops: %llu loop blocks, %llu proven, "

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "chain_table.h"
+#include "tier_table.h"
 #include "cpu_state.h"
 #include "mem.h"
 
@@ -17,6 +18,7 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
 
 #include "decoder.h"
 #include "lift_visitor.h"
@@ -37,11 +39,12 @@ BBTranslator::BBTranslator(Memory* mem,
 // packets from its start to its last back edge reach, by the first lifting.
 // The rest of the block reaches the others in CpuState, as a plain block
 // does, so values the loop does not touch are not carried across it.
-BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, bool careful) {
+BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, bool careful, const Tier* tier) {
+    if (tier && tier->level == 0) return translate_as(pc, hint, careful, nullptr, nullptr, tier);
     LoopPlan loop;
-    BBTranslateResult plain = translate_as(pc, hint, careful, nullptr, &loop);
+    BBTranslateResult plain = translate_as(pc, hint, careful, nullptr, &loop, tier);
     if (loop.fields.empty()) return plain;
-    BBTranslateResult looped = translate_as(pc, hint, careful, &loop, nullptr);
+    BBTranslateResult looped = translate_as(pc, hint, careful, &loop, nullptr, tier);
     // A shadow the copies cannot follow (expand_loop_syncs): the plain block.
     if (!looped.module) return plain;
     plain.module.reset();  // before its context
@@ -52,7 +55,8 @@ BBTranslateResult BBTranslator::translate(uint32_t pc, const CpuState* hint, boo
 // plain block; plan, for a plain block: set to what a loop block would, or
 // left empty where the block does not qualify.
 BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, bool careful,
-                                             const LoopPlan* loop, LoopPlan* plan) {
+                                             const LoopPlan* loop, LoopPlan* plan, const Tier* tier) {
+    Memory* const code = tier && tier->code ? tier->code : mem_;
     auto ctx = std::make_unique<LLVMContext>();
     auto mod = std::make_unique<Module>("bb_module", *ctx);
     // Before the first instruction is built: IRBuilder takes load/store
@@ -65,7 +69,8 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
 
     // Create function: void bb_0x<pc>(CpuState*, Memory*)
     char fname[32];
-    snprintf(fname, sizeof(fname), careful ? "bb_0x%08x.careful" : "bb_0x%08x", pc);
+    snprintf(fname, sizeof(fname), "bb_0x%08x%s%s", pc, careful ? ".careful" : "",
+             tier && tier->level == 1 ? ".t1" : "");
 
     auto* i8ptr = Type::getInt8PtrTy(*ctx);
     auto* ft = FunctionType::get(Type::getVoidTy(*ctx), {i8ptr, i8ptr}, false);
@@ -109,8 +114,8 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
         state = shadow;
     }
     LiftVisitor visitor(builder, state, mem_ptr, mod.get(),
-                        mem_, unlimited_,
-                        fastmem_, fast_base_, mem_->rawmem_limit());
+                        code, unlimited_,
+                        fastmem_, fast_base_, code->rawmem_limit());
     if (loop) visitor.set_loop_mode(cpu_ptr, loop->fields, loop->l_zero, loop->circular);
     visitor.set_hint(hint);
     visitor.set_careful(careful);
@@ -257,6 +262,9 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
         if (loop->circular) fn->addFnAttr(kCircularAttr, std::to_string(__builtin_popcount(loop->circular)));
     }
 
+    if (tier && tier->level == 0 && first_entry)
+        emit_tier_counter(builder, cpu_ptr, first_entry, tier->counter, tier->threshold);
+
     // Verify the module (Core::set_verify)
     std::string err_str;
     raw_string_ostream err_stream(err_str);
@@ -272,6 +280,37 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
 
 static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
     return b.CreateGEP(b.getInt8Ty(), cpu, b.getInt64(offset));
+}
+
+// A tier-0 block counts every start, its native loop's included: at the top
+// of its first packet, which the loop's back edge and the entry guard both
+// reach. The count that reaches the threshold also files a request (the
+// first TierTable::kRequests of them in request[]), once: the block keeps
+// running, and the host compiles it again after the run.
+void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* first_entry,
+                                     uint32_t counter, uint32_t threshold) {
+    auto& ctx = b.getContext();
+    auto* i8 = b.getInt8Ty();
+    auto* i32 = b.getInt32Ty();
+    Instruction* at = &*first_entry->getFirstInsertionPt();
+    b.SetInsertPoint(at);
+    auto* chain = b.CreateLoad(b.getInt8PtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
+    auto* table = b.CreateGEP(i8, chain, b.getInt64(kTierTableOffset), "tier_table");
+    auto* slot = b.CreateGEP(i8, table, b.getInt64(offsetof(TierTable, count) + 4 * uint64_t(counter)));
+    auto* count = b.CreateAdd(b.CreateLoad(i32, slot), b.getInt32(1), "tier_count");
+    b.CreateStore(count, slot);
+    Instruction* hot = SplitBlockAndInsertIfThen(b.CreateICmpEQ(count, b.getInt32(threshold)), at, false,
+                                                 weights_rarely(ctx));
+    b.SetInsertPoint(hot);
+    auto* filed_ptr = b.CreateGEP(i8, table, b.getInt64(offsetof(TierTable, requests)));
+    auto* filed = b.CreateLoad(i32, filed_ptr, "tier_requests");
+    b.CreateStore(b.CreateAdd(filed, b.getInt32(1)), filed_ptr);
+    Instruction* room = SplitBlockAndInsertIfThen(b.CreateICmpULT(filed, b.getInt32(TierTable::kRequests)), hot,
+                                                  false);
+    b.SetInsertPoint(room);
+    auto* request = b.CreateGEP(i8, table, b.CreateAdd(b.getInt64(offsetof(TierTable, request)),
+                                                       b.CreateMul(b.CreateZExt(filed, b.getInt64Ty()), b.getInt64(4))));
+    b.CreateStore(b.getInt32(counter), request);
 }
 
 // A loop block's shadow (BBTranslator::set_loop_blocks), once lifted. The
