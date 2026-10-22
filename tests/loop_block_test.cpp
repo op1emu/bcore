@@ -202,7 +202,7 @@ struct Outcome {
 };
 
 static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, bool pages, bool loops,
-                   bool clobber = false, int steady = 0, uint32_t tier = 0) {
+                   bool clobber = false, int steady = 0, uint32_t tier = 0, int background = -1) {
     CpuState cpu{};
     RecordingMemory mem(&cpu, pages, clobber);
     load(mem, p);
@@ -214,6 +214,7 @@ static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, boo
     core.set_loop_blocks(loops);
     core.set_steady_skip(steady);
     core.set_tiering(tier);
+    if (background >= 0) core.set_tier_background(true, uint64_t(background));
     require(core.init(opt), "init");
 
     // Supervisor at IVG15, interrupts enabled, as in the firmware.
@@ -395,12 +396,14 @@ int main() {
                         circular += got.stats.dag_circular;
                         // Tiered (Core::set_tiering) as well, every block
                         // promoted after its first start, its second or its
-                        // seventh: the same again.
+                        // seventh, here or on the worker: the same again.
                         static const uint32_t kThresholds[] = {1, 2, 7};
                         uint32_t tiered = 0;
                         if (want == got) {
                             tiered = kThresholds[(program_no + budget) % 3];
-                            got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0, tiered);
+                            static const int kBackground[] = {-1, 0, 3};
+                            got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0, tiered,
+                                      kBackground[(program_no / 3 + budget) % 3]);
                             promoted += got.stats.blocks_promoted;
                         }
                         if (!(want == got)) {

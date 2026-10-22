@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     bool lazy_state = true;
     bool loop_blocks = true;
     uint32_t tier_threshold = 0;
+    int tier_background = -1;  // -1 on the dispatching thread; else publish_after
     const char* post_pipeline = nullptr;
     uint64_t max_steps = 0; // 0 = unlimited
     int opt_level = 2;      // IR pipeline O0-O3 and backend None/Less/Default/Aggressive
@@ -65,6 +66,8 @@ int main(int argc, char** argv) {
             loop_blocks = false;
         } else if (strcmp(argv[i], "--tier-threshold") == 0 && i + 1 < argc) {
             tier_threshold = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
+        } else if (strcmp(argv[i], "--tier-background") == 0 && i + 1 < argc) {
+            tier_background = static_cast<int>(strtol(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--post-pipeline") == 0 && i + 1 < argc) {
             post_pipeline = argv[++i];
         } else {
@@ -73,7 +76,7 @@ int main(int argc, char** argv) {
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -195,6 +198,7 @@ int main(int argc, char** argv) {
     core.set_lazy_state(lazy_state);
     core.set_loop_blocks(loop_blocks);
     core.set_tiering(tier_threshold);
+    if (tier_background >= 0) core.set_tier_background(true, static_cast<uint64_t>(tier_background));
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
         return 1;

@@ -76,6 +76,21 @@ struct BcoreCompileMetrics {
     // Core::set_tiering: -1 for an untiered compilation, 0 for a tier-0
     // block (counting, cheap to compile), 1 for its promotion.
     int tier                 = -1;
+    // A promotion compiled on the worker thread (Core::set_tier_background)
+    // reports two translations on the dispatching thread: 1 for its lift,
+    // which has no code yet (the sizes are the lifted module's, no hash), 2
+    // for loading the worker's code (the sizes and hash of that code); the
+    // worker's own time comes through onBackgroundCompile. 0 otherwise.
+    int background           = 0;
+};
+
+// The worker thread's part of a promotion (Core::set_tier_background):
+// CLOCK_MONOTONIC span and the worker's CPU time in it. discarded: its code
+// was not used (the engine was replaced, or the block compiled again since).
+struct BcoreBackgroundCompile {
+    uint64_t begin_ns = 0, end_ns = 0, cpu_ns = 0;
+    bool ok = false;
+    bool discarded = false;
 };
 
 // Typed event sink for the translation (cache-miss) path. All callbacks
@@ -140,6 +155,13 @@ public:
     virtual void onCompileMetrics(uint32_t guest_pc, const BcoreCompileMetrics& metrics) {
         (void)guest_pc; (void)metrics;
     }
+
+    // A promotion's work on the worker thread, reported on the dispatching
+    // thread when Core::run takes its result, before the translation that
+    // loads it (or instead, when discarded). Outside any translation.
+    virtual void onBackgroundCompile(uint32_t guest_pc, const BcoreBackgroundCompile& work) {
+        (void)guest_pc; (void)work;
+    }
 };
 
 // Monotonic counters in profiling builds (one owner-thread increment
@@ -169,6 +191,11 @@ struct BcoreStats {
     uint64_t blocks_promoted    = 0;
     uint64_t promotions_dropped = 0;
     uint64_t tier_request_overflows = 0;
+    // Core::set_tier_background: promotions the worker compiled whose code
+    // was not used, and the time the dispatching thread waited for the
+    // worker at a deterministic publication point.
+    uint64_t promotions_discarded = 0;
+    uint64_t tier_wait_ns       = 0;
     // Loops given SteadyLoopSkip's test (Core::set_steady_skip).
     uint64_t loops_steady       = 0;
     // DAG registers loop blocks took to stay in their circular buffers

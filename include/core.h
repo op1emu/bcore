@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -14,6 +15,7 @@
 
 class JitEngine;
 class Compiler;
+class CompileWorker;
 class BBTranslator;
 
 namespace bcore_profile { struct ProfileState; }
@@ -81,6 +83,20 @@ public:
     // too rarely for what the full pipeline costs to pay. A threshold takes
     // effect for blocks compiled from then on.
     void set_tiering(uint32_t threshold);
+    // Promotions compiled on a thread of their own (off by default: on the
+    // dispatching thread, after the run that asked). The dispatching thread
+    // still lifts each one (reading the guest's code may call the host) and
+    // loads the code; the worker runs the IR pipeline and the backend. A
+    // promotion's code takes the tier-0 block's place at the start of a run:
+    // with publish_after 0, at the first run after the worker finished; with
+    // publish_after N, at the first run after N more packets ran since the
+    // promotion was asked for, waiting for the worker if it has not finished,
+    // so that which code runs when does not depend on the host's speed
+    // (deterministic guest time needs that: SteadyLoopSkip, for one, skips
+    // a loop's device reads only in its tier-1 code). on_start runs first on
+    // the worker thread. Before init() or between runs.
+    void set_tier_background(bool background, uint64_t publish_after = 0,
+                             std::function<void()> on_start = {});
     // Blocks compiled from now on end at an IDLE and return to the host with
     // CpuState::idle set, so it can let guest time pass until a wakeup (off
     // by default: IDLE does nothing, as for a host with nothing to wait for).
@@ -144,6 +160,13 @@ private:
     void (*compile(uint32_t pc, bool careful, Tier0Record* promote = nullptr))(CpuState*, Memory*);
     // Compiles again at tier 1 the blocks that asked to be (set_tiering).
     void promote();
+    // Lifts a promotion for the worker (set_tier_background).
+    void queue_promotion(Tier0Record& record, uint32_t counter);
+    // Loads and publishes the worker's promotions that are due (all: every
+    // one sent, waiting for the worker).
+    void collect_promotions(bool all = false);
+    void startWorker();
+    void stopWorker();
     // (Re)registers the code-map listener on jit_. Called by init/invalidate.
     void attachProfiler();
 
@@ -178,6 +201,23 @@ private:
     // it now, until it is promoted or replaced.
     std::vector<std::unique_ptr<Tier0Record>> tier0_;
     std::unordered_map<uint32_t, uint32_t> tier0_current_;
+    // For each PC the counter of its latest tier-0 compilation, promoted or
+    // not: a promotion from an earlier one is not to replace it.
+    std::unordered_map<uint32_t, uint32_t> tier0_latest_;
+    // set_tier_background: the worker, the engine generation its jobs are
+    // for (invalidate() makes a new one), the packets run so far, and the
+    // promotions sent and not yet taken back, oldest first.
+    bool tier_background_ = false;
+    uint64_t publish_after_ = 0;
+    std::function<void()> worker_start_;
+    std::unique_ptr<CompileWorker> worker_;
+    uint64_t generation_ = 0;
+    uint64_t packets_run_ = 0;
+    struct Pending {
+        uint32_t pc, counter;
+        uint64_t due;  // packets_run_ at which it is published (publish_after)
+    };
+    std::deque<Pending> pending_;
     bool idle_waits_ = false;
     int steady_skip_ = 0;
     const uint8_t* idle_wake_ = nullptr;

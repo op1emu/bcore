@@ -51,6 +51,7 @@ add_library(bfin-core STATIC
     src/code_arena.cpp
     src/jit_engine.cpp
     src/compiler.cpp
+    src/compile_worker.cpp
     src/bb_translator.cpp
     src/packet_state.cpp
     src/guest_memory.cpp
@@ -75,7 +76,8 @@ target_compile_definitions(bfin-core PUBLIC
     BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
     BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
 )
-target_link_libraries(bfin-core PUBLIC ${LLVM_LIBS})
+find_package(Threads REQUIRED)  # the promotion worker (Core::set_tier_background)
+target_link_libraries(bfin-core PUBLIC ${LLVM_LIBS} Threads::Threads)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bfin-core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
