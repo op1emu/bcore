@@ -63,6 +63,7 @@ bool Core::init(int opt_level, int codegen_level) {
     jit_->setChainFilter(chain_filter_);
     attachProfiler();
     unlimited_ = cpu_->steps_remaining == 0;
+    cp_.reset();
     set_copy_patch(copy_patch_);
 
     // Use the Memory interface's is_fastmem() to determine mode.
@@ -629,8 +630,9 @@ void Core::collect_promotions(bool all) {
 void Core::set_copy_patch(bool enable) {
     copy_patch_ = enable;
 #if BCORE_COPY_PATCH
-    cp_.reset();
-    if (enable && jit_) {
+    // One translator per engine (init, invalidate): turning stencils off
+    // keeps it, and the blocks already made of them run on.
+    if (enable && jit_ && !cp_) {
         cp_ = std::make_unique<CpTranslator>(*jit_);
 #if BCORE_ENABLE_PROFILE
         cp_->set_code_listener([this](const char* name, const void* code, size_t size) {
@@ -655,7 +657,8 @@ void Core::invalidate() {
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
     applyModuleTarget();
-    set_copy_patch(copy_patch_);  // the old engine's arenas are gone
+    cp_.reset();  // the old engine's arenas are gone
+    set_copy_patch(copy_patch_);
     // The new engine's tier table starts at zero, with none of these blocks.
     tier0_.clear();
     tier0_current_.clear();

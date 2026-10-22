@@ -159,6 +159,38 @@ static void test_throwing_stencils() {
     }
 }
 
+// Stencils turned off and on again while blocks made of them are in the
+// cache: those run on, and the guest does what it does without stencils.
+static void test_toggle_stencils() {
+    auto once = [](bool stencils) {
+        CpuState cpu{};
+        FlatMemory mem(0, 0x4000, &cpu);
+        mem.enable_page_table();
+        for (uint32_t at = 0x100; at < 0x140; at += 4) {
+            mem.write16(at, kAdd1);
+            mem.write16(at + 2, jump_s(at + 2, at + 4 < 0x140 ? at + 4 : 0x100));
+        }
+        Core core(&cpu, &mem);
+        core.set_chaining(true, false);
+        core.set_tiering(1000);
+        core.set_copy_patch(stencils);
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        std::vector<uint32_t> seen;
+        for (int r = 0; r < 40; ++r) {
+            if (stencils && r % 10 == 5) core.set_copy_patch(r % 20 != 5);
+            cpu.chain_budget = 3;
+            require(core.run(r ? cpu.pc : 0x100), "run");
+            seen.push_back(cpu.pc);
+            seen.push_back(cpu.dpregs[0]);
+            cpu.did_jump = false;
+        }
+        return seen;
+    };
+    require(once(true) == once(false), "turning stencils off and on changed what ran");
+}
+
 static void test_throwing_callback() {
     for (int opt : {0, 1, 2})
         for (int mode : {0, 1, 2}) {  // untiered; tiered; tiered on the worker
@@ -269,6 +301,7 @@ static void test_stale_promotion() {
 int main() {
     test_throwing_callback();
     test_throwing_stencils();
+    test_toggle_stencils();
     test_late_page_table();
     test_stale_promotion();
     std::vector<Case> cases;

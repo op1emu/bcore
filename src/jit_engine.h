@@ -54,8 +54,10 @@ public:
     void addCode(uint32_t pc, BbFunc fn, uint32_t fallthrough_pc);
     // An arena of this engine's with room for `code` bytes of code beside
     // the code it holds (null if there is none), for code placed in it
-    // directly (the copy-and-patch tier, cp_translator.h). The arena lives
-    // as long as anything holds it.
+    // directly (the copy-and-patch tier, cp_translator.h). The engine keeps
+    // it, so that such code lives as long as the engine does, as objects'
+    // code does (found in review: an arena only the copy-and-patch
+    // translator held went with it, under blocks still in the cache).
     std::shared_ptr<CodeArena> codeArena(uintptr_t code);
     BbFunc lookup(uint32_t pc);
     bool empty() const { return cache_.empty(); }
@@ -97,6 +99,7 @@ public:
 private:
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::shared_ptr<CodeArenaPool> pool_;
+    std::vector<std::shared_ptr<CodeArena>> placed_;  // codeArena's arenas
     std::unordered_map<uint32_t, BBInfo> cache_;
     // The chain table, and the tier table after it (kTierTableOffset).
     struct ChainArea {
