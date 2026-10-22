@@ -7,6 +7,7 @@
 #include "../src/cec.h"
 #include "../src/code_arena.h"
 #include "../src/evt.h"
+#include "../src/jit_engine.h"
 #include "../tools/flat_memory.h"
 
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
@@ -22,6 +23,8 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <sys/mman.h>
+#include <unistd.h>
 
 static void require(bool ok, const char* why) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -168,8 +171,36 @@ static void jit_exhaust() {
     require(pool->arenas() == 2, "two arenas, then managers of their own");
 }
 
+// Code placed in an engine's arena directly (JitEngine::codeArena) stays
+// mapped as long as the engine, when nothing else holds the arena any more
+// and the pool has moved on to another (found in review: such code went
+// with the copy-and-patch translator that had held its arena).
+static void placed_code_lives() {
+    JitEngine jit;
+    require(jit.init(), "JitEngine init");
+    // Fill the hot region (address space only: nothing is touched), so the
+    // next request maps another arena.
+    const size_t rest = CodeArena::kDefaultHalf / 4 * 3 - (64 << 10);
+    auto first = jit.codeArena(64);  // the engine's own code (bcore_enter) holds this one
+    require(first && first->allocate(CodeArena::Region::Hot, rest, 16) != nullptr, "most of the first arena");
+    auto second = jit.codeArena(128 << 10);
+    require(second && second != first, "a second arena");
+    uint8_t* code = second->allocate(CodeArena::Region::Hot, 64, 16);
+    require(code && second->allocate(CodeArena::Region::Hot, rest, 16) != nullptr, "most of the second arena");
+    auto third = jit.codeArena(128 << 10);
+    require(third && third != second, "a third arena");
+    first.reset();
+    second.reset();
+    third.reset();
+    const size_t page = size_t(sysconf(_SC_PAGESIZE));
+    unsigned char resident;
+    void* at = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(code) & ~(page - 1));
+    require(mincore(at, page, &resident) == 0, "the second arena's code is still mapped");
+}
+
 int main() {
     for (int opt = 0; opt <= 2; ++opt) test(opt);
+    placed_code_lives();
     exhaust("hot code fills an arena", 20 << 10, 0, 1 << 10);
     exhaust("cold code fills an arena", 1 << 10, 20 << 10, 1 << 10);
     exhaust("data fills an arena", 1 << 10, 0, 40 << 10);

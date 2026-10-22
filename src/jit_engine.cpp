@@ -172,7 +172,9 @@ void JitEngine::addCode(uint32_t pc, BbFunc fn, uint32_t fallthrough_pc) {
 }
 
 std::shared_ptr<CodeArena> JitEngine::codeArena(uintptr_t code) {
-    return pool_ ? pool_->arenaFor(code, 0) : nullptr;
+    auto arena = pool_ ? pool_->arenaFor(code, 0) : nullptr;
+    if (arena && (placed_.empty() || placed_.back() != arena)) placed_.push_back(arena);
+    return arena;
 }
 
 // The function before the PC: generated code that matches the PC calls the
