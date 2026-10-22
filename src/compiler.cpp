@@ -110,7 +110,12 @@ bool Compiler::init(int opt_level, int codegen_level, bool split) {
 }
 
 void Compiler::optimize(llvm::Module& mod) {
-    if (opt_level_ == 0) return;
+    if (opt_level_ == 0) {
+        // No pipeline, but a loop block's guest memory still lowered to the
+        // page table, as the pipeline would have (guest_memory.h).
+        lower_guest_memory(mod);
+        return;
+    }
 
     const llvm::OptimizationLevel lvl =
         opt_level_ == 1 ? llvm::OptimizationLevel::O1 :
