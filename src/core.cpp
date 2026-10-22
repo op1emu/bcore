@@ -16,9 +16,8 @@
 #include "jit_engine.h"
 #include "mmr.h"
 #include "profile_state.h"
-#if BCORE_COPY_PATCH
+// Also without BCORE_COPY_PATCH: Core holds the (then unused) translator.
 #include "cp_translator.h"
-#endif
 
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
