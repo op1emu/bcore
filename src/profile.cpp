@@ -111,12 +111,15 @@ namespace {
 
 // Parses "bb_0x%08x" (the name JitEngine gives every block function),
 // "bb_0x%08x.careful" (a block compiled again after its loop-bottom guard
-// failed) and either with ".cold", the symbol the machine function splitter
-// gives the block's cold part (cold set). Returns false for any other symbol.
+// failed), either with ".t1" (a tier-0 block compiled again at tier 1,
+// Core::set_tiering), and any of these with ".cold", the symbol the machine
+// function splitter gives the block's cold part (cold set). Returns false for
+// any other symbol.
 bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc, bool& cold) {
     if (!name.startswith("bb_0x")) return false;
     llvm::StringRef hex = name.drop_front(5);
     cold = hex.consume_back(".cold");
+    hex.consume_back(".t1");
     hex.consume_back(".careful");
     if (hex.empty() || hex.size() > 8) return false;
     uint32_t pc = 0;

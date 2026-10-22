@@ -37,7 +37,8 @@ public:
 
     // opt_level: the IR pipeline, 0=None, 1=O1, 2=O2, 3=O3.
     // codegen_level: the backend on the same scale; <0 follows opt_level.
-    bool init(int opt_level, int codegen_level);
+    // split: the machine function splitter moves cold paths apart (init()).
+    bool init(int opt_level, int codegen_level, bool split = true);
     // The IR pipeline, in place; no-op at opt_level 0. Core::compile runs it
     // on every module before emit.
     void optimize(llvm::Module& mod);
@@ -57,6 +58,7 @@ public:
 
 private:
     int opt_level_ = 2;
+    bool split_ = true;
     int steady_skip_ = 0;
     std::string post_pipeline_;
     std::unique_ptr<llvm::TargetMachine> machine_;

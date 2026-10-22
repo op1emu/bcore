@@ -2,7 +2,10 @@
 #include "compiler.h"
 #include "guest_memory.h"
 #include "steady_skip.h"
+#include "tier_memory.h"
+#include "tier_table.h"
 
+#include <optional>
 #include <sstream>
 
 #include "bb_translator.h"
@@ -17,6 +20,16 @@
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
+
+// What a tier-0 compilation saw, to compile the block again at tier 1 as
+// an untiered compilation would have: its instructions, and the guest state
+// it took its hints from.
+struct Core::Tier0Record {
+    uint32_t pc = 0;
+    bool careful = false;
+    CpuState hint{};
+    bcore_tier::CodeLog code;
+};
 
 Core::Core(CpuState* cpu, Memory* mem)
     : cpu_(cpu), mem_(mem) {
@@ -80,14 +93,41 @@ void Core::applyModuleTarget() {
     translator_->setModuleTarget(compiler_->dataLayout(), compiler_->targetTriple());
 }
 
-BbFunc Core::compile(uint32_t pc, bool careful) {
+BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
     // The translation below inlines accesses through this table if there
     // is one; the code finds it in CpuState (see Memory::page_table()).
     if (uint8_t* const* table = mem_->page_table())
         page_table_ = table;
+    // Tiered (set_tiering): a promotion reads what its tier-0 compilation
+    // read; a tier-0 compilation records it, while the engine has counters.
+    BBTranslator::Tier tier;
+    const BBTranslator::Tier* tiered = nullptr;
+    const CpuState* hint = cpu_;
+    std::unique_ptr<Tier0Record> record;
+    std::optional<bcore_tier::RecordingMemory> recording;
+    std::optional<bcore_tier::ReplayMemory> replay;
+    if (promote) {
+        replay.emplace(*mem_, promote->code);
+        tier.level = 1;
+        tier.code = &*replay;
+        hint = &promote->hint;
+        tiered = &tier;
+    } else if (tier_threshold_ && tier0_.size() < TierTable::kCounters) {
+        record = std::make_unique<Tier0Record>();
+        record->pc = pc;
+        record->careful = careful;
+        record->hint = *cpu_;
+        recording.emplace(*mem_, record->code);
+        tier.level = 0;
+        tier.counter = uint32_t(tier0_.size());
+        tier.threshold = tier_threshold_;
+        tier.code = &*recording;
+        tiered = &tier;
+    }
+    const bool tier0 = tiered && tier.level == 0;
 #if BCORE_ENABLE_PROFILE
     BcoreEventSink* sink = profile_->sink;
-    profile_->stats.cache_misses++;
+    if (!promote) profile_->stats.cache_misses++;
     // Asked before timing starts: the sink's answer is no part of the
     // translation.
     const bool want_metrics = sink && sink->wantsCompileMetrics();
@@ -107,7 +147,15 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
         }
     } fail_on_unwind{sink, pc, t0};
 #endif
-    auto result = translator_->translate(pc, cpu_, careful);
+    auto result = translator_->translate(pc, hint, careful, tiered);
+    if (replay && replay->missed()) {
+        // Code the tier-0 compilation never read: not this block's.
+#if BCORE_ENABLE_PROFILE
+        fail_on_unwind.armed = false;
+        if (sink) sink->onTranslateFailure(pc, bcore_profile::monotonic_ns() - t0);
+#endif
+        return nullptr;
+    }
 #if BCORE_ENABLE_PROFILE
     // Stage callbacks fire only after the translation is timed, so
     // nothing the sink does lands inside a stage or in translate_ns.
@@ -130,7 +178,7 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
     // the IR that is compiled. It used to run only inside the dump branch:
     // from the initial commit on, a nonzero opt_level changed the printed IR
     // and never the executed code.
-    if (opt_level_ != 0) {
+    if (opt_level_ != 0 && !tier0) {
         compiler_->optimize(*result.module);
 #if BCORE_ENABLE_PROFILE
         optimize_end = bcore_profile::monotonic_ns();
@@ -157,6 +205,7 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
         }
         metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
         metrics.terminator = result.exit_kind;
+        metrics.tier = tiered ? tier.level : -1;
     }
     profile_->want_object_shapes = want_metrics;
     profile_->capture_ns = 0;
@@ -189,11 +238,18 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
     BbFunc fn = nullptr;
     // The backend, then the object into the JIT; the module and its context
     // are done with after emit.
-    auto object = compiler_->emit(*result.module);
+    std::string name;
+    for (const llvm::Function& function : *result.module)
+        if (!function.isDeclaration()) name = function.getName().str();
+    auto object = (tier0 ? *tier0_compiler_ : *compiler_).emit(*result.module);
     result.module.reset();  // before its context
     result.context.reset();
-    if (object && jit_->addObject(pc, std::move(object), result.fallthrough_pc, careful))
+    if (object && jit_->addObject(pc, std::move(object), result.fallthrough_pc, name))
         fn = jit_->lookup(pc);
+    if (fn && record) {
+        tier0_current_[pc] = tier.counter;
+        tier0_.push_back(std::move(record));
+    }
 #if BCORE_ENABLE_PROFILE
     const uint64_t t1 = bcore_profile::monotonic_ns();
     fail_on_unwind.armed = false;
@@ -283,7 +339,43 @@ bool Core::run(uint32_t pc) {
 #if BCORE_ENABLE_PROFILE
     profile_->stats.blocks_executed += 1 + cpu_->chain_blocks;
 #endif
+    if (tier_threshold_ && jit_->tierTable()->requests) promote();
     return true;
+}
+
+void Core::promote() {
+    TierTable& table = *jit_->tierTable();
+    const uint32_t filed = table.requests;
+    table.requests = 0;
+    std::vector<uint32_t> counters;
+    if (filed <= TierTable::kRequests) {
+        counters.assign(table.request, table.request + filed);
+    } else {
+        // More than the table holds: every count at the threshold or past it
+        // (those promoted or replaced already are passed over below).
+#if BCORE_ENABLE_PROFILE
+        profile_->stats.tier_request_overflows++;
+#endif
+        for (uint32_t counter = 0; counter < tier0_.size(); ++counter)
+            if (table.count[counter] >= tier_threshold_) counters.push_back(counter);
+    }
+    for (uint32_t counter : counters) {
+        if (counter >= tier0_.size() || !tier0_[counter]) continue;
+        std::unique_ptr<Tier0Record> record = std::move(tier0_[counter]);
+        // Its code may have been replaced since (a careful compilation after
+        // a loop-bottom guard miss): that one counts for itself.
+        auto current = tier0_current_.find(record->pc);
+        if (current == tier0_current_.end() || current->second != counter) continue;
+        tier0_current_.erase(current);
+        // Failing, the tier-0 block keeps running; its count goes on, unread.
+        const bool promoted = compile(record->pc, record->careful, record.get()) != nullptr;
+#if BCORE_ENABLE_PROFILE
+        if (promoted) profile_->stats.blocks_promoted++;
+        else profile_->stats.promotions_dropped++;
+#else
+        (void)promoted;
+#endif
+    }
 }
 
 void Core::invalidate() {
@@ -294,6 +386,9 @@ void Core::invalidate() {
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
     applyModuleTarget();
+    // The new engine's tier table starts at zero, with none of these blocks.
+    tier0_.clear();
+    tier0_current_.clear();
 #if BCORE_ENABLE_PROFILE
     // The old engine's objects are gone; drop their map entries before the
     // host can observe stale addresses, then re-arm the listeners (including
@@ -368,6 +463,17 @@ void Core::set_lazy_state(bool lazy) {
 void Core::set_loop_blocks(bool loop) {
     loop_blocks_ = loop;
     if (translator_) translator_->set_loop_blocks(loop_blocks_);
+}
+
+void Core::set_tiering(uint32_t threshold) {
+    if (threshold && !tier0_compiler_) {
+        auto compiler = std::make_unique<Compiler>();
+        // Neither the IR pipeline nor the splitter: tier-0 code runs too
+        // rarely for its layout to matter.
+        if (!compiler->init(/*opt_level=*/0, /*codegen_level=*/0, /*split=*/false)) return;
+        tier0_compiler_ = std::move(compiler);
+    }
+    tier_threshold_ = threshold;
 }
 
 void Core::set_verify(bool verify) {

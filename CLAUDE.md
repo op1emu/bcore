@@ -45,7 +45,9 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/cpu_state.h/cpp`: CpuState struct (dpregs, accumulators, ASTAT flags, loops), ASTAT compose/decompose, extern "C" wrappers for JIT
 - `src/memory.cpp`: Flat memory model (little-endian), extern "C" read/write wrappers for JIT
 - `src/lift_visitor.h/cpp`: LiftVisitor — plugs into decoder, emits LLVM IR per instruction (~24 implemented, rest are stubs)
-- `src/jit_engine.h/cpp`: LLJIT wrapper with explicit `absoluteSymbols` registration for all extern "C" helpers
+- `src/compiler.h/cpp`: `Compiler` — module to object file: the IR pipeline and the backend, with the TargetMachine, pass builder, analysis managers and legacy codegen pass manager built once (per tier: Core keeps one for tier 0)
+- `src/jit_engine.h/cpp`: LLJIT wrapper that loads the Compiler's object files (`addObject`), with explicit `absoluteSymbols` registration for all extern "C" helpers, and the chain table with the tier table after it (`include/tier_table.h`)
+- `src/tier_memory.h`: `RecordingMemory`/`ReplayMemory` (namespace `bcore_tier`): a tier-0 compilation logs the instructions it reads, its promotion reads only those
 - `src/code_arena.h/cpp`: `CodeArena` (one reservation: hot code, cold parts split off by the machine function splitter, data), `CodeArenaPool` (a JitEngine's arenas: an object goes whole into one with room, else a new one, else its own `SectionMemoryManager`, so a full arena never stops the process) and the per-object `ArenaMemoryManager` that JitEngine's `RTDyldObjectLinkingLayer` uses
 - `src/bb_translator.h/cpp`: Basic-block translator — decodes instructions until terminator, produces one LLVM function per BB
 - `src/syscall_emu.h/cpp`: Libgloss syscall emulation (exit, write)

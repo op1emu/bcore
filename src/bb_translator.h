@@ -37,7 +37,20 @@ public:
     // careful: the block compares the loop bottoms at every packet, with no
     // entry guard (LiftVisitor::set_careful); its function is
     // bb_0x<pc>.careful.
-    BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr, bool careful = false);
+    // Tiered compilation (Core::set_tiering). Tier 0: the plain block only,
+    // never a loop block, counting its starts in TierTable::count[counter]
+    // and asking to be compiled again (TierTable::request) when the count
+    // reaches threshold. Tier 1: the block as an untiered translation makes
+    // it, its function named bb_0x<pc>[.careful].t1. Either reads its
+    // instructions through code when that is set.
+    struct Tier {
+        int level = 0;
+        uint32_t counter = 0;
+        uint32_t threshold = 0;
+        Memory* code = nullptr;
+    };
+    BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr, bool careful = false,
+                                const Tier* tier = nullptr);
     // Loop blocks: a block that runs itself again in a native loop keeps the
     // guest state in an alloca, which the IR pipeline turns into SSA values,
     // so a loop's registers stay in host registers across its back edge
@@ -103,7 +116,9 @@ private:
         LiftVisitor::Circular circ_use;   // its steps, for the entry guard
     };
     BBTranslateResult translate_as(uint32_t pc, const CpuState* hint, bool careful,
-                                   const LoopPlan* loop, LoopPlan* plan);
+                                   const LoopPlan* loop, LoopPlan* plan, const Tier* tier);
+    static void emit_tier_counter(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry,
+                                  uint32_t counter, uint32_t threshold);
     static bool expand_loop_syncs(llvm::Function* fn, llvm::AllocaInst* shadow, llvm::Value* real, bool steady_skip);
     // direct: a block whose return stays a return.
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,

@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <vector>
 
 #include "bcore_profile.h"
 #include "cpu_state.h"
@@ -69,6 +71,16 @@ public:
     // compilation; a host that has its lifter tested elsewhere (bcore's
     // tests and ISA suite verify) can turn it off.
     void set_verify(bool verify);
+    // Tiered compilation (0, the default, for none). Every block is first
+    // compiled at tier 0: the plain block (never a loop block), with no IR
+    // pipeline and the backend at CodeGenOpt::None, counting its starts.
+    // One that starts threshold times is compiled again after that run as
+    // an untiered compilation would compile it (tier 1), from the
+    // instructions tier 0 read and with the guest state tier 0 saw, and
+    // replaces it. The guest does the same work either way; most blocks run
+    // too rarely for what the full pipeline costs to pay. A threshold takes
+    // effect for blocks compiled from then on.
+    void set_tiering(uint32_t threshold);
     // Blocks compiled from now on end at an IDLE and return to the host with
     // CpuState::idle set, so it can let guest time pass until a wakeup (off
     // by default: IDLE does nothing, as for a host with nothing to wait for).
@@ -127,7 +139,11 @@ private:
     void applyModuleTarget();
     // Translates, optimizes and adds the block at pc (careful: see
     // BBTranslator::translate); null if that fails.
-    void (*compile(uint32_t pc, bool careful))(CpuState*, Memory*);
+    // promote: the tier-0 compilation to compile again at tier 1.
+    struct Tier0Record;
+    void (*compile(uint32_t pc, bool careful, Tier0Record* promote = nullptr))(CpuState*, Memory*);
+    // Compiles again at tier 1 the blocks that asked to be (set_tiering).
+    void promote();
     // (Re)registers the code-map listener on jit_. Called by init/invalidate.
     void attachProfiler();
 
@@ -155,6 +171,13 @@ private:
     bool lazy_state_ = true;
     bool loop_blocks_ = true;
     bool verify_ = true;
+    uint32_t tier_threshold_ = 0;
+    std::unique_ptr<Compiler> tier0_compiler_;
+    // The tier-0 compilations of this engine, by counter (TierTable), until
+    // promoted; and for each PC the counter of the tier-0 code compiled for
+    // it now, until it is promoted or replaced.
+    std::vector<std::unique_ptr<Tier0Record>> tier0_;
+    std::unordered_map<uint32_t, uint32_t> tier0_current_;
     bool idle_waits_ = false;
     int steady_skip_ = 0;
     const uint8_t* idle_wake_ = nullptr;

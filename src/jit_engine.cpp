@@ -1,5 +1,6 @@
 #include "jit_engine.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <atomic>
 #include <cstring>
@@ -61,7 +62,9 @@ bool JitEngine::init() {
 
     // Pre-allocate hash buckets to avoid rehash overhead during execution.
     cache_.reserve(1024);
-    chain_ = std::make_unique<ChainSlot[]>(size_t(1) << kChainBits);
+    static_assert(offsetof(ChainArea, tier) == kTierTableOffset, "generated code finds the tier table there");
+    area_ = std::make_unique<ChainArea>();  // value-initialized: the tier table all zero
+    chain_ = area_->slots;
     for (size_t i = 0; i < (size_t(1) << kChainBits); ++i) chain_[i] = {kChainEmpty, 0, nullptr};
 
     // Manually register all extern "C" symbols that JIT'd code may call.
@@ -144,16 +147,12 @@ bool JitEngine::defineEnter() {
 }
 
 bool JitEngine::addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
-                          uint32_t fallthrough_pc, bool careful) {
+                          uint32_t fallthrough_pc, const std::string& name) {
     if (auto err = jit_->addObjectFile(std::move(object))) {
         llvm::errs() << "Failed to add object for PC=0x" << llvm::format_hex(pc, 8)
                      << ": " << err << "\n";
         return false;
     }
-
-    // Look up the function
-    char name[32];
-    snprintf(name, sizeof(name), careful ? "bb_0x%08x.careful" : "bb_0x%08x", pc);
 
     auto sym = jit_->lookup(name);
     if (!sym) {
