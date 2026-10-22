@@ -34,6 +34,8 @@ struct BBInfo {
 };
 
 class BBTranslator;
+class CodeArena;
+class CodeArenaPool;
 
 
 class JitEngine {
@@ -47,6 +49,14 @@ public:
     // compiled for pc.
     bool addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
                    uint32_t fallthrough_pc, const std::string& name);
+    // Code placed in an arena of this engine (codeArena) for pc, as
+    // addObject's: it replaces whatever was compiled for pc.
+    void addCode(uint32_t pc, BbFunc fn, uint32_t fallthrough_pc);
+    // An arena of this engine's with room for `code` bytes of code beside
+    // the code it holds (null if there is none), for code placed in it
+    // directly (the copy-and-patch tier, cp_translator.h). The arena lives
+    // as long as anything holds it.
+    std::shared_ptr<CodeArena> codeArena(uintptr_t code);
     BbFunc lookup(uint32_t pc);
     bool empty() const { return cache_.empty(); }
     // Runs fn (from lookup()) on cpu and mem.
@@ -86,6 +96,7 @@ public:
 
 private:
     std::unique_ptr<llvm::orc::LLJIT> jit_;
+    std::shared_ptr<CodeArenaPool> pool_;
     std::unordered_map<uint32_t, BBInfo> cache_;
     // The chain table, and the tier table after it (kTierTableOffset).
     struct ChainArea {
