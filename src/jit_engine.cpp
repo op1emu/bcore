@@ -47,8 +47,9 @@ bool JitEngine::init() {
     // every object's sections placed in the engine's arenas instead of pages
     // of their own (CodeArenaPool; an object no arena can take gets the
     // default memory manager).
+    pool_ = std::make_shared<CodeArenaPool>();
     builder.setObjectLinkingLayerCreator(
-        [pool = std::make_shared<CodeArenaPool>()](llvm::orc::ExecutionSession& es, const llvm::Triple&)
+        [pool = pool_](llvm::orc::ExecutionSession& es, const llvm::Triple&)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
             return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
                 es, [pool] { return std::make_unique<ArenaMemoryManager>(pool); });
@@ -163,6 +164,15 @@ bool JitEngine::addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> objec
     cache_[pc] = BBInfo{fn, fallthrough_pc};
     publishChain(pc, fn);
     return true;
+}
+
+void JitEngine::addCode(uint32_t pc, BbFunc fn, uint32_t fallthrough_pc) {
+    cache_[pc] = BBInfo{fn, fallthrough_pc};
+    publishChain(pc, fn);
+}
+
+std::shared_ptr<CodeArena> JitEngine::codeArena(uintptr_t code) {
+    return pool_ ? pool_->arenaFor(code, 0) : nullptr;
 }
 
 // The function before the PC: generated code that matches the PC calls the
