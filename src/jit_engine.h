@@ -8,16 +8,13 @@
 #include <vector>
 
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
-#include <llvm/IR/Module.h>
-#include <llvm/Passes/PassBuilder.h>
-#include <llvm/Analysis/LoopAnalysisManager.h>
-#include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Support/MemoryBuffer.h>
 
 #include "chain_table.h"
 #include "cpu_state.h"
 #include "mem.h"
 
-namespace llvm { class TargetMachine; class JITEventListener; }
+namespace llvm { class JITEventListener; }
 
 // A JIT'd block: void bb_0x<pc>(CpuState*, Memory*) in the GHC calling
 // convention, which saves no register for its caller, so a block that runs
@@ -43,27 +40,10 @@ public:
     JitEngine();
     ~JitEngine();
 
-    // opt_level: the IR pipeline, 0=None, 1=O1, 2=O2, 3=O3.
-    // codegen_level: the backend on the same scale; <0 follows opt_level.
-    bool init(int opt_level = 2, int codegen_level = -1);
-    // Optimize a module in-place using the same pipeline level as init().
-    // No-op when opt_level is 0. Core::run calls it on every translated module
-    // before addModule; before that, only the IR-dump path did, so opt_level
-    // never reached executed code.
-    void optimize_module(llvm::Module& mod);
-    // A pass pipeline (PassBuilder text) optimize_module runs after the
-    // default one; empty for none. False, and unchanged, if it does not parse.
-    bool set_post_pipeline(const std::string& pipeline);
-    // SteadyLoopSkip on loop blocks (steady_skip.h): 0 off, 1 dry, 2 on.
-    void set_steady_skip(int mode) { steady_skip_ = mode; }
-    // The layout and triple LLJIT compiles for. A module carrying exactly these
-    // passes addIRModule's check; any other non-default layout is an error.
-    std::string dataLayout() const { return jit_->getDataLayout().getStringRepresentation(); }
-    std::string targetTriple() const { return jit_->getTargetTriple().str(); }
-    // careful: the module's function is bb_0x<pc>.careful
+    bool init();
+    // careful: the object's function is bb_0x<pc>.careful
     // (BBTranslator::translate), and replaces the one compiled for pc.
-    bool addModule(uint32_t pc, std::unique_ptr<llvm::Module> module,
-                   std::unique_ptr<llvm::LLVMContext> ctx,
+    bool addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
                    uint32_t fallthrough_pc, bool careful = false);
     BbFunc lookup(uint32_t pc);
     bool empty() const { return cache_.empty(); }
@@ -108,12 +88,5 @@ private:
     void publishChain(uint32_t pc, BbFunc fn);
     bool defineEnter();
     EnterFunc enter_ = nullptr;
-    int opt_level_ = 2;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
-    // Cached pass pipeline (built once in init(), reused across optimize_module() calls).
-    // pass_machine_ outlives pb_, which holds it.
-    std::unique_ptr<llvm::TargetMachine> pass_machine_;
-    std::unique_ptr<llvm::PassBuilder> pb_;
-    std::string post_pipeline_;
-    int steady_skip_ = 0;
 };

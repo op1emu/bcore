@@ -11,6 +11,7 @@
 #include "mem.h"
 
 class JitEngine;
+class Compiler;
 class BBTranslator;
 
 namespace bcore_profile { struct ProfileState; }
@@ -135,6 +136,8 @@ private:
     // so profile_ must outlive any engine.
     std::unique_ptr<bcore_profile::ProfileState> profile_;
     std::shared_ptr<JitEngine> jit_;
+    // Kept across invalidate(): it holds no compiled code.
+    std::unique_ptr<Compiler> compiler_;
     std::shared_ptr<BBTranslator> translator_;
     int opt_level_ = 2;
     int codegen_level_ = -1;

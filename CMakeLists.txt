@@ -50,6 +50,7 @@ add_library(bfin-core STATIC
     src/lift_visitor.cpp
     src/code_arena.cpp
     src/jit_engine.cpp
+    src/compiler.cpp
     src/bb_translator.cpp
     src/packet_state.cpp
     src/guest_memory.cpp

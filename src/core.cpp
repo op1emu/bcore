@@ -1,4 +1,5 @@
 #include "core.h"
+#include "compiler.h"
 #include "guest_memory.h"
 #include "steady_skip.h"
 
@@ -36,11 +37,14 @@ bool Core::init(int opt_level, int codegen_level) {
     opt_level_ = opt_level;
     codegen_level_ = codegen_level;
 
+    compiler_ = std::make_unique<Compiler>();
+    if (!compiler_->init(opt_level_, codegen_level_) || !compiler_->set_post_pipeline(post_pipeline_))
+        return false;
+    compiler_->set_steady_skip(steady_skip_);
     jit_ = std::make_shared<JitEngine>();
-    if (!jit_->init(opt_level_, codegen_level_) || !jit_->set_post_pipeline(post_pipeline_))
+    if (!jit_->init())
         return false;
     jit_->setChainFilter(chain_filter_);
-    jit_->set_steady_skip(steady_skip_);
     attachProfiler();
 
     // Use the Memory interface's is_fastmem() to determine mode.
@@ -70,9 +74,9 @@ bool Core::init(int opt_level, int codegen_level) {
 }
 
 void Core::applyModuleTarget() {
-    // Same source as the compiler: LLJIT's addIRModule rejects a module whose
-    // non-default layout differs from its own.
-    translator_->setModuleTarget(jit_->dataLayout(), jit_->targetTriple());
+    // The compiler's: IRBuilder and the IR pipeline read the layout, and the
+    // backend compiles for that triple.
+    translator_->setModuleTarget(compiler_->dataLayout(), compiler_->targetTriple());
 }
 
 BbFunc Core::compile(uint32_t pc, bool careful) {
@@ -126,7 +130,7 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
     // from the initial commit on, a nonzero opt_level changed the printed IR
     // and never the executed code.
     if (opt_level_ != 0) {
-        jit_->optimize_module(*result.module);
+        compiler_->optimize(*result.module);
 #if BCORE_ENABLE_PROFILE
         optimize_end = bcore_profile::monotonic_ns();
         if (want_ir) print(optimized_ir);
@@ -182,10 +186,12 @@ BbFunc Core::compile(uint32_t pc, bool careful) {
     }
 #endif
     BbFunc fn = nullptr;
-    if (jit_->addModule(pc,
-                        std::move(result.module),
-                        std::move(result.context),
-                        result.fallthrough_pc, careful))
+    // The backend, then the object into the JIT; the module and its context
+    // are done with after emit.
+    auto object = compiler_->emit(*result.module);
+    result.module.reset();  // before its context
+    result.context.reset();
+    if (object && jit_->addObject(pc, std::move(object), result.fallthrough_pc, careful))
         fn = jit_->lookup(pc);
 #if BCORE_ENABLE_PROFILE
     const uint64_t t1 = bcore_profile::monotonic_ns();
@@ -283,10 +289,9 @@ void Core::invalidate() {
     jit_ = std::make_shared<JitEngine>();
     // Init cannot fail here unless it failed in Core::init already (same host,
     // same levels); if it ever does, stop rather than dereference a null LLJIT.
-    if (!jit_->init(opt_level_, codegen_level_) || !jit_->set_post_pipeline(post_pipeline_))
+    if (!jit_->init())
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
-    jit_->set_steady_skip(steady_skip_);
     applyModuleTarget();
 #if BCORE_ENABLE_PROFILE
     // The old engine's objects are gone; drop their map entries before the
@@ -349,7 +354,7 @@ void Core::set_host_cycles(bool host_cycles) {
 const char* const Core::kDefaultPostPipeline = "function(dse)";
 
 bool Core::set_post_pipeline(const std::string& pipeline) {
-    if (!jit_ || !jit_->set_post_pipeline(pipeline)) return false;
+    if (!compiler_ || !compiler_->set_post_pipeline(pipeline)) return false;
     post_pipeline_ = pipeline;
     return true;
 }
@@ -366,7 +371,7 @@ void Core::set_loop_blocks(bool loop) {
 
 void Core::set_steady_skip(int mode) {
     steady_skip_ = mode;
-    if (jit_) jit_->set_steady_skip(steady_skip_);
+    if (compiler_) compiler_->set_steady_skip(steady_skip_);
     if (translator_) translator_->set_steady_skip(steady_skip_ != 0);
 }
 
