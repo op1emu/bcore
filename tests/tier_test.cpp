@@ -191,6 +191,45 @@ static void test_toggle_stencils() {
     require(once(true) == once(false), "turning stencils off and on changed what ran");
 }
 
+// A host that hides its page table (to see every access through its
+// callbacks): blocks compiled while it is hidden call them, with stencils
+// or without (found in review: stencils inlined through the table noted
+// earlier).
+class HidingMemory : public FlatMemory {
+public:
+    explicit HidingMemory(CpuState* cpu) : FlatMemory(0, 0x4000, cpu) { enable_page_table(); }
+    bool shown = true;
+    mutable unsigned reads = 0;
+    uint32_t rawmem_limit() const override { return 0; }
+    uint8_t* const* page_table() const override { return shown ? FlatMemory::page_table() : nullptr; }
+    uint32_t read32(uint32_t addr) const override {
+        if (addr == 0x2000) ++reads;
+        return FlatMemory::read32(addr);
+    }
+};
+
+static void test_hidden_page_table() {
+    for (bool stencils : {false, true}) {
+        CpuState cpu{};
+        HidingMemory mem(&cpu);
+        mem.write16(0x100, 0x0010);  // RTS, compiled while the table is shown
+        mem.write16(0x200, 0x9000);  // R0 = [P0++]
+        mem.write16(0x202, 0x0010);  // RTS
+        mem.write32(0x2000, 42);
+        Core core(&cpu, &mem);
+        core.set_tiering(1000);
+        core.set_copy_patch(stencils);
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.rets = 0x300;
+        require(core.run(0x100), "run");
+        mem.shown = false;
+        cpu.dpregs[8] = 0x2000;
+        require(core.run(0x200), "run");
+        require(mem.reads == 1 && cpu.dpregs[0] == 42, "a block compiled with the table hidden called the host");
+    }
+}
+
 static void test_throwing_callback() {
     for (int opt : {0, 1, 2})
         for (int mode : {0, 1, 2}) {  // untiered; tiered; tiered on the worker
@@ -302,6 +341,7 @@ int main() {
     test_throwing_callback();
     test_throwing_stencils();
     test_toggle_stencils();
+    test_hidden_page_table();
     test_late_page_table();
     test_stale_promotion();
     std::vector<Case> cases;
