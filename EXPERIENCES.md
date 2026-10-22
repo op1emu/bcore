@@ -733,3 +733,9 @@ of 45 IR instructions cost 1.8 ms.
   shared chain exit (3% of a boot's execution samples) and each packet
   compares the loop bottoms, calling bfin_hwloop_step at one (2.6%); the
   execution's host instructions still rose only 0.2%.
+- Found in review: code placed in an arena outside an object must live as
+  long as the engine, since the cache and the chain table point into it
+  (JitEngine keeps every arena it gave out); a tier that reaches RAM
+  through the page table must ask the Memory whether it shows one now, not
+  use the table noted earlier (a host hides it to see every access); and
+  the core must build without the tier, which CI now does on x86-64 too.
