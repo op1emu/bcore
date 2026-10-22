@@ -45,6 +45,8 @@ public:
     // to the real CpuState before each helper call and each exit, and back
     // after each call that may have changed it. Exact either way.
     void set_loop_blocks(bool loop) { loop_blocks_ = loop; }
+    // See Core::set_verify.
+    void set_verify(bool verify) { verify_ = verify; }
     // An IDLE ends its block (Core::set_idle_waits).
     void set_idle_waits(bool waits) { idle_waits_ = waits; }
     // Loop blocks may skip iterations (Core::set_steady_skip): their copies
@@ -121,6 +123,7 @@ private:
     bool chain_dry_ = false;
     std::function<bool(uint32_t)> chain_filter_;
     bool loop_blocks_ = false;
+    bool verify_ = true;
     bool idle_waits_ = false;
     bool steady_skip_ = false;
     bool host_cycles_ = false;

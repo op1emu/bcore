@@ -64,6 +64,11 @@ public:
     // each helper call and exit (BBTranslator::set_loop_blocks; on by
     // default). Either way every reader sees the same values.
     void set_loop_blocks(bool loop);
+    // Every lifted module is checked with LLVM's verifier, which reports a
+    // broken one on stderr (on by default). It costs about 1% of
+    // compilation; a host that has its lifter tested elsewhere (bcore's
+    // tests and ISA suite verify) can turn it off.
+    void set_verify(bool verify);
     // Blocks compiled from now on end at an IDLE and return to the host with
     // CpuState::idle set, so it can let guest time pass until a wakeup (off
     // by default: IDLE does nothing, as for a host with nothing to wait for).
@@ -149,6 +154,7 @@ private:
     bool count_chained_ = true;
     bool lazy_state_ = true;
     bool loop_blocks_ = true;
+    bool verify_ = true;
     bool idle_waits_ = false;
     int steady_skip_ = 0;
     const uint8_t* idle_wake_ = nullptr;
