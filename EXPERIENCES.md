@@ -667,13 +667,20 @@ of 45 IR instructions cost 1.8 ms.
   FastISel selects bottom-up and gives the rest of a basic block to
   SelectionDAG at the first instruction it cannot select; X86FastISel
   selects no return in the GHC convention, so every basic block ending in
-  `ret` was SelectionDAG's. One return per tier-0 block: -2.4%.
+  `ret` was SelectionDAG's. One return per tier-0 block: -2.0%. (Making
+  block functions nounwind saved 0.5% more, and turned a host callback's
+  exception, which had unwound through generated code to the host, into
+  std::terminate: not done.)
 - A promotion must run the code its tier-0 block ran and see the guest state
   that block was compiled with: the lift reads code through the host, whose
   reads may have side effects and whose memory may have changed since.
   RecordingMemory logs every halfword the tier-0 lift reads; the promotion
   reads through a ReplayMemory that answers from that log only, with a copy
   of the CpuState the tier-0 lift took its hints from.
+- Every path that lifts reads Memory::page_table() and must leave the table
+  in CpuState for the code it inlines through: the worker's promotions
+  once skipped that. And every compilation of a PC, tiered or not, decides
+  which queued promotion may still replace it.
 - Counters live after the chain table (TierTable, reached through
   CpuState::chain_table), indexed by tier-0 compilation, not by chain slot:
   a slot is shared by colliding PCs and absent for PCs the filter rejects.
