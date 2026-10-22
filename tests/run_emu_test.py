@@ -140,6 +140,11 @@ def main() -> None:
                         help="run emu with --page-table (inline access through Memory::page_table())")
     parser.add_argument("--chain", action="store_true",
                         help="run emu with --chain (blocks run the next block themselves)")
+    parser.add_argument("--tier-threshold", type=int, default=0, metavar="N",
+                        help="run emu with --tier-threshold N (tiered compilation; 0: untiered)")
+    parser.add_argument("--copy-patch", action="store_true",
+                        help="run emu with --copy-patch (tier 0 made of stencils; needs --page-table "
+                             "and --tier-threshold)")
     args = parser.parse_args()
 
     emu, elf_dir = get_project_paths()
@@ -190,7 +195,9 @@ def main() -> None:
     print(f"tests:   {len(active_files)}  (+ {len(ignored_files)} ignored)")
     print(f"timeout: {args.timeout}s")
     print(f"opt:     -O {args.opt_level}" + ("  --page-table" if args.page_table else "")
-          + ("  --chain" if args.chain else ""))
+          + ("  --chain" if args.chain else "")
+          + (f"  --tier-threshold {args.tier_threshold}" if args.tier_threshold else "")
+          + ("  --copy-patch" if args.copy_patch else ""))
     print()
 
     summary = Summary(total=len(active_files), ignored=len(ignored_files))
@@ -203,7 +210,9 @@ def main() -> None:
             proc = subprocess.run(
                 [str(emu), str(elf_path), "-O", str(args.opt_level)]
                 + (["--page-table"] if args.page_table else [])
-                + (["--chain"] if args.chain else []),
+                + (["--chain"] if args.chain else [])
+                + (["--tier-threshold", str(args.tier_threshold)] if args.tier_threshold else [])
+                + (["--copy-patch"] if args.copy_patch else []),
                 capture_output=True,
                 text=True,
                 timeout=args.timeout,

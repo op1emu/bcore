@@ -54,15 +54,28 @@ struct Case {
     std::function<bool(uint32_t)> filter;
 };
 
+// How the guest's memory and chaining are set up, and whether tier 0 is
+// made of stencils (Core::set_copy_patch, which needs the page table).
+struct Mode {
+    const char* name;
+    bool paged = false;
+    bool copy_patch = false;
+    bool dry = false;
+    bool count = true;
+};
+
 // background: -1 promotions on this thread; else on the worker, published
 // after that many packets (0: as soon as the worker is done).
-static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1) {
+static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"}) {
     CpuState cpu{};
     FlatMemory mem(0, 0x4000, &cpu);
+    if (mode.paged) mem.enable_page_table();
     c.load(mem);
     Core core(&cpu, &mem);
-    core.set_chaining(true, false);
+    core.set_chaining(true, mode.dry);
+    core.set_count_chained(mode.count);
     core.set_tiering(threshold);
+    if (threshold) core.set_copy_patch(mode.copy_patch);
     if (background >= 0) core.set_tier_background(true, uint64_t(background));
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
@@ -96,6 +109,55 @@ public:
         return FlatMemory::read32(addr);
     }
 };
+
+// The same where tier 0 is made of stencils, which have no unwind
+// information: their helpers catch, and Core::run throws again. The load
+// reaches the callback outside the page table's RAM.
+class ThrowingPagedMemory : public FlatMemory {
+public:
+    explicit ThrowingPagedMemory(CpuState* cpu) : FlatMemory(0, 0x4000, cpu) { enable_page_table(); }
+    bool throwing = false;
+    uint32_t read32(uint32_t addr) const override {
+        if (addr < 0x4000) return FlatMemory::read32(addr);
+        if (throwing) throw std::runtime_error("host read32 failure");
+        return addr;
+    }
+};
+
+static void test_throwing_stencils() {
+    // Tier 0 throughout (1000 starts are never reached), on this thread or
+    // with the worker.
+    for (int mode : {1, 2}) {
+        CpuState cpu{};
+        ThrowingPagedMemory mem(&cpu);
+        mem.write16(0x100, 0x9000);  // R0 = [P0++]
+        mem.write16(0x102, 0x2fff);  // JUMP.S 0x100
+        Core core(&cpu, &mem);
+        core.set_chaining(true, false);
+        core.set_tiering(1000);
+        core.set_copy_patch(true);
+        if (mode == 2) core.set_tier_background(true, 1);
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        bool caught = false;
+        for (int r = 0; r < 6 && !caught; ++r) {
+            mem.throwing = r >= 3;
+            cpu.dpregs[8] = 0x8000;
+            cpu.chain_budget = 7;
+            try {
+                require(core.run(0x100), "run");
+            } catch (const std::runtime_error&) {
+                caught = true;
+            }
+            cpu.did_jump = false;
+        }
+        require(caught, "a memory callback's exception did not reach the host through stencils");
+#if BCORE_ENABLE_PROFILE && BCORE_COPY_PATCH_TEST
+        require(core.stats().copy_patch_blocks > 0, "no block was made of stencils");
+#endif
+    }
+}
 
 static void test_throwing_callback() {
     for (int opt : {0, 1, 2})
@@ -206,6 +268,7 @@ static void test_stale_promotion() {
 
 int main() {
     test_throwing_callback();
+    test_throwing_stencils();
     test_late_page_table();
     test_stale_promotion();
     std::vector<Case> cases;
@@ -243,17 +306,28 @@ int main() {
     };
     cases.push_back({"guard miss", self, bottoms, 0x100, 20, 37, nullptr});
 
+    // Each against the untiered run with the same memory and chaining; the
+    // dry and uncounted chains with stencils at -O1 only.
+    const Mode modes[] = {
+        {"raw"},
+        {"paged", true},
+        {"stencils", true, true},
+        {"stencils dry", true, true, true},
+        {"stencils uncounted", true, true, false, false},
+    };
     unsigned compared = 0;
-    uint64_t promoted = 0, overflows = 0, background_promoted = 0;
+    uint64_t promoted = 0, overflows = 0, background_promoted = 0, stencil_blocks = 0;
     for (const Case& c : cases)
-        for (int opt : {0, 1, 2}) {
-            const Outcome want = run(c, opt, 0);
+        for (int opt : {0, 1, 2})
+        for (const Mode& mode : modes) {
+            if ((mode.dry || !mode.count) && opt != 1) continue;
+            const Outcome want = run(c, opt, 0, -1, mode);
             for (uint32_t threshold : {1u, 2u, 7u})
             for (int background : {-1, 0, 1, 50}) {
-                const Outcome got = run(c, opt, threshold, background);
+                const Outcome got = run(c, opt, threshold, background, mode);
                 if (!(got == want)) {
-                    fprintf(stderr, "FAIL: %s -O%d threshold %u background %d: %zu/%zu runs\n", c.name, opt,
-                            threshold, background, want.runs.size(), got.runs.size());
+                    fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u background %d: %zu/%zu runs\n", c.name,
+                            mode.name, opt, threshold, background, want.runs.size(), got.runs.size());
                     for (size_t i = 0; i < want.runs.size() && i < got.runs.size(); ++i)
                         if (!(want.runs[i] == got.runs[i]))
                             fprintf(stderr, "  run %zu: pc %x/%x packets %u/%u chain %u/%u blocks %u/%u\n", i,
@@ -272,6 +346,7 @@ int main() {
                 overflows += got.stats.tier_request_overflows;
                 require(got.stats.promotions_dropped == 0, "a promotion read code its tier-0 block had not");
                 if (background > 0) background_promoted += got.stats.blocks_promoted;
+                stencil_blocks += got.stats.copy_patch_blocks;
                 ++compared;
             }
         }
@@ -279,6 +354,9 @@ int main() {
     require(promoted > 0, "no block was promoted");
     require(overflows > 0, "no run filed more requests than the table holds");
     require(background_promoted > 0, "no block was promoted on the worker");
+#if BCORE_COPY_PATCH_TEST
+    require(stencil_blocks > 0, "no tier-0 block was made of stencils");
+#endif
 #endif
     printf("tier test passed (%u cases, %llu promotions, %llu request overflows)\n", compared,
            (unsigned long long)promoted, (unsigned long long)overflows);
