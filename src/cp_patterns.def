@@ -1,0 +1,41 @@
+// The 32-bit patterns the copy-and-patch tier 0 has stencils for
+// (cp_format.h), with the field holes their lifts take
+// (LiftVisitor::field_value and pc_field, slot by slot):
+//   CP_PATTERN(opcode, hole0, hole1)
+// A hole is CP_NONE or CP_FIELD(arg, sign, shift, pc): the pattern's
+// argument `arg` (in the order the decoder passes them), sign-extended or
+// not, shifted left by `shift`, plus the PC when `pc`. The other arguments
+// are the key: a stencil for each of their values. tools/stencilgen.cpp
+// checks each formula against what the lift records.
+
+#ifndef CP_PATTERN
+#define CP_PATTERN(opcode, hole0, hole1)
+#endif
+
+// The common non-parallel 32-bit instructions of the op1 firmware's boot:
+// with the 16-bit ones, the instructions of blocks that took 48.5% of the
+// tier-0 compilation time (2026-10).
+CP_PATTERN(CALLa_CALL,            CP_FIELD(0, 1, 1, 1), CP_NONE)
+CP_PATTERN(CALLa_JUMP,            CP_FIELD(0, 1, 1, 1), CP_NONE)
+CP_PATTERN(LDIMMhalf_low,         CP_FIELD(2, 0, 0, 0), CP_NONE)
+CP_PATTERN(LDIMMhalf_high,        CP_FIELD(2, 0, 16, 0), CP_NONE)
+CP_PATTERN(LDIMMhalf_full,        CP_FIELD(2, 0, 0, 0), CP_NONE)
+CP_PATTERN(LDIMMhalf_full_sext,   CP_FIELD(2, 1, 0, 0), CP_NONE)
+CP_PATTERN(LoopSetup_LC0,         CP_FIELD(0, 0, 1, 1), CP_FIELD(2, 0, 1, 1))
+CP_PATTERN(LoopSetup_LC0_P,       CP_FIELD(0, 0, 1, 1), CP_FIELD(2, 0, 1, 1))
+CP_PATTERN(LoopSetup_LC1,         CP_FIELD(0, 0, 1, 1), CP_FIELD(2, 0, 1, 1))
+CP_PATTERN(LoopSetup_LC1_P,       CP_FIELD(0, 0, 1, 1), CP_FIELD(2, 0, 1, 1))
+CP_PATTERN(LoopSetup_LC0_half,    CP_FIELD(0, 0, 1, 1), CP_FIELD(2, 0, 1, 1))
+CP_PATTERN(LoopSetup_LC1_half,    CP_FIELD(0, 0, 1, 1), CP_FIELD(2, 0, 1, 1))
+CP_PATTERN(LDSTidxI_LD_32,        CP_FIELD(2, 1, 2, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_LD_P_32,      CP_FIELD(2, 1, 2, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_LD_16_Z,      CP_FIELD(2, 1, 1, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_LD_16_X,      CP_FIELD(2, 1, 1, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_LD_B_Z,       CP_FIELD(2, 1, 0, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_LD_B_X,       CP_FIELD(2, 1, 0, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_ST_32,        CP_FIELD(2, 1, 2, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_ST_P_32,      CP_FIELD(2, 1, 2, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_ST_16,        CP_FIELD(2, 1, 1, 0), CP_NONE)
+CP_PATTERN(LDSTidxI_ST_B,         CP_FIELD(2, 1, 0, 0), CP_NONE)
+CP_PATTERN(Linkage_LINK,          CP_FIELD(0, 0, 2, 0), CP_NONE)
+CP_PATTERN(Linkage_UNLINK,        CP_NONE, CP_NONE)

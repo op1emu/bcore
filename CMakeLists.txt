@@ -43,9 +43,9 @@ if(BCORE_PERF_JIT_EVENTS)
     list(APPEND LLVM_LIBS ${LLVM_PERFJIT_LIBS})
 endif()
 
-# ---- Core library (disassembler + emulator) ----
-add_library(bfin-core STATIC
-    src/core.cpp
+# ---- The lifter, the compilers and the JIT: all of the core but Core ----
+# bcore-stencilgen links it to build the stencils bfin-core then holds.
+add_library(bcore-lift STATIC
     src/disasm_visitor.cpp
     src/lift_visitor.cpp
     src/code_arena.cpp
@@ -65,20 +65,72 @@ add_library(bfin-core STATIC
     src/cpu_state.cpp
     src/profile.cpp
 )
-target_include_directories(bfin-core
+target_include_directories(bcore-lift
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${LLVM_INCLUDE_DIRS}
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_compile_definitions(bfin-core PUBLIC
+target_compile_definitions(bcore-lift PUBLIC
     ${LLVM_DEFINITIONS}
     BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
     BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
 )
 find_package(Threads REQUIRED)  # the promotion worker (Core::set_tier_background)
-target_link_libraries(bfin-core PUBLIC ${LLVM_LIBS} Threads::Threads)
+target_link_libraries(bcore-lift PUBLIC ${LLVM_LIBS} Threads::Threads)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(bcore-lift PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
+set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
+
+# ---- Copy-and-patch stencils (cp_format.h): x86-64 hosts ----
+# Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(BCORE_COPY_PATCH ON)
+else()
+    set(BCORE_COPY_PATCH OFF)
+endif()
+set(BCORE_CP_SOURCES)
+if(BCORE_COPY_PATCH)
+    add_executable(bcore-stencilgen tools/stencilgen.cpp)
+    target_include_directories(bcore-stencilgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
+    target_link_libraries(bcore-stencilgen PRIVATE bcore-lift)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(bcore-stencilgen PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    endif()
+    set_target_properties(bcore-stencilgen PROPERTIES FOLDER "Core")
+    set(BCORE_CP_GEN ${CMAKE_CURRENT_BINARY_DIR}/cp_gen)
+    add_custom_command(
+        OUTPUT ${BCORE_CP_GEN}/cp_stencils.inc ${BCORE_CP_GEN}/cp_stencils.bin ${BCORE_CP_GEN}/cp_stencils.txt
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${BCORE_CP_GEN}
+        COMMAND bcore-stencilgen ${BCORE_CP_GEN}
+        DEPENDS bcore-stencilgen
+        COMMENT "Building the copy-and-patch stencils"
+        VERBATIM)
+    set_source_files_properties(src/cp_stencils.cpp PROPERTIES
+        OBJECT_DEPENDS "${BCORE_CP_GEN}/cp_stencils.inc;${BCORE_CP_GEN}/cp_stencils.bin")
+    set(BCORE_CP_SOURCES src/cp_stencils.cpp ${BCORE_CP_GEN}/cp_stencils.inc)
+endif()
+
+# ---- Core library (disassembler + emulator) ----
+add_library(bfin-core STATIC
+    src/core.cpp
+    ${BCORE_CP_SOURCES}
+)
+target_include_directories(bfin-core
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${LLVM_INCLUDE_DIRS}
+        ${BCORE_CP_GEN}
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_compile_definitions(bfin-core PRIVATE
+    BCORE_COPY_PATCH=$<BOOL:${BCORE_COPY_PATCH}>
+    CP_STENCILS_BIN="${BCORE_CP_GEN}/cp_stencils.bin"
+)
+target_link_libraries(bfin-core PUBLIC bcore-lift)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bfin-core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
