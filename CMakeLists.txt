@@ -110,7 +110,7 @@ if(BCORE_COPY_PATCH)
         VERBATIM)
     set_source_files_properties(src/cp_stencils.cpp PROPERTIES
         OBJECT_DEPENDS "${BCORE_CP_GEN}/cp_stencils.inc;${BCORE_CP_GEN}/cp_stencils.bin")
-    set(BCORE_CP_SOURCES src/cp_stencils.cpp ${BCORE_CP_GEN}/cp_stencils.inc)
+    set(BCORE_CP_SOURCES src/cp_stencils.cpp src/cp_translator.cpp ${BCORE_CP_GEN}/cp_stencils.inc)
 endif()
 
 # ---- Core library (disassembler + emulator) ----

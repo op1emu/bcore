@@ -76,7 +76,7 @@ struct ProfileState {
 
     void clearBlocks();
     void recordBlock(uint64_t object_key, uint64_t addr, uint64_t size,
-                     uint32_t guest_pc);
+                     uint32_t guest_pc, uint32_t variant = 0);
     void freeObject(uint64_t object_key);
 
     std::unique_ptr<llvm::JITEventListener> map_listener;  // owns BlockMapListener

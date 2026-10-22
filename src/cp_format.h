@@ -117,5 +117,8 @@ extern const uint32_t kPatterns32Count;
 extern const Selected32 kSelected32[];
 extern const uint32_t kPrologue[2];  // without, with host cycles
 extern const uint32_t kExits[5];     // return; chain; count chained; dry; dry, count chained
+// Where a block cut at its last packet goes on (pc the next PC, field 0
+// the packet's length, packet its index): stores them and exits.
+extern const uint32_t kFallthrough;
 
 }  // namespace bcore_cp

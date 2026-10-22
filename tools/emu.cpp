@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     bool lazy_state = true;
     bool loop_blocks = true;
     uint32_t tier_threshold = 0;
+    bool copy_patch = false;
     int tier_background = -1;  // -1 on the dispatching thread; else publish_after
     const char* post_pipeline = nullptr;
     uint64_t max_steps = 0; // 0 = unlimited
@@ -66,6 +67,8 @@ int main(int argc, char** argv) {
             loop_blocks = false;
         } else if (strcmp(argv[i], "--tier-threshold") == 0 && i + 1 < argc) {
             tier_threshold = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
+        } else if (strcmp(argv[i], "--copy-patch") == 0) {
+            copy_patch = true;
         } else if (strcmp(argv[i], "--tier-background") == 0 && i + 1 < argc) {
             tier_background = static_cast<int>(strtol(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--post-pipeline") == 0 && i + 1 < argc) {
@@ -198,6 +201,7 @@ int main(int argc, char** argv) {
     core.set_lazy_state(lazy_state);
     core.set_loop_blocks(loop_blocks);
     core.set_tiering(tier_threshold);
+    core.set_copy_patch(copy_patch);
     if (tier_background >= 0) core.set_tier_background(true, static_cast<uint64_t>(tier_background));
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
@@ -241,6 +245,11 @@ int main(int argc, char** argv) {
                 (unsigned long long)packets, (unsigned long long)runs);
         // Runs that returned here, the rest ran from the block before them.
         if (chain) fprintf(stderr, "returns=%llu\n", (unsigned long long)host_runs);
+        // Tier-0 blocks made of stencils and given to LLVM (with profiling).
+        if (copy_patch)
+            fprintf(stderr, "copy-patch blocks=%llu fallbacks=%llu\n",
+                    (unsigned long long)core.stats().copy_patch_blocks,
+                    (unsigned long long)core.stats().copy_patch_fallbacks);
     }
     return cpu.exit_code;
 }

@@ -17,6 +17,7 @@ class JitEngine;
 class Compiler;
 class CompileWorker;
 class BBTranslator;
+class CpTranslator;
 
 namespace bcore_profile { struct ProfileState; }
 
@@ -83,6 +84,14 @@ public:
     // too rarely for what the full pipeline costs to pay. A threshold takes
     // effect for blocks compiled from then on.
     void set_tiering(uint32_t threshold);
+    // Tier 0 copies its blocks together from stencils built with the core
+    // (cp_translator.h) where it can, microseconds where LLVM takes a
+    // millisecond: blocks of 16-bit instructions and the common 32-bit ones
+    // (cp_patterns.def), no parallel packet, with a page table (no fastmem,
+    // no raw memory) and no step limit. The rest it compiles with LLVM as
+    // before. Exact either way. Off by default; on x86-64 only (elsewhere
+    // this does nothing).
+    void set_copy_patch(bool enable);
     // Promotions compiled on a thread of their own (off by default: on the
     // dispatching thread, after the run that asked). The dispatching thread
     // still lifts each one (reading the guest's code may call the host) and
@@ -196,6 +205,9 @@ private:
     bool loop_blocks_ = true;
     bool verify_ = true;
     uint32_t tier_threshold_ = 0;
+    bool copy_patch_ = false;
+    std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
+    bool unlimited_ = true;             // no step limit at init
     std::unique_ptr<Compiler> tier0_compiler_;
     // The tier-0 compilations of this engine, by counter (TierTable), until
     // promoted; and for each PC the counter of the tier-0 code compiled for

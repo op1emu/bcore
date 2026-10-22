@@ -16,6 +16,9 @@
 #include "jit_engine.h"
 #include "mmr.h"
 #include "profile_state.h"
+#if BCORE_COPY_PATCH
+#include "cp_translator.h"
+#endif
 
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
@@ -60,6 +63,8 @@ bool Core::init(int opt_level, int codegen_level) {
         return false;
     jit_->setChainFilter(chain_filter_);
     attachProfiler();
+    unlimited_ = cpu_->steps_remaining == 0;
+    set_copy_patch(copy_patch_);
 
     // Use the Memory interface's is_fastmem() to determine mode.
     const bool fastmem = mem_->is_fastmem();
@@ -153,6 +158,61 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
             if (armed && sink) sink->onTranslateFailure(pc, bcore_profile::monotonic_ns() - t0);
         }
     } fail_on_unwind{sink, pc, t0};
+#endif
+#if BCORE_COPY_PATCH
+    // The copy-and-patch tier 0, where it can take the block: else the
+    // block compiles with LLVM, from the instructions the copy-and-patch
+    // translator read (no halfword is read from the host twice).
+    std::optional<bcore_tier::PrefetchedMemory> prefetched;
+    if (tier0 && cp_ && page_table_ && !mem_->is_fastmem() && mem_->rawmem_limit() == 0 && unlimited_ &&
+        lazy_state_ && !dump_ir_
+#if BCORE_ENABLE_PROFILE
+        && !want_ir
+#endif
+    ) {
+        CpTranslator::Config config;
+        config.chaining = chaining_;
+        config.dry = chain_dry_;
+        config.count_chained = count_chained_;
+        config.host_cycles = host_cycles_;
+        config.idle_waits = idle_waits_;
+        config.threshold = tier.threshold;
+        const CpTranslator::Block block = cp_->translate(pc, *tier.code, tier.counter, config);
+        if (block.fn) {
+            jit_->addCode(pc, block.fn, block.fallthrough_pc);
+            tier0_current_[pc] = tier.counter;
+            tier0_latest_[pc] = tier.counter;
+            tier0_.push_back(std::move(record));
+#if BCORE_ENABLE_PROFILE
+            const uint64_t t1 = bcore_profile::monotonic_ns();
+            fail_on_unwind.armed = false;
+            profile_->recordBlock((uint64_t(1) << 63) | reinterpret_cast<uintptr_t>(block.fn),
+                                  reinterpret_cast<uintptr_t>(block.fn), block.size, pc, /*variant=*/1);
+            profile_->stats.translate_ns_total += t1 - t0;
+            profile_->stats.blocks_translated++;
+            profile_->stats.copy_patch_blocks++;
+            if (sink) {
+                sink->onCompileStage(pc, "lift", t0, t1, true);
+                sink->onCompileStage(pc, "materialize", t1, t1, true);
+                if (want_metrics) {
+                    BcoreCompileMetrics metrics;
+                    metrics.object_bytes = block.size;
+                    metrics.terminator = "copy-patch";
+                    metrics.tier = 0;
+                    metrics.copy_patch = true;
+                    sink->onCompileMetrics(pc, metrics);
+                }
+                sink->onTranslateEnd(pc, t1 - t0);
+            }
+#endif
+            return block.fn;
+        }
+#if BCORE_ENABLE_PROFILE
+        profile_->stats.copy_patch_fallbacks++;
+#endif
+        prefetched.emplace(*tier.code, cp_->words());
+        tier.code = &*prefetched;
+    }
 #endif
     auto result = translator_->translate(pc, hint, careful, tiered);
     if (replay && replay->missed()) {
@@ -323,7 +383,15 @@ bool Core::run(uint32_t pc) {
     cpu_->pc = pc;
     cpu_->packets = 0;
     jit_->set_executing(pc);
+#if BCORE_COPY_PATCH
+    // A host exception a copy-and-patch block's helper caught, thrown here
+    // (cp_translator.h).
+    CpTranslator::RunScope scope(cpu_);
+#endif
     jit_->enter(fn, cpu_, mem_);
+#if BCORE_COPY_PATCH
+    scope.rethrow();
+#endif
     jit_->clear_executing();
     while (cpu_->lb_guard_miss) {
         // A block met a loop bottom where its compilation expected none
@@ -349,6 +417,9 @@ bool Core::run(uint32_t pc) {
             return false;
         jit_->set_executing(at);
         jit_->enter(careful, cpu_, mem_);
+#if BCORE_COPY_PATCH
+        scope.rethrow();
+#endif
         jit_->clear_executing();
     }
 #if BCORE_ENABLE_PROFILE
@@ -549,6 +620,14 @@ void Core::collect_promotions(bool all) {
     }
 }
 
+void Core::set_copy_patch(bool enable) {
+    copy_patch_ = enable;
+#if BCORE_COPY_PATCH
+    cp_.reset();
+    if (enable && jit_) cp_ = std::make_unique<CpTranslator>(*jit_);
+#endif
+}
+
 void Core::invalidate() {
     // The worker's promotions were lifted for the old engine: their code is
     // not used (and the worker stops before the backend of one in flight).
@@ -563,6 +642,7 @@ void Core::invalidate() {
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
     applyModuleTarget();
+    set_copy_patch(copy_patch_);  // the old engine's arenas are gone
     // The new engine's tier table starts at zero, with none of these blocks.
     tier0_.clear();
     tier0_current_.clear();
