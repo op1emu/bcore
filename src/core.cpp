@@ -162,9 +162,14 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
 #if BCORE_COPY_PATCH
     // The copy-and-patch tier 0, where it can take the block: else the
     // block compiles with LLVM, from the instructions the copy-and-patch
-    // translator read (no halfword is read from the host twice).
+    // translator read (no halfword is read from the host twice). Stencils
+    // reach RAM through the page table: only while the Memory shows one now,
+    // as a lift inlines through it only then (found in review: the table
+    // noted earlier let them bypass a host that had hidden it to see every
+    // access).
     std::optional<bcore_tier::PrefetchedMemory> prefetched;
-    if (tier0 && cp_ && page_table_ && !mem_->is_fastmem() && mem_->rawmem_limit() == 0 && unlimited_ &&
+    if (tier0 && copy_patch_ && cp_ && tier.code->page_table() && !mem_->is_fastmem() &&
+        mem_->rawmem_limit() == 0 && unlimited_ &&
         lazy_state_ && !dump_ir_
 #if BCORE_ENABLE_PROFILE
         && !want_ir
