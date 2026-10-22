@@ -5,8 +5,8 @@
 // overflows, a PC the chain filter keeps out of the chain table, a block
 // compiled again careful after its loop-bottom guard missed, and code that
 // changed in memory after tier 0 read it (an untiered block keeps running
-// the code it was compiled from, and so does its promotion); and cases found
-// in review (below).
+// the code it was compiled from, and so does its promotion); and three cases
+// found in review (below).
 #include "core.h"
 #include "bcore_profile.h"
 #include "../src/cec.h"
@@ -124,6 +124,9 @@ static void test_throwing_callback() {
                 cpu.did_jump = false;
             }
             require(caught, "a memory callback's exception did not reach the host");
+#if BCORE_ENABLE_PROFILE
+            require(core.stats().promotions_dropped == 0, "a promotion was dropped");
+#endif
         }
 }
 
@@ -159,6 +162,11 @@ static void test_late_page_table() {
             require(cpu.dpregs[0] == 42, "a promotion read the wrong word");
             cpu.did_jump = false;
         }
+#if BCORE_ENABLE_PROFILE
+        // Published at once when the worker is done: maybe not yet.
+        require((background == 0 || core.stats().blocks_promoted > 0) && core.stats().promotions_dropped == 0,
+                "the block was not promoted");
+#endif
     }
 }
 

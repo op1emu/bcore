@@ -47,8 +47,9 @@ public:
     // codegen_level: the backend on the same scale; <0 follows opt_level.
     // split: the machine function splitter moves cold paths apart (init()).
     bool init(int opt_level, int codegen_level, bool split = true);
-    // The IR pipeline, in place; no-op at opt_level 0. Core::compile runs it
-    // on every module before emit.
+    // The IR pipeline, in place; at opt_level 0 only a loop block's guest
+    // memory lowered (guest_memory.h). Every module goes through it before
+    // emit.
     void optimize(llvm::Module& mod);
     // The module's object file, from the backend; null if that fails. The
     // module is left as compiled.
