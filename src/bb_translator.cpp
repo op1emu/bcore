@@ -259,7 +259,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     if (loop) {
         if (!expand_loop_syncs(fn, cast<AllocaInst>(state), cpu_ptr, steady_skip_)) {
             mod.reset();  // before its context
-            return {nullptr, std::move(ctx), visitor.fallthrough_pc(), "packet-cap"};
+            return {std::move(ctx), nullptr, visitor.fallthrough_pc(), "packet-cap"};
         }
         fn->addFnAttr(kLoopBlockAttr);
         if (loop->circular) fn->addFnAttr(kCircularAttr, std::to_string(__builtin_popcount(loop->circular)));
@@ -282,7 +282,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
 
     const char* exit_kind = visitor.is_terminated() ? visitor.exit_kind()
                              : budget_limited_ ? "step-budget" : "packet-cap";
-    return {std::move(mod), std::move(ctx), visitor.fallthrough_pc(), exit_kind};
+    return {std::move(ctx), std::move(mod), visitor.fallthrough_pc(), exit_kind};
 }
 
 static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
