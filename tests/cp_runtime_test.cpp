@@ -365,6 +365,43 @@ void test_settings_while_off() {
             "the range given while off was not applied");
 }
 
+// Found in review: the range took a parallel packet's first two halfwords
+// (where its translation starts) for the packet, and its refusal kept there
+// refused every packet that starts with them.
+void test_range_is_the_whole_packet() {
+    auto packet_of = [](const uint16_t* w, int n) {
+        bcore_cp::RuntimeStencils::Packet p;
+        p.count = uint8_t(n);
+        for (int i = 0; i < n; ++i) p.words[i] = w[i];
+        return p;
+    };
+    const uint64_t whole = bcore_cp::RuntimeStencils::key_hash(packet_of(kParallelA, 4));
+    const uint64_t prefix = bcore_cp::RuntimeStencils::key_hash(packet_of(kParallelA, 2));
+    for (bool by_whole : {true, false}) {
+        CpRuntimeSettings settings;
+        settings.range_lo = settings.range_hi = by_whole ? whole : prefix;
+        Rig rig(settings);
+        rig.place(kCode, {words(kParallelA, 4)});
+        rig.run(kCode);
+        const CpRuntimeStats stats = rig.core->cp_runtime_stats();
+        require(stats.built == (by_whole ? 1u : 0u),
+                by_whole ? "the packet's own hash in range, no stencil" : "only its first halfwords' hash in range, a stencil");
+        if (!by_whole) continue;
+        // Another packet with the same first slot: refused on its own.
+        const uint16_t other[4] = {kParallelA[0], kParallelA[1], 0x9003, 0x0000};
+        rig.place(kCode + 0x100, {words(other, 4)});
+        rig.run(kCode + 0x100);
+        rig.place(kCode + 0x200, {{0x0000}, words(kParallelA, 4)});
+        rig.run(kCode + 0x200);
+        const CpRuntimeStats after = rig.core->cp_runtime_stats();
+        require(after.built == 1 && after.refused == 1 && after.reasons.count("outside the range") == 1,
+                "a refusal kept for the packet's first halfwords");
+#if BCORE_ENABLE_PROFILE
+        require(rig.core->stats().copy_patch_blocks == 2, "the packet in range was not found again");
+#endif
+    }
+}
+
 void test_off() {
     CpRuntimeSettings settings;
     settings.enable = false;
@@ -395,6 +432,7 @@ int main() {
     test_illegal_parallel_reads_two();
     test_reads_as_llvm();
     test_settings_while_off();
+    test_range_is_the_whole_packet();
     printf("PASS\n");
     return 0;
 }
