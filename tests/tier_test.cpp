@@ -62,6 +62,7 @@ struct Mode {
     bool copy_patch = false;
     bool dry = false;
     bool count = true;
+    bool runtime = true;  // stencils built at run time too (Core::set_copy_patch_runtime)
 };
 
 // background: -1 promotions on this thread; else on the worker, published
@@ -75,7 +76,12 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_chaining(true, mode.dry);
     core.set_count_chained(mode.count);
     core.set_tiering(threshold);
-    if (threshold) core.set_copy_patch(mode.copy_patch);
+    if (threshold) {
+        CpRuntimeSettings runtime;
+        runtime.enable = mode.runtime;
+        core.set_copy_patch_runtime(runtime);
+        core.set_copy_patch(mode.copy_patch);
+    }
     if (background >= 0) core.set_tier_background(true, uint64_t(background));
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
@@ -126,12 +132,19 @@ public:
 
 static void test_throwing_stencils() {
     // Tier 0 throughout (1000 starts are never reached), on this thread or
-    // with the worker.
-    for (int mode : {1, 2}) {
+    // with the worker; and the load in a parallel packet, whose stencil is
+    // built at run time.
+    for (int mode : {1, 2, 3}) {
         CpuState cpu{};
         ThrowingPagedMemory mem(&cpu);
-        mem.write16(0x100, 0x9000);  // R0 = [P0++]
-        mem.write16(0x102, 0x2fff);  // JUMP.S 0x100
+        if (mode == 3) {
+            const uint16_t packet[] = {0xcc04, 0x000a, 0x9003, 0x0000};  // R0 = R1 + R2 || R3 = [P0++] || NOP
+            for (int i = 0; i < 4; ++i) mem.write16(0x100 + 2 * i, packet[i]);
+            mem.write16(0x108, 0x2ffc);  // JUMP.S 0x100
+        } else {
+            mem.write16(0x100, 0x9000);  // R0 = [P0++]
+            mem.write16(0x102, 0x2fff);  // JUMP.S 0x100
+        }
         Core core(&cpu, &mem);
         core.set_chaining(true, false);
         core.set_tiering(1000);
@@ -155,6 +168,9 @@ static void test_throwing_stencils() {
         require(caught, "a memory callback's exception did not reach the host through stencils");
 #if BCORE_ENABLE_PROFILE && BCORE_COPY_PATCH_TEST
         require(core.stats().copy_patch_blocks > 0, "no block was made of stencils");
+#endif
+#if BCORE_COPY_PATCH_TEST
+        if (mode == 3) require(core.cp_runtime_stats().built == 1, "the parallel packet's stencil was not built");
 #endif
     }
 }
@@ -387,6 +403,7 @@ int main() {
         {"stencils", true, true},
         {"stencils dry", true, true, true},
         {"stencils uncounted", true, true, false, false},
+        {"stencils of the build only", true, true, false, true, false},
     };
     unsigned compared = 0;
     uint64_t promoted = 0, overflows = 0, background_promoted = 0, stencil_blocks = 0;

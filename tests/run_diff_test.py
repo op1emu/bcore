@@ -74,7 +74,7 @@ BASE_STRIP = {
 VALUED = {"--tier-threshold", "--tier-background", "-O", "--opt-level", "--max-steps", "--post-pipeline"}
 
 # Lines that describe the run, not the guest: dropped before comparing.
-DEFAULT_IGNORE = [r"^copy-patch blocks=\d+ fallbacks=\d+$"]
+DEFAULT_IGNORE = [r"^copy-patch blocks=\d+ fallbacks=\d+$", r"^cp-runtime "]
 # Host addresses in --dump output: emu reports the one the IR adds guest
 # addresses to (FlatMemory's buffer less its guest base, which moves from run
 # to run), and the decimal constants within a guest address space of it (the

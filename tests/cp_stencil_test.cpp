@@ -1,8 +1,11 @@
 // Every copy-and-patch stencil (Core::set_copy_patch) against the LLVM tier
-// 0 it stands for: each 16-bit encoding with a stencil, and samples of each
-// key of the 32-bit patterns (cp_patterns.def), as the first packet of a
-// block [instruction, RTS], run from the same random guest state in two
-// cores, one with stencils and one without. The guest state, memory and
+// 0 it stands for: each 16-bit encoding with a stencil, samples of each key
+// of the 32-bit patterns (cp_patterns.def), and packets the build has no
+// stencil for, whose stencils are built at run time
+// (Core::set_copy_patch_runtime): parallel packets and the other 32-bit
+// instructions. Each is the first packet of a block [packet, RTS], run from
+// the same random guest state in two cores, one with stencils and one
+// without. The guest state, memory and
 // every host callback (with the packet index it sees, the guest time of
 // op1emu's devices) must be the same.
 //
@@ -154,9 +157,10 @@ void random_state(CpuState& cpu, std::mt19937& rng, uint32_t pc) {
     }
 }
 
+// A packet: its halfwords, 1 to 4.
 struct Instruction {
-    uint32_t insn;
-    int len;
+    uint64_t insn;
+    int len;  // bytes
 };
 
 std::vector<Instruction> instructions() {
@@ -187,6 +191,55 @@ std::vector<Instruction> instructions() {
     return out;
 }
 
+// Packets whose stencils are built at run time: 32-bit instructions of the
+// patterns without stencils, and parallel packets, a DSP instruction (any
+// 32-bit pattern of 0xc000, the multi-issue bit set) and two 16-bit slots
+// (mostly NOPs and loads and stores, as the guest's are), legal or not.
+std::vector<Instruction> runtime_instructions(size_t count32, size_t parallel) {
+    std::vector<Instruction> out;
+    std::mt19937 rng(11);
+    auto first_match = [](uint32_t insn) {
+        for (uint32_t p = 0; p < bcore_cp::kPatterns32Count; ++p)
+            if ((insn & bcore_cp::kPatterns32[p].mask) == bcore_cp::kPatterns32[p].value) return int(p);
+        return -1;
+    };
+    auto is16 = [](uint16_t w) {
+        return (w & 0xc000) != 0xc000 || (w & 0xff00) == 0xf800 || (w & 0xff00) == 0xf900 || (w & 0xff00) == 0xff00;
+    };
+    std::vector<uint32_t> plain, dsp;
+    for (uint32_t p = 0; p < bcore_cp::kPatterns32Count; ++p) {
+        const auto& pattern = bcore_cp::kPatterns32[p];
+        if (pattern.selected < 0) plain.push_back(p);
+        if ((pattern.value >> 28) == 0xc) dsp.push_back(p);
+    }
+    for (size_t tries = 0; out.size() < count32 && tries < 100 * count32; ++tries) {
+        const auto& pattern = bcore_cp::kPatterns32[plain[rng() % plain.size()]];
+        const uint32_t insn = (pattern.value | (rng() & ~pattern.mask)) & ~0x08000000u;
+        if (!is16(uint16_t(insn >> 16)) && first_match(insn) >= 0 &&
+            bcore_cp::kPatterns32[first_match(insn)].selected < 0)
+            out.push_back({insn, 4});
+    }
+    auto slot = [&]() -> uint16_t {
+        switch (rng() % 4) {
+        case 0: case 1: return 0x0000;                     // NOP
+        case 2: return uint16_t(0x8000 | (rng() & 0x1fff));  // loads and stores
+        default:
+            for (;;) {
+                const uint16_t w = uint16_t(rng());
+                if (is16(w)) return w;
+            }
+        }
+    };
+    const size_t first_parallel = out.size();
+    while (out.size() - first_parallel < parallel) {
+        const auto& pattern = bcore_cp::kPatterns32[dsp[rng() % dsp.size()]];
+        const uint32_t insn = pattern.value | (rng() & ~pattern.mask) | 0x08000000u;
+        if ((insn >> 16 & 0xe800) == 0xe800) continue;  // not a multi-issue encoding
+        out.push_back({uint64_t(insn) << 32 | uint64_t(slot()) << 16 | slot(), 8});
+    }
+    return out;
+}
+
 uint64_t hash_data(const TraceMemory& mem) {
     uint64_t h = 1469598103934665603ull;
     for (uint32_t a = kData; a < kData + 0x10000; ++a) h = (h ^ mem.raw()[a]) * 1099511628211ull;
@@ -198,32 +251,36 @@ uint64_t hash_data(const TraceMemory& mem) {
 int main(int argc, char** argv) {
     // An optional stride runs every n-th instruction only (a quick check).
     const unsigned stride = argc > 1 ? unsigned(atoi(argv[1])) : 1;
-    const auto all = instructions();
+    auto all = instructions();
+    const size_t built_stencils = all.size();
+    {
+        const auto more = runtime_instructions(8000, 24000);
+        all.insert(all.end(), more.begin(), more.end());
+    }
     std::vector<Instruction> todo;
-    for (size_t i = 0; i < all.size(); i += stride) todo.push_back(all[i]);
+    size_t todo_built = 0;  // of todo, those with the build's stencils (first)
+    for (size_t i = 0; i < all.size(); i += stride) {
+        todo.push_back(all[i]);
+        todo_built += i < built_stencils;
+    }
     printf("cp_stencil_test: %zu instructions\n", todo.size());
 
     // A core holds at most TierTable::kCounters tier-0 blocks: a fresh pair
     // for each chunk.
     constexpr size_t kChunk = 20000;
-    size_t compared = 0, made = 0;
+    size_t compared = 0, made = 0, made_built = 0;
     for (size_t begin = 0; begin < todo.size(); begin += kChunk) {
         Side cp(true), llvm(false);
         const size_t end = std::min(todo.size(), begin + kChunk);
         for (size_t i = begin; i < end; ++i) {
             const Instruction& in = todo[i];
-            const uint32_t pc = kCode + 8 * uint32_t(i - begin);
+            const uint32_t pc = kCode + 16 * uint32_t(i - begin);
             for (Side* side : {&cp, &llvm}) {
-                if (in.len == 2) {
-                    side->mem->write16(pc, uint16_t(in.insn));
-                    side->mem->write16(pc + 2, kRts);
-                } else {
-                    side->mem->write16(pc, uint16_t(in.insn >> 16));
-                    side->mem->write16(pc + 2, uint16_t(in.insn));
-                    side->mem->write16(pc + 4, kRts);
-                }
+                for (int w = 0; w < in.len / 2; ++w)
+                    side->mem->write16(pc + 2 * w, uint16_t(in.insn >> (16 * (in.len / 2 - 1 - w))));
+                side->mem->write16(pc + in.len, kRts);
             }
-            std::mt19937 rng(in.insn * 2654435761u + in.len);
+            std::mt19937 rng(uint32_t(in.insn * 2654435761u + (in.insn >> 32) * 40503u + in.len));
             CpuState start;
             random_state(start, rng, pc);
             const bool pending = rng() % 8 == 0;
@@ -237,19 +294,26 @@ int main(int argc, char** argv) {
                 side->cpu.chain_budget = 1;  // this block only
                 require(side->core->run(pc), "run");
             }
-            made += cp.core->stats().copy_patch_blocks - before;
+            const uint64_t got = cp.core->stats().copy_patch_blocks - before;
+            made += got;
+            if (i < todo_built) made_built += got;
             char what[64];
-            snprintf(what, sizeof what, "%s %0*x at %08x", in.len == 2 ? "16-bit" : "32-bit", in.len * 2, in.insn,
-                     pc);
+            snprintf(what, sizeof what, "%s %0*llx at %08x", in.len == 2 ? "16-bit" : in.len == 4 ? "32-bit" : "parallel",
+                     in.len * 2, (unsigned long long)in.insn, pc);
             require(image(cp.cpu) == image(llvm.cpu), std::string("guest state after ") + what);
             require(cp.mem->log == llvm.mem->log, std::string("host callbacks of ") + what);
             require(hash_data(*cp.mem) == hash_data(*llvm.mem), std::string("memory after ") + what);
             ++compared;
         }
     }
-    printf("cp_stencil_test: %zu compared, %zu made of stencils\n", compared, made);
+    printf("cp_stencil_test: %zu compared, %zu made of stencils; %zu of them with stencils built at run time, %zu "
+           "made of stencils\n",
+           compared, made, compared - todo_built, made - made_built);
 #if BCORE_ENABLE_PROFILE  // the count is a profiling counter
-    require(made == compared, "every instruction's block made of stencils");
+    require(made_built == todo_built, "every block of the build's stencils made of stencils");
+    // Packets the run time refuses compile with LLVM (compared all the
+    // same): a few illegal encodings at most.
+    require((made - made_built) * 100 >= (compared - todo_built) * 99, "the run time refused more than 1% of its packets");
 #endif
     printf("PASS\n");
     return 0;
