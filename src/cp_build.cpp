@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <optional>
+#include <cctype>
 
 #include <llvm/BinaryFormat/ELF.h>
 #include <llvm/IR/Constants.h>
@@ -12,12 +13,27 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
+#include <llvm/Support/raw_ostream.h>
 
 #include "lift_visitor.h"
 
 using namespace llvm;
 
 namespace bcore_cp {
+
+std::string ir_text(Function* fn) {
+    std::string s;
+    raw_string_ostream os(s);
+    fn->print(os);
+    os.flush();
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        out.push_back(s[i]);
+        if (s[i] == '#' && i > 0 && s[i - 1] == ' ')
+            while (i + 1 < s.size() && isdigit(static_cast<unsigned char>(s[i + 1]))) ++i;
+    }
+    return out;
+}
 
 // ---- Holes ----
 

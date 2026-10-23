@@ -48,13 +48,19 @@ public:
         pc_ = pc;
         count_ = count;
         for (int i = 0; i < 4; ++i) words_[i] = i < count ? words[i] : 0;
+        outside_ = false;
     }
+    // Whether the lifter read any halfword but the packet's since set:
+    // then the stencil would depend on what follows the packet.
+    bool read_outside() const { return outside_; }
     uint32_t base() const override { return 0; }
     uint32_t size() const override { return 0; }
     uint8_t read8(uint32_t) const override { return 0; }
     uint16_t read16(uint32_t addr) const override {
         const uint32_t i = (addr - pc_) / 2;
-        return addr >= pc_ && !((addr - pc_) & 1) && i < uint32_t(count_) ? words_[i] : 0;
+        if (addr >= pc_ && !((addr - pc_) & 1) && i < uint32_t(count_)) return words_[i];
+        outside_ = true;
+        return 0;
     }
     uint32_t read32(uint32_t) const override { return 0; }
     void write8(uint32_t, uint8_t) override {}
@@ -69,8 +75,18 @@ private:
     uint32_t pc_ = 0;
     uint16_t words_[4] = {};
     int count_ = 0;
+    mutable bool outside_ = false;
     uint8_t* dummy_ = nullptr;
 };
+
+// The PC a stencil is lifted at, and another to lift it at again: the two
+// lifts must be the same IR (the PC holes aside), or the stencil depends on
+// its PC.
+inline constexpr uint32_t kPcA = 0x00001000;
+inline constexpr uint32_t kPcB = 0xffa01234;
+// A function's IR, but for its attribute groups' numbers (a module numbers
+// them as functions come, and the checks lift one function after another).
+std::string ir_text(llvm::Function* fn);
 
 // ---- Holes ----
 

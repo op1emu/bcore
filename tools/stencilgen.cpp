@@ -132,9 +132,6 @@ bool is_parallel(uint16_t w) { return (w & 0x0800) && (w & 0xe800) != 0xe800; }
 
 // ---- Work ----
 
-constexpr uint32_t kPcA = 0x00001000;
-constexpr uint32_t kPcB = 0xffa01234;
-
 // One encoding to make a stencil of.
 struct Item {
     uint32_t insn = 0;
@@ -154,22 +151,6 @@ struct SelectedInfo {
     uint32_t key_mask = 0;
     Formula fields[4] = {};
 };
-
-// A function's IR, but for its attribute groups' numbers (a module numbers
-// them as functions come, and the checks lift one function after another).
-std::string ir_text(Function* fn) {
-    std::string s;
-    raw_string_ostream os(s);
-    fn->print(os);
-    os.flush();
-    std::string out;
-    for (size_t i = 0; i < s.size(); ++i) {
-        out.push_back(s[i]);
-        if (s[i] == '#' && i > 0 && s[i - 1] == ' ')
-            while (i + 1 < s.size() && isdigit(static_cast<unsigned char>(s[i + 1]))) ++i;
-    }
-    return out;
-}
 
 // A worker: a context, a translator, a compiler.
 class Worker {
