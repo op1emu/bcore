@@ -54,6 +54,7 @@ add_library(bcore-lift STATIC
     src/compile_worker.cpp
     src/bb_translator.cpp
     src/bb_stencil.cpp
+    src/cp_build.cpp
     src/packet_state.cpp
     src/guest_memory.cpp
     src/guest_speculation.cpp
