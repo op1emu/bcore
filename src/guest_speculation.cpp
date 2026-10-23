@@ -438,23 +438,26 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
         reductions[cast<PHINode>(mapped(p.phi))] = sum;
         sums.push_back({sum, sum_next, sum_init});
     }
+    // A stop test's compare and atomic load go with its branch: the
+    // vectorizer takes no atomic access, and no pass deletes an ordered load.
+    auto erase_test = [](Value* cond) {
+        auto* test = dyn_cast_or_null<ICmpInst>(cond);
+        auto* load = test ? dyn_cast<LoadInst>(test->getOperand(0)) : nullptr;
+        if (!load || !load->isAtomic() || !test->use_empty()) return;
+        test->eraseFromParent();
+        if (load->use_empty()) load->eraseFromParent();
+    };
     // The copy's exits go; it counts m - 1 iterations.
     for (auto* block : blocks) {
         auto* br = dyn_cast<BranchInst>(block->getTerminator());
         if (!br || !br->isConditional() || block == copy_latch) continue;
         const bool in0 = copy->contains(br->getSuccessor(0)), in1 = copy->contains(br->getSuccessor(1));
         if (in0 == in1) continue;
-        auto* cond = dyn_cast<Instruction>(br->getCondition());
+        Value* cond = br->getCondition();
         br->getSuccessor(in0 ? 1 : 0)->removePredecessor(block);
         BranchInst::Create(br->getSuccessor(in0 ? 0 : 1), br);
         br->eraseFromParent();
-        // A stop test's compare and atomic load go with it: the vectorizer
-        // takes no atomic access.
-        if (cond && cond->use_empty()) {
-            auto* load = dyn_cast<LoadInst>(cond->getOperand(0));
-            cond->eraseFromParent();
-            if (load && load->isAtomic() && load->use_empty()) load->eraseFromParent();
-        }
+        erase_test(cond);
     }
     {
         IRBuilder<> at_latch(latch_at);
@@ -463,7 +466,12 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
         auto* br = at_latch.CreateCondBr(more, copy_header, commit);
         for (auto* succ : successors(copy_latch))
             if (succ != copy_header && succ != commit) succ->removePredecessor(copy_latch);
+        // The latch's test too: with chained blocks uncounted
+        // (Core::set_count_chained) the stop test is the latch's own.
+        auto* old = cast<BranchInst>(latch_at);
+        Value* cond = old->isConditional() ? old->getCondition() : nullptr;
         latch_at->eraseFromParent();
+        erase_test(cond);
         i->addIncoming(at_latch.getInt64(0), copy_ph);
         i->addIncoming(i_next, copy_latch);
         MDNode* enable = MDNode::get(ctx, {MDString::get(ctx, "llvm.loop.vectorize.enable"),

@@ -202,7 +202,7 @@ struct Outcome {
 };
 
 static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, bool pages, bool loops,
-                   bool clobber = false, int steady = 0, uint32_t tier = 0, int background = -1) {
+                   bool clobber = false, int steady = 0, uint32_t tier = 0, int background = -1, bool count = true) {
     CpuState cpu{};
     RecordingMemory mem(&cpu, pages, clobber);
     load(mem, p);
@@ -211,6 +211,7 @@ static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, boo
     for (uint32_t i = 0; i < 0x20; i += 4) mem.poke32(kRing + i, i * 3 + 1);
     Core core(&cpu, &mem);
     core.set_chaining(chained, false);
+    core.set_count_chained(count);
     core.set_loop_blocks(loops);
     core.set_steady_skip(steady);
     core.set_tiering(tier);
@@ -435,7 +436,9 @@ int main() {
     // The firmware's FIR filler shape: one MAC (W32) with two loads, in a
     // hardware loop, over data that saturates the accumulator or does not,
     // from accumulators near the window's ends, so that a speculative sum
-    // both holds and fails its bound.
+    // both holds and fails its bound. Every other program with chained
+    // blocks uncounted (op1emu's release build): the loop's latch is then
+    // its stop test, which the speculative copy must drop to be vectorized.
     for (int program_no = 0; program_no < 40; ++program_no) {
         Program p;
         p.hardware = true;
@@ -460,11 +463,23 @@ int main() {
         for (int opt : {1, 2})
             for (bool pages : {false, true})
                 for (uint32_t budget : {1u, 64u, 1000u, 100000u}) {
-                    const Outcome want = run(p, opt, true, budget, pages, false);
-                    const Outcome got = run(p, opt, true, budget, pages, true);
+                    const bool count = program_no % 2;
+                    const Outcome want = run(p, opt, true, budget, pages, false, false, 0, 0, -1, count);
+                    Outcome got = run(p, opt, true, budget, pages, true, false, 0, 0, -1, count);
+                    // Tiered too, the block promoted after its first start
+                    // (the firmware's FIR filler is a tier-1 block): the
+                    // same, and its copy speculated and vectorized as well.
+                    if (want == got) {
+                        loop_blocks += got.stats.loop_blocks;
+                        proven += got.stats.loops_proven;
+                        speculated += got.stats.loops_speculated;
+                        vectorized += got.stats.loops_vectorized;
+                        got = run(p, opt, true, budget, pages, true, false, 0, 1, -1, count);
+                    }
                     if (!(want == got)) {
-                        fprintf(stderr, "FAIL: mac program %d (lc %u, pattern %d, a0 %x:%08x) -O%d%s budget %u\n",
-                                program_no, p.lc, pattern, p.a0x, p.a0w, opt, pages ? " pages" : "", budget);
+                        fprintf(stderr, "FAIL: mac program %d (lc %u, pattern %d, a0 %x:%08x) -O%d%s%s budget %u\n",
+                                program_no, p.lc, pattern, p.a0x, p.a0w, opt, pages ? " pages" : "",
+                                count ? "" : " uncounted", budget);
                         for (size_t i = 0; i < want.state.size(); i += 4)
                             if (std::memcmp(&want.state[i], &got.state[i], 4))
                                 fprintf(stderr, "  CpuState+%zu: %08x/%08x\n", i,
@@ -477,6 +492,7 @@ int main() {
                                         want.runs[i].chain_packets, got.runs[i].chain_packets);
                         return 1;
                     }
+                    promoted += got.stats.blocks_promoted;
                     loop_blocks += got.stats.loop_blocks;
                     proven += got.stats.loops_proven;
                     speculated += got.stats.loops_speculated;
@@ -487,7 +503,8 @@ int main() {
     require(raised > 0, "no program raised an exception or an interrupt");
 #if BCORE_ENABLE_PROFILE
     require(loop_blocks > 0 && proven > 0, "no MAC loop became a loop block with its memory proven");
-    require(speculated > 0 && vectorized > 0, "no MAC loop's sum was speculated and vectorized");
+    require(speculated > 0, "no MAC loop's sum was speculated");
+    require(vectorized == speculated, "a speculated MAC loop was not vectorized");
     require(circular > 0, "no loop block took I1 to stay in its circular buffer");
     require(promoted > 0, "no tier-0 block was promoted");
 #endif
