@@ -45,8 +45,8 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/cpu_state.h/cpp`: CpuState struct (dpregs, accumulators, ASTAT flags, loops), ASTAT compose/decompose, extern "C" wrappers for JIT
 - `src/memory.cpp`: Flat memory model (little-endian), extern "C" read/write wrappers for JIT
 - `src/lift_visitor.h/cpp`: LiftVisitor — plugs into decoder, emits LLVM IR per instruction (~24 implemented, rest are stubs)
-- `src/compiler.h/cpp`: `Compiler` — module to object file: the IR pipeline and the backend, with the TargetMachine, pass builder, analysis managers and legacy codegen pass manager built once (per tier: Core keeps one for tier 0)
-- `src/jit_engine.h/cpp`: LLJIT wrapper that loads the Compiler's object files (`addObject`), with explicit `absoluteSymbols` registration for all extern "C" helpers, and the chain table with the tier table after it (`include/tier_table.h`)
+- `src/compiler.h/cpp`: `Compiler` — module to object file: the IR pipeline and the backend, with the TargetMachine, pass builder, analysis managers and legacy codegen pass manager built once (per tier: Core keeps one for tier 0), and `kLightPipeline` for promotions (Core::set_light_tier1)
+- `src/jit_engine.h/cpp`: LLJIT wrapper that loads the Compiler's object files (`addObject`), with explicit `absoluteSymbols` registration for all extern "C" helpers, and the chain table with the tier table after it (`include/tier_table.h`, also `tier_threshold`: a tier-0 block's threshold scaled by its size, Core::set_tiering's size_ref)
 - `src/compile_worker.h/cpp`: `CompileWorker` — a thread with a Compiler of its own that runs the IR pipeline and backend of promotions (Core::set_tier_background); the dispatching thread lifts, loads and publishes
 - `src/tier_memory.h`: `RecordingMemory`/`ReplayMemory` (namespace `bcore_tier`): a tier-0 compilation logs the instructions it reads, its promotion reads only those
 - `src/cp_translator.h/cpp`: `CpTranslator` — the copy-and-patch tier 0 (Core::set_copy_patch): a block copied together from stencils, holes filled in; helpers wrapped so host exceptions cross no stencil code
