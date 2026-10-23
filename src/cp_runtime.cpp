@@ -127,14 +127,16 @@ std::string RuntimeStencils::lift(Module& mod, Packet& packet, const std::string
     } else if (a.fields_used) {
         error = "takes a field hole";
     } else {
-        // The same IR at another PC (in a module of its own, under the same
-        // name): nothing in it depends on the PC but the PC hole.
-        Module scratch("scratch", *context_);
+        // The same IR at another PC: nothing in it depends on the PC but
+        // the PC hole. Lifted beside it, in its module, and compared there
+        // (same_ir: comparing the two printed took more than a third of the
+        // run time's stencils, as much as compiling them).
         memory_->set_words(kPcB, packet.words, packet.count);
-        auto b = translator_->translate_stencil(scratch, name.c_str(), kPcB, holes(scratch));
+        auto b = translator_->translate_stencil(mod, (name + ".b").c_str(), kPcB, holes(mod));
         if (memory_->read_outside()) error = "reads past the packet";
-        else if (ir_text(b.fn) != ir_text(a.fn)) error = "IR depends on the PC";
+        else if (!same_ir(*a.fn, *b.fn)) error = "IR depends on the PC";
         else if (verifyFunction(*a.fn, &errs())) error = "IR does not verify";
+        b.fn->eraseFromParent();
     }
     if (!error.empty()) {
         a.fn->eraseFromParent();

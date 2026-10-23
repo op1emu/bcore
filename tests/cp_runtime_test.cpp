@@ -12,13 +12,22 @@
 //   - a run-time stencil has no field holes (an immediate is a constant in
 //     its code);
 //   - a translation reads no more of a block than the packet that ends it,
-//     though that packet had no stencil yet.
+//     though that packet had no stencil yet;
+//   - the check that a stencil's IR is the same at another PC (same_ir)
+//     tells a different constant apart, but not other names or branch
+//     weights.
 #include "core.h"
 #include "../src/cec.h"
+#include "../src/cp_build.h"
 #include "../src/cp_format.h"
 #include "../src/cp_runtime.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
+
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/Module.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -419,9 +428,47 @@ void test_off() {
     require(rig.core->cp_runtime_stats().built == 1, "turned on, no stencil built");
 }
 
+// fn(cpu): cpu->pc = constant, then a branch on cpu->did_jump with these
+// weights, under these names.
+llvm::Function* stencil_like(llvm::Module& mod, const char* name, uint32_t constant, uint32_t weight,
+                             const char* value_name) {
+    auto& ctx = mod.getContext();
+    llvm::IRBuilder<> b(ctx);
+    auto* fn = llvm::Function::Create(llvm::FunctionType::get(b.getVoidTy(), {b.getPtrTy()}, false),
+                                      llvm::GlobalValue::ExternalLinkage, name, mod);
+    auto* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    auto* taken = llvm::BasicBlock::Create(ctx, "taken", fn);
+    auto* other = llvm::BasicBlock::Create(ctx, "other", fn);
+    b.SetInsertPoint(entry);
+    auto* cpu = fn->getArg(0);
+    b.CreateStore(b.getInt32(constant), b.CreateGEP(b.getInt8Ty(), cpu, b.getInt64(188)));
+    auto* dj = b.CreateLoad(b.getInt8Ty(), b.CreateGEP(b.getInt8Ty(), cpu, b.getInt64(296)), value_name);
+    b.CreateCondBr(b.CreateICmpNE(dj, b.getInt8(0)), taken, other,
+                   llvm::MDBuilder(ctx).createBranchWeights(1, weight));
+    b.SetInsertPoint(taken);
+    b.CreateRetVoid();
+    b.SetInsertPoint(other);
+    b.CreateRetVoid();
+    return fn;
+}
+
+void test_same_ir() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("m", ctx), elsewhere("e", ctx);
+    auto* a = stencil_like(mod, "a", 0x1000, 1 << 20, "dj");
+    require(bcore_cp::same_ir(*a, *stencil_like(mod, "b", 0x1000, 1 << 20, "dj")), "the same IR differs");
+    require(bcore_cp::same_ir(*a, *stencil_like(mod, "c", 0x1000, 7, "other_name")),
+            "other names or branch weights differ");
+    require(!bcore_cp::same_ir(*a, *stencil_like(mod, "d", 0xffa01234, 1 << 20, "dj")),
+            "a constant that depends on the PC is the same");
+    require(!bcore_cp::same_ir(*a, *stencil_like(elsewhere, "a", 0x1000, 1 << 20, "dj")),
+            "functions of two modules compared");
+}
+
 }  // namespace
 
 int main() {
+    test_same_ir();
     test_once_per_encoding();
     test_verify();
     test_same_as_the_build();
