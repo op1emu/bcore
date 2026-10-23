@@ -523,7 +523,8 @@ Constant* LiftVisitor::pc_value(uint32_t pc) {
 }
 
 Value* LiftVisitor::field_value(uint32_t value, unsigned slot) {
-    if (!stencil_pc_) return builder_.getInt32(value);
+    // A stencil with no field holes (one per encoding) keeps its constants.
+    if (!stencil_pc_ || !stencil_fields_[slot]) return builder_.getInt32(value);
     field_values_[slot] = value;
     fields_used_ |= 1u << slot;
     return stencil_fields_[slot];
@@ -531,6 +532,7 @@ Value* LiftVisitor::field_value(uint32_t value, unsigned slot) {
 
 Value* LiftVisitor::pc_field(uint32_t pc, unsigned slot) {
     if (!stencil_pc_) return builder_.getInt32(pc);
+    if (!stencil_fields_[slot]) return pc_value(pc);
     field_values_[slot] = pc - stencil_base_;
     fields_used_ |= 1u << slot;
     return stencil_fields_[slot];

@@ -75,9 +75,10 @@ public:
     // its PC is known, for the copy-and-patch tier 0 (cp_translator.h). Every
     // constant the code derives from the PC is then pc_hole + (pc - base),
     // and an immediate or PC-relative value a 32-bit pattern takes from its
-    // fields is one of the holes `fields` (kFieldHoles of them): the
-    // translator fills the holes in. Outside stencil mode both are plain
-    // constants.
+    // fields is one of the holes `fields` (kFieldHoles of them; a null one,
+    // or null `fields`, leaves that value a constant, as a stencil built for
+    // one encoding has it): the translator fills the holes in. Outside
+    // stencil mode both are plain constants.
     static constexpr unsigned kFieldHoles = 4;
     void set_stencil(llvm::Constant* pc_hole, uint32_t base, llvm::Constant* const* fields) {
         stencil_pc_ = pc_hole;
@@ -834,10 +835,12 @@ private:
     // its offset from the packet's PC (set_stencil).
     llvm::Constant* pc_value(uint32_t pc);
     // An immediate taken from the instruction's fields: a constant, or in
-    // stencil mode field hole `slot`.
+    // stencil mode field hole `slot` (a constant where the stencil has no
+    // such hole).
     llvm::Value* field_value(uint32_t value, unsigned slot);
     // A PC-relative value taken from the fields (a branch target, a loop's
-    // top or bottom): the PC plus field hole `slot` in stencil mode.
+    // top or bottom): the PC plus field hole `slot` in stencil mode (the PC
+    // hole plus a constant where the stencil has no such hole).
     llvm::Value* pc_field(uint32_t pc, unsigned slot);
     void terminate(const char* kind) { terminated_ = true; exit_kind_ = kind; }
 
