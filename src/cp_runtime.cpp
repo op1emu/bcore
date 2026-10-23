@@ -167,32 +167,34 @@ RuntimeStencils::Staged RuntimeStencils::stage(Packet& packet, const std::functi
     if (!compiler_ || find(packet).known()) return out;
     for (const Lifted& l : pending_)
         if (l.packet == packet) return {true, l.bytes, l.flags};
-    const uint64_t h = key_hash(packet);
     if (packet.count < 1 || packet.count > StencilMemory::kMaxWords) {
         refuse(packet, "not a packet");
-    } else if (h < settings_.range_lo || h > settings_.range_hi) {
-        refuse(packet, "outside the range");
-    } else if (records_.size() + pending_.size() >= settings_.capacity) {
-        refuse(packet, "no room");
+        return out;
+    }
+    if (!batch_) batch_ = std::make_unique<Module>("stencils", *context_);
+    const uint64_t t0 = now_ns();
+    Lifted l;
+    const Packet first = packet;
+    std::string error = lift(*batch_, packet, "rt_" + std::to_string(pending_.size()), l, fetch);
+    stats_.lift_ns += now_ns() - t0;
+    // The halfwords the decoding read before its last: each says read one
+    // more.
+    for (Packet prefix = first; prefix.count < packet.count; ++prefix.count) {
+        entries_[prefix] = Entry{nullptr, true};
+        prefix.words[prefix.count] = packet.words[prefix.count];
+    }
+    // The range and the room are the whole packet's (found in review: the
+    // range took a parallel packet's first two halfwords for it, and a
+    // refusal kept there refused every packet that starts with them).
+    const uint64_t h = key_hash(packet);
+    if (error.empty() && (h < settings_.range_lo || h > settings_.range_hi)) error = "outside the range";
+    else if (error.empty() && records_.size() + pending_.size() >= settings_.capacity) error = "no room";
+    if (!error.empty()) {
+        if (auto* fn = batch_->getFunction(l.name)) fn->eraseFromParent();
+        refuse(packet, error);
     } else {
-        if (!batch_) batch_ = std::make_unique<Module>("stencils", *context_);
-        const uint64_t t0 = now_ns();
-        Lifted l;
-        const Packet first = packet;
-        const std::string error = lift(*batch_, packet, "rt_" + std::to_string(pending_.size()), l, fetch);
-        stats_.lift_ns += now_ns() - t0;
-        // The halfwords the decoding read before its last: each says read
-        // one more.
-        for (Packet prefix = first; prefix.count < packet.count; ++prefix.count) {
-            entries_[prefix] = Entry{nullptr, true};
-            prefix.words[prefix.count] = packet.words[prefix.count];
-        }
-        if (!error.empty()) {
-            refuse(packet, error);
-        } else {
-            out = {true, l.bytes, l.flags};
-            pending_.push_back(std::move(l));
-        }
+        out = {true, l.bytes, l.flags};
+        pending_.push_back(std::move(l));
     }
     return out;
 }
