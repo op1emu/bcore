@@ -76,6 +76,9 @@ struct BcoreCompileMetrics {
     // Core::set_tiering: -1 for an untiered compilation, 0 for a tier-0
     // block (counting, cheap to compile), 1 for its promotion.
     int tier                 = -1;
+    // A tier-0 block's threshold: the starts after which it asks to be
+    // compiled again (Core::set_tiering, its size_ref applied). 0 otherwise.
+    uint32_t tier_threshold  = 0;
     // A promotion compiled on the worker thread (Core::set_tier_background)
     // reports two translations on the dispatching thread: 1 for its lift,
     // which has no code yet (the sizes are the lifted module's, no hash), 2

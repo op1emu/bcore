@@ -25,3 +25,14 @@ struct TierTable {
 };
 
 static constexpr size_t kTierTableOffset = sizeof(ChainSlot) << kChainBits;
+
+// A tier-0 block's threshold (Core::set_tiering): the threshold for a block
+// of at most size_ref packets, and as many times more as a larger block has
+// packets more (size_ref 0: the threshold for every block). Compiling a
+// block again costs in proportion to its size, and most large blocks that
+// reach the threshold during the boot run little after it.
+inline uint32_t tier_threshold(uint32_t threshold, uint32_t size_ref, uint32_t packets) {
+    if (!size_ref || packets <= size_ref) return threshold;
+    const uint64_t scaled = uint64_t(threshold) * packets / size_ref;
+    return scaled > UINT32_MAX ? UINT32_MAX : uint32_t(scaled);
+}

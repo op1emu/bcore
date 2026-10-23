@@ -55,12 +55,14 @@ public:
         bool host_cycles = false;  // BBTranslator::set_host_cycles
         bool idle_waits = false;   // a block with IDLE then compiles with LLVM
         uint32_t threshold = 0;    // the tier counter's
+        uint32_t size_ref = 0;     // and tier_threshold's (tier_table.h), by the block's packets
         uint32_t max_packets = 256;
     };
     struct Block {
         BbFunc fn = nullptr;       // null: no block (why says why)
         uint32_t fallthrough_pc = 0;
         uint32_t packets = 0;
+        uint32_t threshold = 0;    // its tier counter's: tier_threshold of its packets
         size_t size = 0;           // its code's bytes, at fn
         const char* why = nullptr; // why there is none
         // Packets whose stencils were built at run time (set_runtime), and
@@ -83,7 +85,7 @@ public:
     // process (BcoreCompileMetrics::object_hash): FNV-1a over each stencil's
     // code before relocation, its relocations and the values of its value
     // holes, but not the addresses its jumps and calls reach.
-    uint64_t code_hash(uint32_t counter, const Config& config) const;
+    uint64_t code_hash(uint32_t counter) const;
     // Told of the code an arena's first block places beside it: the exit
     // stencils (bcore_cp_exit) and the jumps to the helpers
     // (bcore_cp_jump_<helper>), for a profiler's code map.
@@ -129,12 +131,13 @@ private:
                uint64_t field0, uint32_t counter, const Config& config);
     // A value hole's value in a piece (packet: its index in the block;
     // field0: the length of the packet the fall-through stencil follows).
-    static bool value_of(const Piece& piece, const bcore_cp::Reloc& r, uint32_t packet, uint64_t field0,
-                         uint32_t counter, const Config& config, uint64_t& value);
+    bool value_of(const Piece& piece, const bcore_cp::Reloc& r, uint32_t packet, uint64_t field0,
+                  uint32_t counter, uint64_t& value) const;
 
     // The build's stencil s as a piece.
     static Piece piece(const bcore_cp::Stencil& s, uint32_t pc, uint32_t insn, int selected);
 
+    uint32_t threshold_ = 0;  // the last block's tier counter's (Block::threshold)
     JitEngine& jit_;
     bcore_cp::RuntimeStencils* runtime_ = nullptr;
     std::function<void(const char*, const void*, size_t)> listener_;

@@ -31,6 +31,7 @@
 struct Core::Tier0Record {
     uint32_t pc = 0;
     bool careful = false;
+    uint32_t threshold = 0;  // its count's (tier_threshold)
     CpuState hint{};
     bcore_tier::CodeLog code;
 };
@@ -134,6 +135,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         tier.level = 0;
         tier.counter = uint32_t(tier0_.size());
         tier.threshold = tier_threshold_;
+        tier.size_ref = tier_size_ref_;
         tier.code = &*recording;
         tiered = &tier;
     }
@@ -184,12 +186,14 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         config.host_cycles = host_cycles_;
         config.idle_waits = idle_waits_;
         config.threshold = tier.threshold;
+        config.size_ref = tier.size_ref;
         const CpTranslator::Block block = cp_->translate(pc, *tier.code, tier.counter, config);
         cp_built = block.built;
         if (block.fn) {
             jit_->addCode(pc, block.fn, block.fallthrough_pc);
             tier0_current_[pc] = tier.counter;
             tier0_latest_[pc] = tier.counter;
+            record->threshold = block.threshold;
             tier0_.push_back(std::move(record));
 #if BCORE_ENABLE_PROFILE
             const uint64_t t1 = bcore_profile::monotonic_ns();
@@ -211,9 +215,10 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
                 if (want_metrics) {
                     BcoreCompileMetrics metrics;
                     metrics.object_bytes = block.size;
-                    metrics.object_hash = cp_->code_hash(tier.counter, config);
+                    metrics.object_hash = cp_->code_hash(tier.counter);
                     metrics.terminator = "copy-patch";
                     metrics.tier = 0;
+                    metrics.tier_threshold = block.threshold;
                     metrics.copy_patch = true;
                     metrics.cp_runtime_packets = block.runtime_packets;
                     metrics.cp_runtime_built = block.built;
@@ -290,6 +295,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
         metrics.terminator = result.exit_kind;
         metrics.tier = tiered ? tier.level : -1;
+        metrics.tier_threshold = tier0 ? result.tier_threshold : 0;
 #if BCORE_COPY_PATCH
         metrics.cp_runtime_built = cp_built;  // for packets of other blocks: this one had a packet with none
 #endif
@@ -336,6 +342,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
     if (fn && record) {
         tier0_current_[pc] = tier.counter;
         tier0_latest_[pc] = tier.counter;
+        record->threshold = result.tier_threshold;
         tier0_.push_back(std::move(record));
     } else if (fn && !promote) {
         // Compiled anew without a tier-0 record (tiering since turned off,
@@ -459,13 +466,14 @@ void Core::promote() {
     if (filed <= TierTable::kRequests) {
         counters.assign(table.request, table.request + filed);
     } else {
-        // More than the table holds: every count at the threshold or past it
-        // (those promoted or replaced already are passed over below).
+        // More than the table holds: every count at its block's threshold
+        // (tier_threshold) or past it (those promoted or replaced already
+        // are passed over below).
 #if BCORE_ENABLE_PROFILE
         profile_->stats.tier_request_overflows++;
 #endif
         for (uint32_t counter = 0; counter < tier0_.size(); ++counter)
-            if (table.count[counter] >= tier_threshold_) counters.push_back(counter);
+            if (tier0_[counter] && table.count[counter] >= tier0_[counter]->threshold) counters.push_back(counter);
     }
     for (uint32_t counter : counters) {
         if (counter >= tier0_.size() || !tier0_[counter]) continue;
@@ -801,7 +809,7 @@ void Core::set_loop_blocks(bool loop) {
     if (translator_) translator_->set_loop_blocks(loop_blocks_);
 }
 
-void Core::set_tiering(uint32_t threshold) {
+void Core::set_tiering(uint32_t threshold, uint32_t size_ref) {
     if (threshold && !tier0_compiler_) {
         auto compiler = std::make_unique<Compiler>();
         // Neither the IR pipeline nor the splitter: tier-0 code runs too
@@ -810,6 +818,7 @@ void Core::set_tiering(uint32_t threshold) {
         tier0_compiler_ = std::move(compiler);
     }
     tier_threshold_ = threshold;
+    tier_size_ref_ = size_ref;
 }
 
 void Core::set_tier_background(bool background, uint64_t publish_after, std::function<void()> on_start) {
