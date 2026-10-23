@@ -1,0 +1,73 @@
+name: Set up the bcore build
+description: >
+  LLVM 15 and ccache (with the cache under the given key), the Blackfin
+  toolchain (cached) on PATH, or either alone.
+
+inputs:
+  llvm:
+    description: Install LLVM 15 and ccache
+    default: "false"
+  ccache-key:
+    description: The ccache cache's key prefix, one per build configuration (with llvm)
+    default: ""
+  toolchain:
+    description: Install the Blackfin toolchain and add it to PATH
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM 15 and ccache
+      if: inputs.llvm == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y llvm-15 llvm-15-dev ccache
+        {
+          echo "CCACHE_DIR=$HOME/.cache/ccache"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+          echo "CCACHE_MAXSIZE=400M"
+        } >> "$GITHUB_ENV"
+
+    # One entry per configuration and commit; a run starts from the newest
+    # entry of its configuration (a pull request's from main's as well).
+    - name: Cache ccache
+      if: inputs.llvm == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ inputs.ccache-key }}-${{ github.sha }}
+        restore-keys: ccache-${{ inputs.ccache-key }}-
+
+    - name: Zero ccache statistics
+      if: inputs.llvm == 'true'
+      shell: bash
+      run: ccache -z
+
+    - name: Cache Blackfin toolchain
+      if: inputs.toolchain == 'true'
+      id: cache-toolchain
+      uses: actions/cache@v4
+      with:
+        path: ~/toolchains/bfin-elf
+        key: bfin-toolchain-elf-gcc-4.3-2014R1-RC2-x86_64
+
+    - name: Download Blackfin toolchain
+      if: inputs.toolchain == 'true' && steps.cache-toolchain.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/toolchains
+        # Use master.dl.sourceforge.net with ?viasf=1 — the stable automation
+        # endpoint that returns the file directly (200 OK, no bot-challenge HTML).
+        curl -fL --retry 3 --retry-delay 5 \
+          -o bfin-toolchain.tar.bz2 \
+          "https://master.dl.sourceforge.net/project/adi-toolchain/2014R1/2014R1-RC2/x86_64/blackfin-toolchain-elf-gcc-4.3-2014R1-RC2.x86_64.tar.bz2?viasf=1"
+        # Archive extracts as ./opt/uClinux/bfin-elf/; strip those 3 leading
+        # components so binaries land at ~/toolchains/bfin-elf/bin/ as expected.
+        tar xjf bfin-toolchain.tar.bz2 --strip-components=3 -C ~/toolchains
+        rm bfin-toolchain.tar.bz2
+
+    - name: Add toolchain to PATH
+      if: inputs.toolchain == 'true'
+      shell: bash
+      run: echo "$HOME/toolchains/bfin-elf/bin" >> "$GITHUB_PATH"
