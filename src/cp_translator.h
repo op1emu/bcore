@@ -4,10 +4,11 @@
 // built (cp_format.h), copied in place and their holes filled in, in
 // microseconds where the LLVM tier 0 takes a millisecond or more.
 //
-// A block the translator takes is one of non-parallel instructions that
-// all have stencils (the 16-bit ones and the 32-bit patterns of
-// cp_patterns.def); for any other it places nothing and Core compiles the
-// block with LLVM. Its code is, in order: the prologue (the tier counter,
+// A block the translator takes is one whose packets all have stencils: the
+// build's (the 16-bit instructions and the 32-bit patterns of
+// cp_patterns.def), or, with set_runtime, one built for the packet at run
+// time (cp_runtime.h: a parallel packet, any other 32-bit instruction). For
+// any other it places nothing and Core compiles the block with LLVM. Its code is, in order: the prologue (the tier counter,
 // and CYCLES with host cycles), each packet's stencil, and for a block the
 // packet cap cuts the fall-through stencil. A packet's path to the next
 // one is a jump to the next stencil, dropped where it is the stencil's
@@ -42,6 +43,7 @@
 #include "tier_memory.h"
 
 class CodeArena;
+namespace bcore_cp { class RuntimeStencils; }
 
 class CpTranslator {
 public:
@@ -61,9 +63,16 @@ public:
         uint32_t packets = 0;
         size_t size = 0;           // its code's bytes, at fn
         const char* why = nullptr; // why there is none
+        // Packets whose stencils were built at run time (set_runtime), and
+        // how many of them this translation built.
+        uint32_t runtime_packets = 0;
+        uint32_t built = 0;
     };
 
     explicit CpTranslator(JitEngine& jit) : jit_(jit) {}
+    // Stencils built at run time for packets the build left without one
+    // (null: none, such a block compiles with LLVM). Kept by the caller.
+    void set_runtime(bcore_cp::RuntimeStencils* runtime) { runtime_ = runtime; }
 
     // The block at pc, its instructions read through code, its starts
     // counted in TierTable::count[counter]. words() then holds every
@@ -99,6 +108,8 @@ public:
 private:
     struct Piece {
         const bcore_cp::Stencil* stencil;
+        const uint8_t* code;            // the stencil's code
+        const bcore_cp::Reloc* relocs;  // and relocations
         uint32_t pc;
         uint32_t insn;
         int selected;  // the 32-bit pattern (kSelected32), or -1
@@ -121,7 +132,11 @@ private:
     static bool value_of(const Piece& piece, const bcore_cp::Reloc& r, uint32_t packet, uint64_t field0,
                          uint32_t counter, const Config& config, uint64_t& value);
 
+    // The build's stencil s as a piece.
+    static Piece piece(const bcore_cp::Stencil& s, uint32_t pc, uint32_t insn, int selected);
+
     JitEngine& jit_;
+    bcore_cp::RuntimeStencils* runtime_ = nullptr;
     std::function<void(const char*, const void*, size_t)> listener_;
     std::vector<std::unique_ptr<Arena>> arenas_;
     std::vector<Piece> pieces_;

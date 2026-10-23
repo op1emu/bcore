@@ -18,6 +18,7 @@
 #include "profile_state.h"
 // Also without BCORE_COPY_PATCH: Core holds the (then unused) translator.
 #include "cp_translator.h"
+#include "cp_runtime.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
@@ -168,6 +169,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
     // noted earlier let them bypass a host that had hidden it to see every
     // access).
     std::optional<bcore_tier::PrefetchedMemory> prefetched;
+    [[maybe_unused]] uint32_t cp_built = 0;  // stencils built at run time for this block
     if (tier0 && copy_patch_ && cp_ && tier.code->page_table() && !mem_->is_fastmem() &&
         mem_->rawmem_limit() == 0 && unlimited_ &&
         lazy_state_ && !dump_ir_
@@ -183,6 +185,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         config.idle_waits = idle_waits_;
         config.threshold = tier.threshold;
         const CpTranslator::Block block = cp_->translate(pc, *tier.code, tier.counter, config);
+        cp_built = block.built;
         if (block.fn) {
             jit_->addCode(pc, block.fn, block.fallthrough_pc);
             tier0_current_[pc] = tier.counter;
@@ -212,6 +215,8 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
                     metrics.terminator = "copy-patch";
                     metrics.tier = 0;
                     metrics.copy_patch = true;
+                    metrics.cp_runtime_packets = block.runtime_packets;
+                    metrics.cp_runtime_built = block.built;
                     sink->onCompileMetrics(pc, metrics);
                 }
                 sink->onTranslateEnd(pc, t1 - t0);
@@ -285,6 +290,9 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         metrics.collect_ns = bcore_profile::monotonic_ns() - count_begin;
         metrics.terminator = result.exit_kind;
         metrics.tier = tiered ? tier.level : -1;
+#if BCORE_COPY_PATCH
+        metrics.cp_runtime_built = cp_built;  // for packets of other blocks: this one had a packet with none
+#endif
     }
     profile_->want_object_shapes = want_metrics;
     profile_->capture_ns = 0;
@@ -639,6 +647,8 @@ void Core::set_copy_patch(bool enable) {
     // keeps it, and the blocks already made of them run on.
     if (enable && jit_ && !cp_) {
         cp_ = std::make_unique<CpTranslator>(*jit_);
+        if (cp_runtime_settings_.enable && !cp_runtime_) set_copy_patch_runtime(cp_runtime_settings_);
+        cp_->set_runtime(cp_runtime_settings_.enable ? cp_runtime_.get() : nullptr);
 #if BCORE_ENABLE_PROFILE
         cp_->set_code_listener([this](const char* name, const void* code, size_t size) {
             profile_->recordCodeLoad(name, code, size);
@@ -646,6 +656,45 @@ void Core::set_copy_patch(bool enable) {
 #endif
     }
 #endif
+}
+
+void Core::set_copy_patch_runtime(const CpRuntimeSettings& settings) {
+#if BCORE_COPY_PATCH
+    const CpRuntimeSettings& old = cp_runtime_settings_;
+    const bool same = cp_runtime_ && old.opt == settings.opt && old.verify == settings.verify &&
+                      old.range_lo == settings.range_lo && old.range_hi == settings.range_hi;
+    cp_runtime_settings_ = settings;
+    if (settings.enable && !same) {
+        if (!cp_runtime_) cp_runtime_ = std::make_unique<bcore_cp::RuntimeStencils>();
+        bcore_cp::RuntimeStencils::Settings s;
+        s.opt = settings.opt;
+        s.verify = settings.verify;
+        s.range_lo = settings.range_lo;
+        s.range_hi = settings.range_hi;
+        if (!cp_runtime_->configure(s)) cp_runtime_.reset();
+    }
+    if (cp_) cp_->set_runtime(settings.enable ? cp_runtime_.get() : nullptr);
+#else
+    cp_runtime_settings_ = settings;
+#endif
+}
+
+CpRuntimeStats Core::cp_runtime_stats() const {
+    CpRuntimeStats out;
+#if BCORE_COPY_PATCH
+    if (!cp_runtime_) return out;
+    const auto& s = cp_runtime_->stats();
+    out.hits = s.hits;
+    out.built = s.built;
+    out.refused = s.refused;
+    out.batches = s.batches;
+    out.lift_ns = s.lift_ns;
+    out.compile_ns = s.compile_ns;
+    out.extract_ns = s.extract_ns;
+    out.code_bytes = s.code_bytes;
+    out.reasons = s.reasons;
+#endif
+    return out;
 }
 
 void Core::invalidate() {

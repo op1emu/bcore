@@ -6,6 +6,7 @@
 
 #include "cec.h"
 #include "code_arena.h"
+#include "cp_runtime.h"
 #include "syscall_emu.h"
 #include "tier_table.h"
 
@@ -155,58 +156,100 @@ void CpTranslator::RunScope::rethrow() {
     std::rethrow_exception(e);
 }
 
+CpTranslator::Piece CpTranslator::piece(const Stencil& s, uint32_t pc, uint32_t insn, int selected) {
+    return {&s, kCode + s.code, kRelocs + s.relocs, pc, insn, selected, 0, 0};
+}
+
 bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& out) {
-    pieces_.clear();
     words_.clear();
+    // Each halfword read from code once: a second pass reads it again here.
+    bool again = false;
     auto read = [&](uint32_t addr) {
+        if (again)
+            for (const auto& [a, w] : words_)
+                if (a == addr) return w;
         const uint16_t w = code.read16(addr);
         words_.emplace_back(addr, w);
         return w;
     };
-    pieces_.push_back({nullptr, pc, 0, -1, 0, 0});  // the prologue, chosen below
-    bool cycles = false;
-    uint32_t cur = pc;
-    for (uint32_t k = 0; k < config.max_packets; ++k) {
-        const uint16_t w = read(cur);
-        uint32_t id = 0, insn = w;
-        int selected = -1;
-        if (is16(w)) {
-            id = kIndex16[w];
-        } else {
-            if (is_parallel(w)) {
-                out.why = "parallel";
+    // Packets with no stencil yet, to build at once (runtime_): the first
+    // pass goes past them as if they were as long as they are, with no
+    // jump, which only an illegal instruction's exception would end sooner.
+    std::vector<bcore_cp::RuntimeStencils::Packet> missing;
+    for (int pass = 0; pass < 2; ++pass) {
+        pieces_.clear();
+        pieces_.push_back({nullptr, nullptr, nullptr, pc, 0, -1, 0, 0});  // the prologue, chosen below
+        out.runtime_packets = 0;
+        bool cycles = false;
+        uint32_t cur = pc;
+        for (uint32_t k = 0; k < config.max_packets; ++k) {
+            const uint16_t w = read(cur);
+            uint32_t id = 0, insn = w;
+            int selected = -1;
+            bcore_cp::RuntimeStencils::Packet packet;
+            packet.words[0] = w;
+            packet.count = 1;
+            if (is16(w)) {
+                id = kIndex16[w];
+            } else if (is_parallel(w)) {
+                packet.count = 4;
+                for (unsigned i = 1; i < 4; ++i) packet.words[i] = read(cur + 2 * i);
+            } else {
+                packet.words[1] = read(cur + 2);
+                packet.count = 2;
+                insn = uint32_t(w) << 16 | packet.words[1];
+                const int p = match32(insn);
+                if (p >= 0 && kPatterns32[p].selected >= 0) {
+                    selected = kPatterns32[p].selected;
+                    const Selected32& sel = kSelected32[selected];
+                    id = kKeys32[sel.keys + gather(insn, sel.key_mask)];
+                }
+            }
+            Piece piece;
+            if (id) {
+                piece = CpTranslator::piece(kStencils[id - 1], cur, insn, selected);
+            } else if (!runtime_) {
+                out.why = packet.count == 4 ? "parallel" : packet.count == 2 ? "32-bit" : "no stencil";
+                return false;
+            } else if (const auto* r = runtime_->find(packet)) {
+                piece = {&r->stencil, r->code.data(), r->relocs.data(), cur, insn, -1, 0, 0};
+                out.runtime_packets++;
+            } else if (runtime_->tried(packet)) {
+                out.why = "no stencil at run time";
+                return false;
+            } else {
+                // The first pass: built below.
+                missing.push_back(packet);
+                cur += 2 * packet.count;
+                continue;
+            }
+            const Stencil& s = *piece.stencil;
+            if ((s.flags & kIdle) && config.idle_waits) {
+                out.why = "idle";
                 return false;
             }
-            insn = uint32_t(w) << 16 | read(cur + 2);
-            const int p = match32(insn);
-            if (p < 0 || kPatterns32[p].selected < 0) {
-                out.why = "32-bit";
-                return false;
-            }
-            selected = kPatterns32[p].selected;
-            const Selected32& sel = kSelected32[selected];
-            id = kKeys32[sel.keys + gather(insn, sel.key_mask)];
+            cycles |= (s.flags & kCycles) != 0;
+            pieces_.push_back(piece);
+            cur += s.bytes;
+            if (s.flags & kTerminates) break;
         }
-        if (!id) {
-            out.why = "no stencil";
-            return false;
+        if (missing.empty()) {
+            out.fallthrough_pc = cur;
+            out.packets = uint32_t(pieces_.size() - 1);
+            if (!(pieces_.back().stencil->flags & kTerminates))
+                pieces_.push_back(CpTranslator::piece(kStencils[kFallthrough], cur, 0, -1));
+            pieces_[0] = CpTranslator::piece(kStencils[kPrologue[config.host_cycles && cycles]], pc, 0, -1);
+            return true;
         }
-        const Stencil& s = kStencils[id - 1];
-        if ((s.flags & kIdle) && config.idle_waits) {
-            out.why = "idle";
-            return false;
-        }
-        cycles |= (s.flags & kCycles) != 0;
-        pieces_.push_back({&s, cur, insn, selected, 0, 0});
-        cur += s.bytes;
-        if (s.flags & kTerminates) break;
+        if (pass == 1) break;  // built, and still missing: not reached
+        const uint64_t built = runtime_->stats().built;
+        runtime_->build(missing);
+        out.built = uint32_t(runtime_->stats().built - built);
+        missing.clear();
+        again = true;
     }
-    out.fallthrough_pc = cur;
-    out.packets = uint32_t(pieces_.size() - 1);
-    if (!(pieces_.back().stencil->flags & kTerminates))
-        pieces_.push_back({&kStencils[kFallthrough], cur, 0, -1, 0, 0});
-    pieces_[0].stencil = &kStencils[kPrologue[config.host_cycles && cycles]];
-    return true;
+    out.why = "no stencil at run time";
+    return false;
 }
 
 CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
@@ -244,10 +287,10 @@ bool CpTranslator::place(Arena& arena, uint8_t* code, const Piece& piece, const 
                          uint64_t field0, uint32_t counter, const Config& config) {
     const Stencil& s = *piece.stencil;
     uint8_t* at = code + piece.at;
-    memcpy(at, kCode + s.code, piece.size);
+    memcpy(at, piece.code, piece.size);
     const int exit = !config.chaining ? 0 : config.dry ? (config.count_chained ? 4 : 3) : (config.count_chained ? 2 : 1);
     for (uint32_t i = 0; i < s.reloc_count; ++i) {
-        const Reloc& r = kRelocs[s.relocs + i];
+        const Reloc& r = piece.relocs[i];
         if (r.offset >= piece.size) continue;  // in the dropped jump to the next packet
         uint64_t value = 0;
         if (r.hole < kHoleCont) {
@@ -299,11 +342,11 @@ uint64_t CpTranslator::code_hash(uint32_t counter, const Config& config) const {
     for (size_t i = 0; i < pieces_.size(); ++i) {
         const Piece& p = pieces_[i];
         const Stencil& s = *p.stencil;
-        mix(kCode + s.code, p.size);
+        mix(p.code, p.size);
         const bool fallthrough = p.stencil == &kStencils[kFallthrough] && i > 0;
         const uint32_t packet = fallthrough ? uint32_t(i - 1) : uint32_t(i);
         for (uint32_t k = 0; k < s.reloc_count; ++k) {
-            const Reloc& r = kRelocs[s.relocs + k];
+            const Reloc& r = p.relocs[k];
             if (r.offset >= p.size) continue;
             mix(&r, sizeof r);
             uint64_t value = 0;
