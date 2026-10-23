@@ -710,6 +710,28 @@ of 45 IR instructions cost 1.8 ms.
 - The threshold trades JIT time for execution: on the boot, from 300 to
   100000, all JIT CPU 79 -> 32 s and execution 2.1 -> 2.9 s. op1emu uses
   30000.
+- With tier 0 made of stencils, the worker's promotions became most of the
+  JIT's CPU (8.4 of 15.1 s on the boot), and most of them did not pay: 419
+  of 470 (8.0 s) were blocks just past 30,000 starts that ran little after
+  it (0x0197d522: 32,512 starts in all, 2,909 IR instructions, 110 ms).
+  What a promotion costs grows with its block; what it saves with the
+  packets the block runs after it. Raising the threshold for every block
+  costs execution fast (100,000: the worker 3.4 s, execution host
+  instructions +12%; no tier 1 at all: execution 2.3 -> 5.8 s). Scaling it
+  by the block's size (tier_threshold: a block of n packets, n > size_ref,
+  waits n / size_ref times as long) is a better trade: size_ref 16 took
+  the worker from 8.1 to 5.0 s for 7% more execution (+0.16 s), 8 to
+  3.6 s for 15%. Counting packets run instead of starts would be better
+  still on paper (a census estimate: 44% of the compile for 94% of the
+  benefit), but needs every exit to add to the count.
+- The light tier-1 pipeline (Compiler::kLightPipeline: no module or loop
+  passes) for promotions other than loop blocks took the worker a further
+  7% down (5.0 -> 4.7 s) with execution unchanged. Loop blocks keep O1:
+  their loops are where the pipeline earns its time.
+- A BBTranslateResult nobody took apart (a promotion dropped because its
+  lift read code its tier-0 block had not) freed its module after its
+  context, a use after free: members are destroyed last to first, so the
+  context comes first now.
 
 ## Copy-and-patch tier 0
 
@@ -762,6 +784,19 @@ of 45 IR instructions cost 1.8 ms.
 - A run-time stencil holds for any PC (the same IR lifted at two PCs) and
   is kept for the process, past Core::invalidate; so is a refusal, so that
   a packet that cannot be a stencil costs one try.
+- That check printed both lifts and compared the text: 37% of the CPU
+  thread's compile instructions, more than anything but the backend
+  (formatted_raw_ostream counts columns as it prints). Lifting the second
+  into the same module and comparing with llvm::FunctionComparator
+  (same_ir) keeps the check for a fraction: the CPU thread's compile time
+  6.5 -> 5.5 s (instructions 57.7 -> 40.3 G), the code the same.
+- What the remaining run-time stencils cost is LLVM's backend at -O0,
+  half of it SelectionDAG. X86FastISel selects no address of an
+  absolute_symbol global (every hole is one) and no GHC return or
+  arguments; without absolute_symbol it loads each hole with a 10-byte
+  movabs (R_X86_64_64), worse code for 6% less compile. Building only the
+  stencils a run reaches (a block ending before a packet without one) saves
+  little: 8,306 of 8,602 are reached on the boot.
 - Found in review: code placed in an arena outside an object must live as
   long as the engine, since the cache and the chain table point into it
   (JitEngine keeps every arena it gave out); a tier that reaches RAM
