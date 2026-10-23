@@ -151,6 +151,15 @@ python3 tests/run_emu_test.py --filter "cec-*" -v
 
 # Disassembler comparison against bfin-elf-objdump
 python3 tests/run_comparison_test.py
+
+# Differential: every ELF run twice and compared (exit code, output, with
+# --count-packets the packets): this build against an older one ...
+python3 tests/run_diff_test.py --base-emu /path/to/old/emu --matrix standard --count-packets
+# ... a setting against the same build without it (tiered against untiered,
+# copy-and-patch against LLVM's tier 0) ...
+python3 tests/run_diff_test.py --matrix tiers --count-packets
+# ... or the IR every block compiles to (emu --dump, host addresses masked)
+python3 tests/run_diff_test.py --base-emu /path/to/old/emu --dump --flags "-O 2"
 ```
 
 Current pass rate: **790 / 827** emulator tests, **827 / 827** disassembler comparison tests.

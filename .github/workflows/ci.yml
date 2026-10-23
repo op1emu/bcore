@@ -244,6 +244,19 @@ jobs:
             -O 1 -t 60 --page-table --chain \
             --ignore-list .github/emu-ignore.txt
 
+      # Tiered compilation (promotions on the worker) against untiered, and
+      # the copy-and-patch tier 0 against LLVM's: every test's exit code,
+      # output, packets and returns the same (one binary, two sets of flags).
+      # One configuration of each matrix: the whole matrices take about 40
+      # CPU-minutes.
+      - name: Differential test (tiers against untiered, copy-and-patch against LLVM)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
+            -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
+          python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
+            -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
+
       # CpuState::packets against single-stepping (--max-steps 1), where every
       # run enters one packet. Long tests time out single-stepped and are
       # reported as skipped.

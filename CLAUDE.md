@@ -136,6 +136,7 @@ The emulator:
   run with `python3 tests/run_comparison_test.py`
 - Emulator tests: assembly files from https://github.com/op1emu/bfin_sim/tree/main/testsuite/ are fetched at configure time, assembled, linked to `.elf`, and run via `./build/emu`
 - `tests/run_packet_count_test.py`: checks `CpuState::packets` (packets the last `Core::run` entered) against single-stepping for every test ELF
+- `tests/run_diff_test.py`: every test ELF run by two emulators (`--base-emu`) or with two sets of flags (`--base-flags`, or a `--matrix`: `standard`, `tiers`, `copy-patch`) and compared: exit code, output, packets (`--count-packets`), or the IR (`--dump`, host addresses masked). The gate for a change that must not change what the guest does: build the commit before it and pass its emu as `--base-emu`
 
 ## Profiling and Observability
 
