@@ -29,6 +29,8 @@ struct BBTranslateResult {
     // packets). A conditional branch never ends a block: its taken path
     // exits and decoding continues. A static string.
     const char* exit_kind = "packet-cap";
+    // A tier-0 block's threshold (Tier: tier_threshold of its packets).
+    uint32_t tier_threshold = 0;
 };
 
 class BBTranslator {
@@ -51,6 +53,7 @@ public:
         int level = 0;
         uint32_t counter = 0;
         uint32_t threshold = 0;
+        uint32_t size_ref = 0;  // tier_threshold (tier_table.h)
         Memory* code = nullptr;
     };
     BBTranslateResult translate(uint32_t pc, const CpuState* hint = nullptr, bool careful = false,

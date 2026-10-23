@@ -19,6 +19,7 @@
 #include <cstring>
 #include <functional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 static void require(bool ok, const char* why) {
@@ -68,7 +69,8 @@ struct Mode {
 
 // background: -1 promotions on this thread; else on the worker, published
 // after that many packets (0: as soon as the worker is done).
-static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"}) {
+static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"},
+                   uint32_t size_ref = 0) {
     CpuState cpu{};
     FlatMemory mem(0, 0x4000, &cpu);
     if (mode.paged) mem.enable_page_table();
@@ -76,7 +78,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     Core core(&cpu, &mem);
     core.set_chaining(true, mode.dry);
     core.set_count_chained(mode.count);
-    core.set_tiering(threshold);
+    core.set_tiering(threshold, size_ref);
     if (threshold) {
         CpRuntimeSettings runtime;
         runtime.enable = mode.runtime;
@@ -354,6 +356,78 @@ static void test_stale_promotion() {
     require(once(true) == once(false), "a stale promotion changed what ran");
 }
 
+// A block of more packets than size_ref asks to be compiled again only
+// after as many times the threshold's starts as it has packets more
+// (tier_threshold), whether tier 0 is made of stencils or by LLVM: 40
+// packets with a threshold of 4 and size_ref 8 after 20 runs, without
+// size_ref after 4, and a block of 8 after 4 either way.
+static void test_size_ref() {
+    struct Want {
+        uint32_t packets, size_ref;
+        int runs;
+    };
+    for (bool stencils : {false, true})
+        for (const Want& w : {Want{40, 8, 20}, Want{40, 0, 4}, Want{8, 8, 4}, Want{8, 3, 10}}) {
+            CpuState cpu{};
+            FlatMemory mem(0, 0x4000, &cpu);
+            mem.enable_page_table();
+            for (uint32_t i = 0; i + 1 < w.packets; ++i) mem.write16(0x100 + 2 * i, kAdd1);
+            mem.write16(0x100 + 2 * (w.packets - 1), 0x0010);  // RTS
+            Core core(&cpu, &mem);
+            core.set_tiering(4, w.size_ref);
+            core.set_copy_patch(stencils);
+            require(core.init(1), "init");
+            cec_init(); evt_init();
+            cpu.lb[0] = cpu.lb[1] = 0x3f00;
+            for (int r = 1; r <= w.runs; ++r) {
+                cpu.rets = 0x2000;
+                require(core.run(0x100), "run");
+                require(cpu.pc == 0x2000 && cpu.dpregs[0] == uint32_t(r) * (w.packets - 1), "the block's work");
+#if BCORE_ENABLE_PROFILE
+#if BCORE_COPY_PATCH_TEST
+                if (stencils) require(core.stats().copy_patch_blocks == 1, "tier 0 not made of stencils");
+#endif
+                require(core.stats().blocks_promoted == (r == w.runs ? 1u : 0u),
+                        r < w.runs ? "promoted before its threshold" : "not promoted at its threshold");
+#endif
+            }
+        }
+#if BCORE_ENABLE_PROFILE
+    // More requests in one run than the table holds: the host looks at
+    // every count, each against its own block's threshold. A ring of 300
+    // one-packet blocks (threshold 2) and one of 3 packets (6): the second
+    // time round, in one chained run, the 300 ask, and the larger block,
+    // at 2, is not promoted with them.
+    for (bool stencils : {false, true}) {
+        CpuState cpu{};
+        FlatMemory mem(0, 0x4000, &cpu);
+        mem.enable_page_table();
+        constexpr uint32_t kSmall = 300, kLarge = 0x100 + 2 * kSmall;
+        for (uint32_t i = 0; i < kSmall; ++i) mem.write16(0x100 + 2 * i, jump_s(0x100 + 2 * i, 0x102 + 2 * i));
+        mem.write16(kLarge, kAdd1); mem.write16(kLarge + 2, kAdd1); mem.write16(kLarge + 4, jump_s(kLarge + 4, 0x100));
+        Core core(&cpu, &mem);
+        core.set_chaining(true, false);
+        core.set_tiering(2, 1);
+        core.set_copy_patch(stencils);
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        uint32_t pc = 0x100;
+        do {  // the first time round: every block compiled, a run each
+            cpu.chain_budget = 1;
+            require(core.run(pc), "run");
+            pc = cpu.pc;
+            cpu.did_jump = false;
+        } while (pc != 0x100);
+        require(core.stats().blocks_promoted == 0, "a block promoted at its first start");
+        cpu.chain_budget = kSmall + 3;  // once round, chained
+        require(core.run(0x100), "run");
+        require(cpu.pc == 0x100 && core.stats().tier_request_overflows == 1, "no overflow");
+        require(core.stats().blocks_promoted == kSmall, "the overflow promoted a block under its threshold");
+    }
+#endif
+}
+
 // A translation's result left untaken, as Core leaves a promotion it drops
 // (its code read code the tier-0 block had not): the module goes before its
 // context (found: it went after it, a use after free; ASan says so).
@@ -365,6 +439,7 @@ static void test_result_order() {
 
 int main() {
     test_result_order();
+    test_size_ref();
     test_throwing_callback();
     test_throwing_stencils();
     test_toggle_stencils();
@@ -423,12 +498,15 @@ int main() {
         for (const Mode& mode : modes) {
             if ((mode.dry || !mode.count) && opt != 1) continue;
             const Outcome want = run(c, opt, 0, -1, mode);
-            for (uint32_t threshold : {1u, 2u, 7u})
+            // Thresholds with and without a size_ref (1: a block of n
+            // packets n times the threshold).
+            for (auto [threshold, size_ref] : {std::pair{1u, 0u}, {2u, 0u}, {7u, 0u}, {1u, 1u}, {2u, 1u}})
             for (int background : {-1, 0, 1, 50}) {
-                const Outcome got = run(c, opt, threshold, background, mode);
+                const Outcome got = run(c, opt, threshold, background, mode, size_ref);
                 if (!(got == want)) {
-                    fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u background %d: %zu/%zu runs\n", c.name,
-                            mode.name, opt, threshold, background, want.runs.size(), got.runs.size());
+                    fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u size_ref %u background %d: %zu/%zu runs\n",
+                            c.name, mode.name, opt, threshold, size_ref, background, want.runs.size(),
+                            got.runs.size());
                     for (size_t i = 0; i < want.runs.size() && i < got.runs.size(); ++i)
                         if (!(want.runs[i] == got.runs[i]))
                             fprintf(stderr, "  run %zu: pc %x/%x packets %u/%u chain %u/%u blocks %u/%u\n", i,

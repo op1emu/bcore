@@ -265,8 +265,9 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
         if (loop->circular) fn->addFnAttr(kCircularAttr, std::to_string(__builtin_popcount(loop->circular)));
     }
 
+    const uint32_t threshold = tier && tier->level == 0 ? tier_threshold(tier->threshold, tier->size_ref, packets) : 0;
     if (tier && tier->level == 0 && first_entry)
-        emit_tier_counter(builder, cpu_ptr, first_entry, tier->counter, tier->threshold);
+        emit_tier_counter(builder, cpu_ptr, first_entry, tier->counter, threshold);
     // A tier-0 block is compiled with FastISel, which cannot select a
     // return in the GHC convention: every block that ends in one goes to
     // SelectionDAG instead. One return, one such block.
@@ -282,7 +283,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
 
     const char* exit_kind = visitor.is_terminated() ? visitor.exit_kind()
                              : budget_limited_ ? "step-budget" : "packet-cap";
-    return {std::move(ctx), std::move(mod), visitor.fallthrough_pc(), exit_kind};
+    return {std::move(ctx), std::move(mod), visitor.fallthrough_pc(), exit_kind, threshold};
 }
 
 static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
