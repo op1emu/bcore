@@ -172,16 +172,21 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
         words_.emplace_back(addr, w);
         return w;
     };
-    // Packets with no stencil yet, to build at once (runtime_): the first
-    // pass goes past them as if they were as long as they are, with no
-    // jump, which only an illegal instruction's exception would end sooner.
-    std::vector<bcore_cp::RuntimeStencils::Packet> missing;
+    // Packets with no stencil yet (runtime_) are staged as the first pass
+    // meets them, which lifts them and so says how long each is and whether
+    // it ends the block: the pass reads no more of the block than LLVM's
+    // tier 0 would. The second, once they are built, places them.
     for (int pass = 0; pass < 2; ++pass) {
         pieces_.clear();
         pieces_.push_back({nullptr, nullptr, nullptr, pc, 0, -1, 0, 0});  // the prologue, chosen below
         out.runtime_packets = 0;
-        bool cycles = false;
+        bool cycles = false, staging = false;
         uint32_t cur = pc;
+        auto fail = [&](const char* why) {
+            if (runtime_) runtime_->discard();  // this block's: tried again where they are met next
+            out.why = why;
+            return false;
+        };
         for (uint32_t k = 0; k < config.max_packets; ++k) {
             const uint16_t w = read(cur);
             uint32_t id = 0, insn = w;
@@ -192,6 +197,7 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             if (is16(w)) {
                 id = kIndex16[w];
             } else if (is_parallel(w)) {
+                if (!runtime_) return fail("parallel");
                 packet.count = 4;
                 for (unsigned i = 1; i < 4; ++i) packet.words[i] = read(cur + 2 * i);
             } else {
@@ -205,35 +211,35 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
                     id = kKeys32[sel.keys + gather(insn, sel.key_mask)];
                 }
             }
-            Piece piece;
+            Piece piece{};
+            uint16_t flags = 0;
+            uint8_t bytes = 0;
             if (id) {
                 piece = CpTranslator::piece(kStencils[id - 1], cur, insn, selected);
             } else if (!runtime_) {
-                out.why = packet.count == 4 ? "parallel" : packet.count == 2 ? "32-bit" : "no stencil";
-                return false;
+                return fail(packet.count == 2 ? "32-bit" : "no stencil");
             } else if (const auto* r = runtime_->find(packet)) {
                 piece = {&r->stencil, r->code.data(), r->relocs.data(), cur, insn, -1, 0, 0};
                 out.runtime_packets++;
-            } else if (runtime_->tried(packet)) {
-                out.why = "no stencil at run time";
-                return false;
             } else {
-                // The first pass: built below.
-                missing.push_back(packet);
-                cur += 2 * packet.count;
-                continue;
+                // The first pass, or a packet the flush refused.
+                const auto staged = pass == 0 ? runtime_->stage(packet) : bcore_cp::RuntimeStencils::Staged{};
+                if (!staged.ok) return fail("no stencil at run time");
+                staging = true;
+                flags = staged.flags;
+                bytes = staged.bytes;
             }
-            const Stencil& s = *piece.stencil;
-            if ((s.flags & kIdle) && config.idle_waits) {
-                out.why = "idle";
-                return false;
+            if (piece.stencil) {
+                flags = piece.stencil->flags;
+                bytes = piece.stencil->bytes;
             }
-            cycles |= (s.flags & kCycles) != 0;
-            pieces_.push_back(piece);
-            cur += s.bytes;
-            if (s.flags & kTerminates) break;
+            if ((flags & kIdle) && config.idle_waits) return fail("idle");
+            cycles |= (flags & kCycles) != 0;
+            if (piece.stencil) pieces_.push_back(piece);
+            cur += bytes;
+            if (flags & kTerminates) break;
         }
-        if (missing.empty()) {
+        if (!staging) {
             out.fallthrough_pc = cur;
             out.packets = uint32_t(pieces_.size() - 1);
             if (!(pieces_.back().stencil->flags & kTerminates))
@@ -241,11 +247,9 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             pieces_[0] = CpTranslator::piece(kStencils[kPrologue[config.host_cycles && cycles]], pc, 0, -1);
             return true;
         }
-        if (pass == 1) break;  // built, and still missing: not reached
         const uint64_t built = runtime_->stats().built;
-        runtime_->build(missing);
+        runtime_->flush();
         out.built = uint32_t(runtime_->stats().built - built);
-        missing.clear();
         again = true;
     }
     out.why = "no stencil at run time";

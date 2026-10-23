@@ -49,6 +49,7 @@ RuntimeStencils::~RuntimeStencils() = default;
 
 bool RuntimeStencils::configure(const Settings& settings) {
     // What is kept was built with the old settings.
+    discard();
     entries_.clear();
     records_.clear();
     const bool rebuild = !compiler_ || settings.opt != settings_.opt;
@@ -84,92 +85,107 @@ void RuntimeStencils::refuse(const Packet& packet, const std::string& why) {
     stats_.reasons[why]++;
 }
 
-bool RuntimeStencils::compile(const std::vector<Packet>& packets, std::vector<Lifted>& lifted,
-                              std::map<std::string, Code>& code) {
-    Module mod("stencils", *context_);
-    const uint64_t t0 = now_ns();
-    for (const Packet& packet : packets) {
-        Lifted l;
-        l.packet = packet;
-        l.name = "rt_" + std::to_string(lifted.size());
-        const int len = 2 * packet.count;
-        // As the build checks its packets (tools/stencilgen.cpp): lifted at
-        // two PCs, the same IR, nothing in it depending on the PC but the PC
-        // hole. The lift at kPcA is the one compiled.
-        memory_->set_words(kPcA, packet.words, packet.count);
-        auto a = translator_->translate_stencil(mod, l.name.c_str(), kPcA, packet_holes(mod));
-        const bool outside = memory_->read_outside();
-        if (outside) {
-            l.error = "reads past the packet";
-        } else if (a.bytes != len && !(a.terminated && a.bytes < len)) {
-            l.error = "decodes to another length";  // an illegal instruction raises its exception as a packet of 2
-        } else {
-            Module scratch("scratch", *context_);
-            memory_->set_words(kPcB, packet.words, packet.count);
-            // Its own module: the same name as the lift at kPcA.
-            auto b = translator_->translate_stencil(scratch, l.name.c_str(), kPcB, packet_holes(scratch));
-            if (memory_->read_outside()) l.error = "reads past the packet";
-            else if (ir_text(b.fn) != ir_text(a.fn)) l.error = "IR depends on the PC";
-            else if (verifyFunction(*a.fn, &errs()))
-                l.error = "IR does not verify";
-        }
-        if (!l.error.empty()) {
-            a.fn->eraseFromParent();
-        } else {
-            l.bytes = uint8_t(a.bytes);
-            l.flags = (a.terminated ? kTerminates : 0) | (a.cycles ? kCycles : 0) |
-                      (packet.count == 1 && packet.words[0] == 0x0020 ? kIdle : 0);
-        }
-        lifted.push_back(std::move(l));
+std::string RuntimeStencils::lift(Module& mod, const Packet& packet, const std::string& name, Lifted& out) {
+    // As the build lifts and checks its packets (tools/stencilgen.cpp),
+    // but without field holes: the run time builds each encoding's own.
+    auto holes = [](Module& m) {
+        auto h = packet_holes(m);
+        for (auto*& field : h.fields) field = nullptr;
+        return h;
+    };
+    out.packet = packet;
+    out.name = name;
+    const int len = 2 * packet.count;
+    memory_->set_words(kPcA, packet.words, packet.count);
+    auto a = translator_->translate_stencil(mod, name.c_str(), kPcA, holes(mod));
+    std::string error;
+    if (memory_->read_outside()) {
+        error = "reads past the packet";
+    } else if (a.bytes != len && !(a.terminated && a.bytes < len)) {
+        error = "decodes to another length";  // an illegal instruction raises its exception as a packet of 2
+    } else if (a.fields_used) {
+        error = "takes a field hole";
+    } else {
+        // The same IR at another PC (in a module of its own, under the same
+        // name): nothing in it depends on the PC but the PC hole.
+        Module scratch("scratch", *context_);
+        memory_->set_words(kPcB, packet.words, packet.count);
+        auto b = translator_->translate_stencil(scratch, name.c_str(), kPcB, holes(scratch));
+        if (memory_->read_outside()) error = "reads past the packet";
+        else if (ir_text(b.fn) != ir_text(a.fn)) error = "IR depends on the PC";
+        else if (verifyFunction(*a.fn, &errs())) error = "IR does not verify";
     }
-    const uint64_t t1 = now_ns();
+    if (!error.empty()) {
+        a.fn->eraseFromParent();
+        return error;
+    }
+    out.bytes = uint8_t(a.bytes);
+    out.flags = (a.terminated ? kTerminates : 0) | (a.cycles ? kCycles : 0) |
+                (packet.count == 1 && packet.words[0] == 0x0020 ? kIdle : 0);
+    return {};
+}
+
+bool RuntimeStencils::compile(Module& mod, std::map<std::string, Code>& code) {
+    const uint64_t t0 = now_ns();
     // As Worker::compile in tools/stencilgen.cpp.
     mod.setDataLayout(compiler_->dataLayout());
     mod.setTargetTriple(compiler_->targetTriple());
     make_local(mod);
     compiler_->optimize(mod);
     auto object = compiler_->emit(mod);
-    const uint64_t t2 = now_ns();
+    const uint64_t t1 = now_ns();
     if (object) code = extract(*object);
-    const uint64_t t3 = now_ns();
-    stats_.lift_ns += t1 - t0;
-    stats_.compile_ns += t2 - t1;
-    stats_.extract_ns += t3 - t2;
+    stats_.compile_ns += t1 - t0;
+    stats_.extract_ns += now_ns() - t1;
     stats_.batches++;
     return object != nullptr;
 }
 
-void RuntimeStencils::build(const std::vector<Packet>& packets) {
-    if (!compiler_) return;
-    std::vector<Packet> todo;
-    for (const Packet& packet : packets) {
-        if (tried(packet)) continue;
-        bool twice = false;
-        for (const Packet& t : todo) twice |= key_of(t) == key_of(packet);
-        if (twice) continue;
-        const uint64_t h = key_hash(packet);
-        if (packet.count != 1 && packet.count != 2 && packet.count != 4)
-            refuse(packet, "not a packet");
-        else if (h < settings_.range_lo || h > settings_.range_hi)
-            refuse(packet, "outside the range");
-        else if (records_.size() + todo.size() >= settings_.capacity)
-            refuse(packet, "no room");
-        else
-            todo.push_back(packet);
+RuntimeStencils::Staged RuntimeStencils::stage(const Packet& packet) {
+    Staged out;
+    if (!compiler_ || tried(packet)) return out;
+    for (const Lifted& l : pending_)
+        if (key_of(l.packet) == key_of(packet)) return {true, l.bytes, l.flags};
+    const uint64_t h = key_hash(packet);
+    if (packet.count != 1 && packet.count != 2 && packet.count != 4) {
+        refuse(packet, "not a packet");
+    } else if (h < settings_.range_lo || h > settings_.range_hi) {
+        refuse(packet, "outside the range");
+    } else if (records_.size() + pending_.size() >= settings_.capacity) {
+        refuse(packet, "no room");
+    } else {
+        if (!batch_) batch_ = std::make_unique<Module>("stencils", *context_);
+        const uint64_t t0 = now_ns();
+        Lifted l;
+        const std::string error = lift(*batch_, packet, "rt_" + std::to_string(pending_.size()), l);
+        stats_.lift_ns += now_ns() - t0;
+        if (!error.empty()) {
+            refuse(packet, error);
+        } else {
+            out = {true, l.bytes, l.flags};
+            pending_.push_back(std::move(l));
+        }
     }
-    if (todo.empty()) return;
+    return out;
+}
 
-    std::vector<Lifted> lifted;
+void RuntimeStencils::discard() {
+    pending_.clear();
+    batch_.reset();
+}
+
+void RuntimeStencils::flush() {
+    if (pending_.empty()) return;
+    std::vector<Lifted> lifted = std::move(pending_);
+    std::unique_ptr<Module> mod = std::move(batch_);
+    discard();
     std::map<std::string, Code> code;
-    if (!compile(todo, lifted, code)) {
-        for (const Packet& packet : todo) refuse(packet, "no object");
+    if (!compile(*mod, code)) {
+        for (const Lifted& l : lifted) refuse(l.packet, "no object");
         return;
     }
+    mod.reset();
     for (Lifted& l : lifted) {
-        if (!l.error.empty()) {
-            refuse(l.packet, l.error);
-            continue;
-        }
         auto it = code.find(l.name);
         if (it == code.end()) {
             refuse(l.packet, "no code");
@@ -186,12 +202,13 @@ void RuntimeStencils::build(const std::vector<Packet>& packets) {
         }
         if (settings_.verify) {
             // Its code on its own: the same as in the batch.
-            std::vector<Lifted> alone;
+            Module alone("alone", *context_);
+            Lifted again;
             std::map<std::string, Code> own;
-            const bool same = compile({l.packet}, alone, own) && alone[0].error.empty() && own.count(alone[0].name) &&
-                              own[alone[0].name].bytes == c.bytes &&
-                              own[alone[0].name].relocs.size() == c.relocs.size() &&
-                              std::equal(c.relocs.begin(), c.relocs.end(), own[alone[0].name].relocs.begin(),
+            const bool same = lift(alone, l.packet, l.name, again).empty() && compile(alone, own) &&
+                              own.count(l.name) && own[l.name].bytes == c.bytes &&
+                              own[l.name].relocs.size() == c.relocs.size() &&
+                              std::equal(c.relocs.begin(), c.relocs.end(), own[l.name].relocs.begin(),
                                          [](const Reloc& x, const Reloc& y) {
                                              return x.offset == y.offset && x.hole == y.hole && x.kind == y.kind &&
                                                     x.addend == y.addend;
