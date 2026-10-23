@@ -196,15 +196,16 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             packet.count = 1;
             if (is16(w)) {
                 id = kIndex16[w];
-            } else if (is_parallel(w)) {
-                if (!runtime_) return fail("parallel");
-                packet.count = 4;
-                for (unsigned i = 1; i < 4; ++i) packet.words[i] = read(cur + 2 * i);
+            } else if (is_parallel(w) && !runtime_) {
+                return fail("parallel");
             } else {
+                // The decoder reads the second halfword of anything not
+                // 16-bit; a parallel packet's further ones only as its
+                // decoding goes on (the run time's entries say).
                 packet.words[1] = read(cur + 2);
                 packet.count = 2;
                 insn = uint32_t(w) << 16 | packet.words[1];
-                const int p = match32(insn);
+                const int p = is_parallel(w) ? -1 : match32(insn);
                 if (p >= 0 && kPatterns32[p].selected >= 0) {
                     selected = kPatterns32[p].selected;
                     const Selected32& sel = kSelected32[selected];
@@ -218,16 +219,29 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
                 piece = CpTranslator::piece(kStencils[id - 1], cur, insn, selected);
             } else if (!runtime_) {
                 return fail(packet.count == 2 ? "32-bit" : "no stencil");
-            } else if (const auto* r = runtime_->find(packet)) {
-                piece = {&r->stencil, r->code.data(), r->relocs.data(), cur, insn, -1, 0, 0};
-                out.runtime_packets++;
             } else {
-                // The first pass, or a packet the flush refused.
-                const auto staged = pass == 0 ? runtime_->stage(packet) : bcore_cp::RuntimeStencils::Staged{};
-                if (!staged.ok) return fail("no stencil at run time");
-                staging = true;
-                flags = staged.flags;
-                bytes = staged.bytes;
+                auto found = runtime_->find(packet);
+                while (found.more && packet.count < bcore_cp::StencilMemory::kMaxWords) {
+                    packet.words[packet.count] = read(cur + 2 * packet.count);
+                    packet.count++;
+                    found = runtime_->find(packet);
+                }
+                if (found.record) {
+                    const auto* r = found.record;
+                    piece = {&r->stencil, r->code.data(), r->relocs.data(), cur, insn, -1, 0, 0};
+                    out.runtime_packets++;
+                } else {
+                    // Not known yet in the first pass: lifted now, its
+                    // further halfwords read as the decoder asks for them.
+                    // Refused, or not known in the second: none.
+                    bcore_cp::RuntimeStencils::Staged staged;
+                    if (pass == 0 && !found.known())
+                        staged = runtime_->stage(packet, [&](int i) { return read(cur + 2 * uint32_t(i)); });
+                    if (!staged.ok) return fail("no stencil at run time");
+                    staging = true;
+                    flags = staged.flags;
+                    bytes = staged.bytes;
+                }
             }
             if (piece.stencil) {
                 flags = piece.stencil->flags;

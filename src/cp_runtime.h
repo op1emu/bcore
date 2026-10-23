@@ -17,6 +17,14 @@
 // the block (so the translator reads no further than the block goes), and
 // flush() then compiles every staged packet in one module.
 //
+// A packet is the halfwords its decoding reads, which only those read
+// before decide (decodeInstruction): an illegal first slot of a parallel
+// packet ends it after two, a third slot that looks like a 32-bit
+// instruction adds a fifth. Its first lift fetches them from the
+// translator one by one as the decoder asks, and every shorter prefix of
+// them is kept as "read one more": a translation that finds a packet so
+// reads exactly the halfwords the LLVM tier 0's decoding would.
+//
 // Checks, as the build's: the lift reads only the packet's halfwords and
 // keeps its length (or ends the block, as an illegal instruction does), its
 // IR is the same lifted at another PC (kPcB), and every relocation of its
@@ -24,6 +32,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -56,11 +65,12 @@ public:
         // At most this many packets kept; past it the others get none.
         size_t capacity = 1 << 16;
     };
-    // A packet: its halfwords and their number (1, 2 or 4).
+    // A packet: the halfwords its decoding reads and their number (1 to
+    // StencilMemory::kMaxWords).
     struct Packet {
-        uint16_t words[4] = {};
+        uint16_t words[StencilMemory::kMaxWords] = {};
         uint8_t count = 0;
-        uint64_t key() const;
+        bool operator==(const Packet& o) const;
     };
     // A stencil as cp_format.h's: its header (code and relocs 0), its code
     // and relocations.
@@ -89,19 +99,26 @@ public:
     bool configure(const Settings& settings);
     const Settings& settings() const { return settings_; }
 
-    // The packet's stencil, null if it has none (yet).
-    const Record* find(const Packet& packet) const;
-    // Tried before (whether or not it got a stencil).
-    bool tried(const Packet& packet) const;
-    // A packet not tried, lifted and checked for the next flush(): its
-    // length and flags (kTerminates, kCycles, kIdle) if it may be a
-    // stencil, else ok false (refused, and kept so).
+    // What is kept for these halfwords: a stencil, none (refused), or that
+    // decoding reads one more (`more`); nothing yet if none of the three.
+    struct Found {
+        const Record* record = nullptr;
+        bool refused = false;
+        bool more = false;
+        bool known() const { return record || refused || more; }
+    };
+    Found find(const Packet& packet) const;
+    // Halfwords not known yet, lifted and checked for the next flush(), the
+    // decoding's further halfwords taken from fetch (their index in the
+    // packet) and added to packet: its length and flags (kTerminates,
+    // kCycles, kIdle) if it may be a stencil, else ok false (refused, and
+    // kept so). Whatever fetch throws is thrown, with nothing staged.
     struct Staged {
         bool ok = false;
         uint8_t bytes = 0;
         uint16_t flags = 0;
     };
-    Staged stage(const Packet& packet);
+    Staged stage(Packet& packet, const std::function<uint16_t(int)>& fetch);
     // Compiles the staged packets in one module and keeps their stencils
     // (or refusals); discard() drops them untried instead.
     void flush();
@@ -114,18 +131,18 @@ public:
 
 private:
     struct Entry {
-        const Record* record = nullptr;  // null: refused
+        const Record* record = nullptr;  // null and not more: refused
+        bool more = false;
     };
     struct Hash {
-        size_t operator()(const std::pair<uint64_t, uint8_t>& k) const { return size_t(k.first * 0x9e3779b97f4a7c15ull) ^ k.second; }
+        size_t operator()(const Packet& p) const { return size_t(key_hash(p)); }
     };
-    using Key = std::pair<uint64_t, uint8_t>;
-    static Key key_of(const Packet& p) { return {p.key(), p.count}; }
     void refuse(const Packet& packet, const std::string& why);
     // Lifts and checks the packet into mod as `name`: why it cannot be a
     // stencil, or empty.
     struct Lifted;
-    std::string lift(llvm::Module& mod, const Packet& packet, const std::string& name, Lifted& out);
+    std::string lift(llvm::Module& mod, Packet& packet, const std::string& name, Lifted& out,
+                     const std::function<uint16_t(int)>& fetch = nullptr);
     // Compiles mod: its code by function name; false if it did not compile.
     bool compile(llvm::Module& mod, std::map<std::string, Code>& code);
 
@@ -134,7 +151,7 @@ private:
     std::unique_ptr<Compiler> compiler_;
     std::unique_ptr<StencilMemory> memory_;
     std::unique_ptr<BBTranslator> translator_;
-    std::unordered_map<Key, Entry, Hash> entries_;
+    std::unordered_map<Packet, Entry, Hash> entries_;
     std::deque<Record> records_;
     // Staged for the next flush: the module and its packets.
     std::unique_ptr<llvm::Module> batch_;

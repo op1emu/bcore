@@ -8,6 +8,7 @@
 // relocations from the object and says why one cannot be a stencil.
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -43,22 +44,38 @@ public:
             set_words(pc, w, 2);
         }
     }
-    // A packet of `count` halfwords (up to 4) at pc.
-    void set_words(uint32_t pc, const uint16_t* words, int count) {
+    // The most halfwords a packet's decoding reads: a parallel packet's
+    // four, and the second half of a third slot that looks like a 32-bit
+    // instruction (decodeInstruction, which then calls the packet illegal).
+    static constexpr int kMaxWords = 5;
+    // A packet of `count` halfwords (up to kMaxWords) at pc. With fetch, a
+    // read of the halfword after them asks fetch for it (its index from pc)
+    // and adds it, so that the packet is the halfwords the lift read, in
+    // the order the decoder reads them.
+    void set_words(uint32_t pc, const uint16_t* words, int count,
+                   std::function<uint16_t(int)> fetch = nullptr) {
         pc_ = pc;
         count_ = count;
-        for (int i = 0; i < 4; ++i) words_[i] = i < count ? words[i] : 0;
+        for (int i = 0; i < kMaxWords; ++i) words_[i] = i < count ? words[i] : 0;
+        fetch_ = std::move(fetch);
         outside_ = false;
     }
-    // Whether the lifter read any halfword but the packet's since set:
-    // then the stencil would depend on what follows the packet.
+    int count() const { return count_; }
+    const uint16_t* words() const { return words_; }
+    // Whether the lifter read any halfword but the packet's (and those
+    // fetched) since set: then the stencil would depend on what follows.
     bool read_outside() const { return outside_; }
     uint32_t base() const override { return 0; }
     uint32_t size() const override { return 0; }
     uint8_t read8(uint32_t) const override { return 0; }
     uint16_t read16(uint32_t addr) const override {
         const uint32_t i = (addr - pc_) / 2;
-        if (addr >= pc_ && !((addr - pc_) & 1) && i < uint32_t(count_)) return words_[i];
+        const bool aligned = addr >= pc_ && !((addr - pc_) & 1);
+        if (aligned && i < uint32_t(count_)) return words_[i];
+        if (aligned && fetch_ && i == uint32_t(count_) && count_ < kMaxWords) {
+            words_[count_] = fetch_(count_);
+            return words_[count_++];
+        }
         outside_ = true;
         return 0;
     }
@@ -73,8 +90,9 @@ public:
 
 private:
     uint32_t pc_ = 0;
-    uint16_t words_[4] = {};
-    int count_ = 0;
+    mutable uint16_t words_[kMaxWords] = {};
+    mutable int count_ = 0;
+    std::function<uint16_t(int)> fetch_;
     mutable bool outside_ = false;
     uint8_t* dummy_ = nullptr;
 };

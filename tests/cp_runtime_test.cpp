@@ -23,6 +23,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <random>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -133,13 +136,13 @@ void test_same_as_the_build() {
     }
     for (size_t at = 0; at < packets.size(); at += 64) {
         for (size_t i = at; i < std::min(packets.size(), at + 64); ++i)
-            require(rt.stage(packets[i]).ok, "16-bit " + std::to_string(packets[i].words[0]) + " refused");
+            require(rt.stage(packets[i], nullptr).ok, "16-bit " + std::to_string(packets[i].words[0]) + " refused");
         rt.flush();
     }
     size_t same = 0;
     for (const auto& p : packets) {
         const bcore_cp::Stencil& s = bcore_cp::kStencils[bcore_cp::kIndex16[p.words[0]] - 1];
-        const auto* r = rt.find(p);
+        const auto* r = rt.find(p).record;
         require(r != nullptr, "no stencil for 16-bit " + std::to_string(p.words[0]));
         const bool code = r->code.size() == s.size && !memcmp(r->code.data(), bcore_cp::kCode + s.code, s.size);
         bool relocs = r->relocs.size() == s.reloc_count;
@@ -184,10 +187,10 @@ void test_no_field_holes() {
     a.words[0] = b.words[0] = 0xe100;
     a.words[1] = 0x1234;
     b.words[1] = 0x4321;
-    require(rt.stage(a).ok && rt.stage(b).ok, "LDIMMhalf refused");
+    require(rt.stage(a, nullptr).ok && rt.stage(b, nullptr).ok, "LDIMMhalf refused");
     rt.flush();
-    const auto* ra = rt.find(a);
-    const auto* rb = rt.find(b);
+    const auto* ra = rt.find(a).record;
+    const auto* rb = rt.find(b).record;
     require(ra && rb, "no LDIMMhalf stencils");
     for (const auto* r : {ra, rb})
         for (const auto& reloc : r->relocs)
@@ -226,7 +229,7 @@ void test_reads_end_at_the_block() {
         packet.count = 2;
         packet.words[0] = uint16_t(hi);
         packet.words[1] = 0xffff;
-        const auto staged = probe.stage(packet);
+        const auto staged = probe.stage(packet, nullptr);
         if (staged.ok && (staged.flags & bcore_cp::kTerminates) && staged.bytes == 2) illegal = insn;
     }
     require(illegal != 0, "no illegal 32-bit encoding found");
@@ -256,6 +259,112 @@ void test_reads_end_at_the_block() {
 #endif
 }
 
+// Halfwords a translation read; reading kThrowAt throws, as a host's
+// memory may where nothing is.
+class GuardedCode : public FlatMemory {
+public:
+    explicit GuardedCode(CpuState* cpu) : FlatMemory(0, kRam, cpu) { enable_page_table(); }
+    mutable std::vector<uint32_t> reads;
+    uint32_t throw_at = 0;
+    uint16_t read16(uint32_t addr) const override {
+        if (addr >= kCode && addr < kCode + 0x10000) reads.push_back(addr);
+        if (throw_at && addr == throw_at) throw std::runtime_error("no memory there");
+        return FlatMemory::read16(addr);
+    }
+};
+
+// The halfwords one block's translation reads, with or without stencils
+// built at run time; whether it threw.
+std::pair<std::set<uint32_t>, bool> block_reads(const std::vector<uint16_t>& words, bool runtime,
+                                                uint32_t throw_at = 0) {
+    CpuState cpu{};
+    GuardedCode mem(&cpu);
+    Core core(&cpu, &mem);
+    core.set_chaining(true, false);
+    core.set_tiering(0x7fffffff);
+    CpRuntimeSettings settings;
+    settings.enable = runtime;
+    core.set_copy_patch_runtime(settings);
+    core.set_copy_patch(true);
+    require(core.init(1), "init");
+    for (size_t i = 0; i < words.size(); ++i) mem.write16(kCode + 2 * uint32_t(i), words[i]);
+    mem.write16(kCode + 2 * uint32_t(words.size()), kRts);
+    mem.throw_at = throw_at;
+    cec_init();
+    evt_init();
+    cpu.chain_budget = 1;
+    cpu.rets = 0x8000;
+    mem.write16(0x8000, 0x0020);
+    mem.reads.clear();
+    bool threw = false;
+    try {
+        core.run(kCode);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    return {std::set<uint32_t>(mem.reads.begin(), mem.reads.end()), threw};
+}
+
+// Found in review: an illegal first slot ends a parallel packet after two
+// halfwords, and a translation read all four first: where reading the
+// third throws, the block ran without stencils built at run time and threw
+// with them.
+void test_illegal_parallel_reads_two() {
+    const std::vector<uint16_t> packet = {0xcfff, 0xffff};
+    for (bool runtime : {false, true}) {
+        const auto [reads, threw] = block_reads(packet, runtime, kCode + 4);
+        require(!threw, std::string("the translation read past an illegal first slot, runtime ") +
+                            (runtime ? "on" : "off"));
+        require(reads == std::set<uint32_t>({kCode, kCode + 2}), "not just the packet's two halfwords read");
+    }
+}
+
+// Every packet's halfwords read as the LLVM tier 0's decoding reads them:
+// random parallel packets (some with a third slot that looks like a 32-bit
+// instruction, whose decoding reads a fifth) and 32-bit instructions.
+void test_reads_as_llvm() {
+    std::mt19937 rng(5);
+    unsigned compared = 0, five = 0;
+    for (int n = 0; n < 300; ++n) {
+        std::vector<uint16_t> words;
+        if (n % 3 == 2) {
+            words = {uint16_t(0xc000 | (rng() & 0x37ff)), uint16_t(rng())};  // 32-bit, not multi-issue
+        } else {
+            const uint16_t slot2 = n % 5 == 0 ? uint16_t(0xc000 | (rng() & 0x3fff)) : uint16_t(rng() & 0x9fff);
+            const uint16_t slot3 = n % 7 == 0 ? uint16_t(0xc400 | (rng() & 0x03ff)) : uint16_t(rng() & 0x9fff);
+            words = {uint16_t(0xc800 | (rng() & 0x07ff)), uint16_t(rng()), slot2, slot3, uint16_t(rng())};
+            five += n % 7 == 0;
+        }
+        const auto llvm = block_reads(words, false);
+        const auto stencils = block_reads(words, true);
+        require(llvm.first == stencils.first, "a packet's halfwords read otherwise than LLVM's tier 0 reads them");
+        ++compared;
+    }
+    printf("cp_runtime_test: %u blocks read as LLVM's tier 0 reads them (%u with a 32-bit third slot)\n", compared,
+           five);
+}
+
+// Found in review: settings given while off were not applied when turned
+// on again with the same ones.
+void test_settings_while_off() {
+    Rig rig({});
+    rig.place(kCode, {words(kParallelA, 4)});
+    rig.run(kCode);
+    const CpRuntimeStats before = rig.core->cp_runtime_stats();
+    CpRuntimeSettings settings;
+    settings.range_lo = 1;
+    settings.range_hi = 0;  // nothing in range
+    settings.enable = false;
+    rig.core->set_copy_patch_runtime(settings);
+    settings.enable = true;
+    rig.core->set_copy_patch_runtime(settings);
+    rig.place(kCode + 0x100, {words(kParallelB, 4)});
+    rig.run(kCode + 0x100);
+    const CpRuntimeStats stats = rig.core->cp_runtime_stats();
+    require(stats.built == before.built && stats.reasons.count("outside the range") == 1,
+            "the range given while off was not applied");
+}
+
 void test_off() {
     CpRuntimeSettings settings;
     settings.enable = false;
@@ -283,6 +392,9 @@ int main() {
     test_off();
     test_no_field_holes();
     test_reads_end_at_the_block();
+    test_illegal_parallel_reads_two();
+    test_reads_as_llvm();
+    test_settings_while_off();
     printf("PASS\n");
     return 0;
 }
