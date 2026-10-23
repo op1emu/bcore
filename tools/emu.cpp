@@ -196,6 +196,10 @@ int main(int argc, char** argv) {
     // Initialize Core (JIT + translator)
     Core core(&cpu, &memory);
     if (dump_ir) core.set_dump_ir(true);
+    // The host address the IR adds a guest address to (FlatMemory's buffer
+    // less its guest base): run_diff_test.py --dump rewrites the constants
+    // near it relative to it, as they differ from run to run.
+    if (dump_ir) fprintf(stderr, "; host fast_base %llu\n", static_cast<unsigned long long>(memory.fast_base()));
     // Blocks run the next one themselves until a CEC event or a halt.
     core.set_chaining(chain);
     core.set_lazy_state(lazy_state);

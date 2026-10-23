@@ -15,7 +15,8 @@ included.
   # tiered compilation against untiered, one binary
   run_diff_test.py --base-flags "-O 1 --page-table --chain" \\
                    --flags "-O 1 --page-table --chain --tier-threshold 2"
-  # the IR each block compiles to (emu --dump), host addresses masked
+  # the IR each block compiles to (emu --dump), host addresses relative to
+  # the base emu reports
   run_diff_test.py --base-emu /path/to/old/emu --dump --flags "-O 2"
 
 A test that times out on both sides counts as the same: what it printed
@@ -74,9 +75,26 @@ VALUED = {"--tier-threshold", "--tier-background", "-O", "--opt-level", "--max-s
 
 # Lines that describe the run, not the guest: dropped before comparing.
 DEFAULT_IGNORE = [r"^copy-patch blocks=\d+ fallbacks=\d+$"]
-# Host addresses in --dump output (the JIT's arenas, FlatMemory's buffer):
-# decimal constants of 12 or more digits and hex of 9 or more.
-HOST_ADDRESS = re.compile(rb"\b\d{12,}\b|\b0x[0-9a-fA-F]{9,}\b")
+# Host addresses in --dump output: emu reports the one the IR adds guest
+# addresses to (FlatMemory's buffer less its guest base, which moves from run
+# to run), and the decimal constants within a guest address space of it (the
+# base plus a guest address, folded with small offsets) are rewritten as
+# B+offset. Every other constant, the guest's arithmetic included, is kept.
+HOST_BASE = re.compile(rb"^; host fast_base (\d+)$")
+NUMBER = re.compile(rb"(?<![-\w.])\d{10,}\b")
+HOST_BELOW, HOST_ABOVE = 1 << 32, 1 << 33
+
+
+def mask_host_addresses(text: bytes, base: Optional[int]) -> bytes:
+    if base is None:
+        return text
+
+    def mask(match: "re.Match[bytes]") -> bytes:
+        offset = int(match.group(0)) - base
+        if not -HOST_BELOW <= offset < HOST_ABOVE:
+            return match.group(0)
+        return b"B+%d" % offset if offset >= 0 else b"B-%d" % -offset
+    return NUMBER.sub(mask, text)
 
 
 class Colors:
@@ -109,45 +127,42 @@ class Outcome:
     returncode: Optional[int]
     digest: str               # of the compared output
     lines: int
-    truncated: bool
     head: List[str]           # the first lines that differ are looked up in these (--keep)
+    host_base: bool = True    # with --dump: whether emu reported its host base
 
 
 class Runner:
-    def __init__(self, timeout: float, ignore: List[re.Pattern], dump: bool, limit: int, keep_lines: int):
+    def __init__(self, timeout: float, ignore: List[re.Pattern], dump: bool, keep_lines: int):
         self.timeout = timeout
         self.ignore = ignore
         self.dump = dump
-        self.limit = limit
         self.keep_lines = keep_lines
 
     def run(self, emu: str, elf: Path, flags: List[str]) -> Outcome:
-        """Runs emu on elf, hashing stdout then stderr line by line as they
-        come: --dump output reaches gigabytes, of which at most `limit`
-        bytes are compared (both sides cut at the same point)."""
+        """Runs emu on elf, hashing stdout and stderr line by line as they
+        come: --dump output reaches gigabytes, all of it compared without
+        being kept (only the first keep_lines lines are, for -v)."""
         cmd = [emu, str(elf)] + flags
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        streams = {}
+        streams, host = {}, {}
 
         def drain(name, pipe):
-            h, n, size, cut, head = hashlib.sha1(), 0, 0, False, []
+            h, n, head = hashlib.sha1(), 0, []
             for line in pipe:
-                if cut:
-                    continue
-                if size + len(line) > self.limit:
-                    cut = True
-                    continue
-                size += len(line)
                 text = line.rstrip(b"\n")
                 if self.dump:
-                    text = HOST_ADDRESS.sub(b"N", text)
+                    found = HOST_BASE.match(text)
+                    if found:
+                        host["base"] = int(found.group(1))
+                        continue
+                    text = mask_host_addresses(text, host.get("base"))
                 if any(p.search(text.decode(errors="replace")) for p in self.ignore):
                     continue
                 h.update(text + b"\n")
                 n += 1
                 if len(head) < self.keep_lines:
                     head.append(text.decode(errors="replace"))
-            streams[name] = (h.hexdigest(), n, cut, head)
+            streams[name] = (h.hexdigest(), n, head)
 
         threads = [threading.Thread(target=drain, args=(name, pipe), daemon=True)
                    for name, pipe in (("out", proc.stdout), ("err", proc.stderr))]
@@ -160,12 +175,13 @@ class Runner:
             proc.wait()
             for t in threads:
                 t.join()
-            return Outcome("timeout", None, "", 0, False, [])
+            return Outcome("timeout", None, "", 0, [])
         for t in threads:
             t.join()
-        (out, n_out, cut_out, head_out), (err, n_err, cut_err, head_err) = streams["out"], streams["err"]
-        return Outcome("exit", proc.returncode, out + err, n_out + n_err, cut_out or cut_err,
-                       ["[stdout] " + l for l in head_out] + ["[stderr] " + l for l in head_err])
+        (out, n_out, head_out), (err, n_err, head_err) = streams["out"], streams["err"]
+        return Outcome("exit", proc.returncode, out + err, n_out + n_err,
+                       ["[stdout] " + l for l in head_out] + ["[stderr] " + l for l in head_err],
+                       not self.dump or "base" in host)
 
 
 def same(a: Outcome, b: Outcome) -> bool:
@@ -177,7 +193,7 @@ def same(a: Outcome, b: Outcome) -> bool:
 def describe(o: Outcome) -> str:
     if o.status == "timeout":
         return "timeout"
-    return f"rc={o.returncode} lines={o.lines}" + (" (cut)" if o.truncated else "")
+    return f"rc={o.returncode} lines={o.lines}" + ("" if o.host_base else " (no host base: an emu older than --dump's masking)")
 
 
 def first_difference(a: List[str], b: List[str]) -> Optional[Tuple[int, str, str]]:
@@ -239,7 +255,7 @@ def main() -> None:
     parser.add_argument("--count-packets", action="store_true",
                         help="compare the packets and returns too (emu --count-packets)")
     parser.add_argument("--dump", action="store_true",
-                        help="compare the IR of every block (emu --dump), host addresses masked")
+                        help="compare the IR of every block (emu --dump), host addresses relative to the base emu reports")
     parser.add_argument("--ignore", action="append", default=[], metavar="REGEX",
                         help="drop output lines matching REGEX before comparing (repeatable; "
                              "copy-patch statistics are always dropped)")
@@ -249,8 +265,6 @@ def main() -> None:
     parser.add_argument("-j", "--jobs", type=int, default=0,
                         help="tests run at once, each runs both sides (default: half the CPUs)")
     parser.add_argument("-t", "--timeout", type=float, default=60.0, help="seconds per run (default: 60)")
-    parser.add_argument("--limit-mb", type=int, default=256,
-                        help="bytes of output compared per run, in MiB (default: 256)")
     parser.add_argument("--keep-lines", type=int, default=2000,
                         help="lines kept per run to show where two differ, with -v (default: 2000)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show the first differing line")
@@ -300,7 +314,7 @@ def main() -> None:
         configs = [("compare", base + extra, flags + extra)]
 
     runner = Runner(args.timeout, [re.compile(p) for p in DEFAULT_IGNORE + args.ignore], args.dump,
-                    args.limit_mb << 20, args.keep_lines)
+                    args.keep_lines)
     jobs = args.jobs or max(1, (os.cpu_count() or 2) // 2)
     print(f"=== Blackfin emulator differential test: {len(files)} tests, {jobs} at once ===\n")
     total_diff = 0
