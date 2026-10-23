@@ -7,9 +7,15 @@
 // lifted as tools/stencilgen.cpp lifts every packet it builds
 // (BBTranslator::translate_stencil, at kPcA, cp_build.h), compiled for the
 // stencils' target, and kept for the process by its encoding: holes for its
-// PC and packet index only, so one stencil serves the packet wherever it
-// is. A packet that cannot be a stencil is kept too, as one without; its
-// blocks compile with LLVM.
+// PC and packet index only (no field holes: the encoding's immediates are
+// constants), so one stencil serves the packet wherever it is. A packet that
+// cannot be a stencil is kept too, as one without; its blocks compile with
+// LLVM.
+//
+// A translation stages each missing packet as it meets it: the packet is
+// lifted and checked at once, which says how long it is and whether it ends
+// the block (so the translator reads no further than the block goes), and
+// flush() then compiles every staged packet in one module.
 //
 // Checks, as the build's: the lift reads only the packet's halfwords and
 // keeps its length (or ends the block, as an illegal instruction does), its
@@ -83,13 +89,24 @@ public:
     bool configure(const Settings& settings);
     const Settings& settings() const { return settings_; }
 
-    // The packet's stencil, null if it has none; built, with every other
-    // packet of `packets` that has not been tried, in one module (a block's
-    // missing packets compile together).
+    // The packet's stencil, null if it has none (yet).
     const Record* find(const Packet& packet) const;
-    void build(const std::vector<Packet>& packets);
     // Tried before (whether or not it got a stencil).
     bool tried(const Packet& packet) const;
+    // A packet not tried, lifted and checked for the next flush(): its
+    // length and flags (kTerminates, kCycles, kIdle) if it may be a
+    // stencil, else ok false (refused, and kept so).
+    struct Staged {
+        bool ok = false;
+        uint8_t bytes = 0;
+        uint16_t flags = 0;
+    };
+    Staged stage(const Packet& packet);
+    // Compiles the staged packets in one module and keeps their stencils
+    // (or refusals); discard() drops them untried instead.
+    void flush();
+    void discard();
+    bool staged() const { return !pending_.empty(); }
 
     const Stats& stats() const { return stats_; }
     // A hash of the packet's encoding, for Settings::range_*.
@@ -105,11 +122,12 @@ private:
     using Key = std::pair<uint64_t, uint8_t>;
     static Key key_of(const Packet& p) { return {p.key(), p.count}; }
     void refuse(const Packet& packet, const std::string& why);
-    // Lifts packets into one module and compiles it: each one's lift (or
-    // why it was refused) and the module's code by function name; false if
-    // the module did not compile.
+    // Lifts and checks the packet into mod as `name`: why it cannot be a
+    // stencil, or empty.
     struct Lifted;
-    bool compile(const std::vector<Packet>& packets, std::vector<Lifted>& lifted, std::map<std::string, Code>& code);
+    std::string lift(llvm::Module& mod, const Packet& packet, const std::string& name, Lifted& out);
+    // Compiles mod: its code by function name; false if it did not compile.
+    bool compile(llvm::Module& mod, std::map<std::string, Code>& code);
 
     Settings settings_;
     std::unique_ptr<llvm::LLVMContext> context_;
@@ -118,6 +136,9 @@ private:
     std::unique_ptr<BBTranslator> translator_;
     std::unordered_map<Key, Entry, Hash> entries_;
     std::deque<Record> records_;
+    // Staged for the next flush: the module and its packets.
+    std::unique_ptr<llvm::Module> batch_;
+    std::vector<Lifted> pending_;
     mutable Stats stats_;
 };
 

@@ -8,7 +8,11 @@
 //     did (the same code and relocations as kStencils);
 //   - packets refused once are not tried again, and their blocks compile
 //     with LLVM;
-//   - off, a block with a parallel packet compiles with LLVM.
+//   - off, a block with a parallel packet compiles with LLVM;
+//   - a run-time stencil has no field holes (an immediate is a constant in
+//     its code);
+//   - a translation reads no more of a block than the packet that ends it,
+//     though that packet had no stencil yet.
 #include "core.h"
 #include "../src/cec.h"
 #include "../src/cp_format.h"
@@ -34,9 +38,10 @@ void require(bool ok, const std::string& why) {
 constexpr uint32_t kRam = 0x200000;
 constexpr uint32_t kCode = 0x10000;
 constexpr uint16_t kRts = 0x0010;
-// R0 = R1 + R2 (dsp32alu ADD32) || NOP || NOP, and R3 = R4 + R5 || [P0] = R0.
+// Two legal parallel packets: a dsp32alu ADD32 || NOP || NOP, and another
+// ADD32 || R3 = [P0++] || NOP (an 8-byte packet each).
 constexpr uint16_t kParallelA[4] = {0xcc04, 0x000a, 0x0000, 0x0000};
-constexpr uint16_t kParallelB[4] = {0xcc04, 0x165c, 0x0000, 0x9300};
+constexpr uint16_t kParallelB[4] = {0xcc04, 0x165c, 0x9003, 0x0000};
 // R0 = SIGNBITS R1 (dsp32shift), not one of cp_patterns.def.
 constexpr uint16_t kPlain32[2] = {0xc606, 0x0001};
 
@@ -126,9 +131,11 @@ void test_same_as_the_build() {
         p.count = 1;
         packets.push_back(p);
     }
-    for (size_t at = 0; at < packets.size(); at += 64)
-        rt.build(std::vector<bcore_cp::RuntimeStencils::Packet>(packets.begin() + at,
-                                                                packets.begin() + std::min(packets.size(), at + 64)));
+    for (size_t at = 0; at < packets.size(); at += 64) {
+        for (size_t i = at; i < std::min(packets.size(), at + 64); ++i)
+            require(rt.stage(packets[i]).ok, "16-bit " + std::to_string(packets[i].words[0]) + " refused");
+        rt.flush();
+    }
     size_t same = 0;
     for (const auto& p : packets) {
         const bcore_cp::Stencil& s = bcore_cp::kStencils[bcore_cp::kIndex16[p.words[0]] - 1];
@@ -167,6 +174,88 @@ void test_refused() {
 #endif
 }
 
+// R0.L = imm (LDIMMhalf, whose build stencils take the immediate from a
+// field hole): built at run time, the immediate is in the code.
+void test_no_field_holes() {
+    bcore_cp::RuntimeStencils rt;
+    require(rt.configure({}), "configure");
+    bcore_cp::RuntimeStencils::Packet a, b;
+    a.count = b.count = 2;
+    a.words[0] = b.words[0] = 0xe100;
+    a.words[1] = 0x1234;
+    b.words[1] = 0x4321;
+    require(rt.stage(a).ok && rt.stage(b).ok, "LDIMMhalf refused");
+    rt.flush();
+    const auto* ra = rt.find(a);
+    const auto* rb = rt.find(b);
+    require(ra && rb, "no LDIMMhalf stencils");
+    for (const auto* r : {ra, rb})
+        for (const auto& reloc : r->relocs)
+            require(reloc.hole < bcore_cp::kHoleField0 || reloc.hole >= bcore_cp::kHoleField0 + 4,
+                    "a run-time stencil with a field hole");
+    require(ra->code != rb->code, "two immediates, the same code");
+}
+
+// Halfwords a translation read, at the block's addresses.
+class ReadLog : public FlatMemory {
+public:
+    explicit ReadLog(CpuState* cpu) : FlatMemory(0, kRam, cpu) { enable_page_table(); }
+    mutable std::vector<uint32_t> reads;
+    uint16_t read16(uint32_t addr) const override {
+        if (addr >= kCode && addr < kCode + 0x100) reads.push_back(addr);
+        return FlatMemory::read16(addr);
+    }
+};
+
+void test_reads_end_at_the_block() {
+    // A 32-bit encoding without a build stencil that the lifter takes for
+    // an illegal instruction: a packet of 2 bytes that ends the block.
+    bcore_cp::RuntimeStencils probe;
+    require(probe.configure({}), "configure");
+    uint32_t illegal = 0;
+    for (uint32_t hi = 0xc000; hi < 0xf800 && !illegal; hi += 0x0101) {
+        bool is_parallel = (hi & 0x0800) && (hi & 0xe800) != 0xe800;
+        if (is_parallel) continue;
+        uint32_t p = 0;
+        const uint32_t insn = hi << 16 | 0xffff;
+        while (p < bcore_cp::kPatterns32Count &&
+               (insn & bcore_cp::kPatterns32[p].mask) != bcore_cp::kPatterns32[p].value)
+            ++p;
+        if (p < bcore_cp::kPatterns32Count && bcore_cp::kPatterns32[p].selected >= 0) continue;
+        bcore_cp::RuntimeStencils::Packet packet;
+        packet.count = 2;
+        packet.words[0] = uint16_t(hi);
+        packet.words[1] = 0xffff;
+        const auto staged = probe.stage(packet);
+        if (staged.ok && (staged.flags & bcore_cp::kTerminates) && staged.bytes == 2) illegal = insn;
+    }
+    require(illegal != 0, "no illegal 32-bit encoding found");
+    CpuState cpu{};
+    ReadLog mem(&cpu);
+    Core core(&cpu, &mem);
+    core.set_chaining(true, false);
+    core.set_tiering(0x7fffffff);
+    core.set_copy_patch(true);
+    require(core.init(1), "init");
+    mem.write16(kCode, uint16_t(illegal >> 16));
+    mem.write16(kCode + 2, uint16_t(illegal));
+    for (uint32_t a = kCode + 4; a < kCode + 0x40; a += 2) mem.write16(a, 0x0000);  // NOPs after it
+    cec_init();
+    evt_init();
+    cpu.chain_budget = 1;
+    mem.reads.clear();
+    try {
+        core.run(kCode);
+    } catch (...) {
+    }
+    for (uint32_t addr : mem.reads)
+        require(addr < kCode + 4, "the translation read past the packet that ends the block");
+    require(core.cp_runtime_stats().built == 1, "the illegal instruction's stencil was not built");
+#if BCORE_ENABLE_PROFILE
+    require(core.stats().copy_patch_blocks == 1, "its block was not made of stencils");
+#endif
+}
+
 void test_off() {
     CpRuntimeSettings settings;
     settings.enable = false;
@@ -192,6 +281,8 @@ int main() {
     test_same_as_the_build();
     test_refused();
     test_off();
+    test_no_field_holes();
+    test_reads_end_at_the_block();
     printf("PASS\n");
     return 0;
 }
