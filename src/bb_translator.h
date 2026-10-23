@@ -16,8 +16,12 @@ class Memory;
 struct CpuState;
 
 struct BBTranslateResult {
-    std::unique_ptr<llvm::Module> module;
+    // The context first: members are destroyed last to first, and a module
+    // must go before its context (found in a dropped promotion: Core
+    // returned without taking the module, which then went after its
+    // context).
     std::unique_ptr<llvm::LLVMContext> context;
+    std::unique_ptr<llvm::Module> module;
     uint32_t fallthrough_pc;
     // Where decoding ended the block (BcoreCompileMetrics::terminator): the
     // kind of its terminating instruction, or "packet-cap" (the 256-packet

@@ -9,6 +9,7 @@
 // found in review (below).
 #include "core.h"
 #include "bcore_profile.h"
+#include "../src/bb_translator.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
@@ -353,7 +354,17 @@ static void test_stale_promotion() {
     require(once(true) == once(false), "a stale promotion changed what ran");
 }
 
+// A translation's result left untaken, as Core leaves a promotion it drops
+// (its code read code the tier-0 block had not): the module goes before its
+// context (found: it went after it, a use after free; ASan says so).
+static void test_result_order() {
+    BBTranslateResult result;
+    result.context = std::make_unique<llvm::LLVMContext>();
+    result.module = std::make_unique<llvm::Module>("dropped", *result.context);
+}
+
 int main() {
+    test_result_order();
     test_throwing_callback();
     test_throwing_stencils();
     test_toggle_stencils();
