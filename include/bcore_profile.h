@@ -86,6 +86,12 @@ struct BcoreCompileMetrics {
     // sizes are 0), terminator "copy-patch", object_bytes its code's size,
     // object_hash over its stencils' code, relocations and hole values.
     bool copy_patch          = false;
+    // Core::set_copy_patch_runtime: of such a block's packets, those whose
+    // stencils were built at run time, and how many stencils this
+    // translation built (for an LLVM-compiled block: the ones it built
+    // before a packet with none sent it to LLVM).
+    uint32_t cp_runtime_packets = 0;
+    uint32_t cp_runtime_built   = 0;
 };
 
 // The worker thread's part of a promotion (Core::set_tier_background):

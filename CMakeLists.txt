@@ -55,6 +55,7 @@ add_library(bcore-lift STATIC
     src/bb_translator.cpp
     src/bb_stencil.cpp
     src/cp_build.cpp
+    src/cp_runtime.cpp
     src/packet_state.cpp
     src/guest_memory.cpp
     src/guest_speculation.cpp
@@ -309,6 +310,10 @@ if(BCORE_BUILD_FAULT_TESTS)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
         add_test(NAME bcore-cp-stencil-test COMMAND bcore-cp-stencil-test)
         set_tests_properties(bcore-cp-stencil-test PROPERTIES COST 70)
+        add_executable(bcore-cp-runtime-test tests/cp_runtime_test.cpp)
+        target_link_libraries(bcore-cp-runtime-test PRIVATE bfin-core)
+        target_include_directories(bcore-cp-runtime-test PRIVATE ${LLVM_INCLUDE_DIRS})
+        add_test(NAME bcore-cp-runtime-test COMMAND bcore-cp-runtime-test)
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
     set_tests_properties(bcore-loop-block-test PROPERTIES COST 300)
