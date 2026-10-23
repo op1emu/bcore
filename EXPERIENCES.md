@@ -586,6 +586,18 @@ happens outside the copy. LLVM 15 has no saturating RecurKind.
 - `cloneLoopWithPreheader` does not add the exit PHIs' entries: add them at
   once, and call removePredecessor where the copy's exits go, so the IR is
   valid on every path out of the transform.
+- The copy's stop test (the chain budget's atomic load) must go wherever it
+  is, the latch included: no pass deletes an ordered load, and LoopVectorize
+  refuses a loop with one ("read with atomic ordering"). With chained blocks
+  counted the latch is the hwloop's back edge and the test sits before it;
+  uncounted (Core::set_count_chained(false), op1emu's release build) the test
+  is the latch's own branch, which the copy's counting branch replaced and
+  left the load behind. The FIR loop then went unvectorized in every release
+  build from the start, while the profiling builds that measured it counted
+  chained blocks and were fine. LLVM said so only as "loop not vectorized:
+  the optimizer was unable to perform the requested transformation" on
+  stderr; the reason is a LoopVectorize analysis remark, which a
+  DiagnosticHandler on the context shows.
 
 Measured (boot to op1emu's main frame, workload and digests identical with
 and without loop blocks, and dry): host instructions in execution 57.8G ->
