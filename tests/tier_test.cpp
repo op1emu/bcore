@@ -70,7 +70,7 @@ struct Mode {
 // background: -1 promotions on this thread; else on the worker, published
 // after that many packets (0: as soon as the worker is done).
 static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"},
-                   uint32_t size_ref = 0) {
+                   uint32_t size_ref = 0, bool light = false) {
     CpuState cpu{};
     FlatMemory mem(0, 0x4000, &cpu);
     if (mode.paged) mem.enable_page_table();
@@ -79,6 +79,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_chaining(true, mode.dry);
     core.set_count_chained(mode.count);
     core.set_tiering(threshold, size_ref);
+    core.set_light_tier1(light);
     if (threshold) {
         CpRuntimeSettings runtime;
         runtime.enable = mode.runtime;
@@ -499,14 +500,20 @@ int main() {
             if ((mode.dry || !mode.count) && opt != 1) continue;
             const Outcome want = run(c, opt, 0, -1, mode);
             // Thresholds with and without a size_ref (1: a block of n
-            // packets n times the threshold).
-            for (auto [threshold, size_ref] : {std::pair{1u, 0u}, {2u, 0u}, {7u, 0u}, {1u, 1u}, {2u, 1u}})
+            // packets n times the threshold), and promotions with the light
+            // pipeline (Core::set_light_tier1).
+            struct Tiers {
+                uint32_t threshold, size_ref;
+                bool light;
+            };
+            for (const Tiers& t : {Tiers{1, 0, false}, {2, 0, false}, {7, 0, false}, {1, 1, false}, {2, 1, true}})
             for (int background : {-1, 0, 1, 50}) {
-                const Outcome got = run(c, opt, threshold, background, mode, size_ref);
+                const uint32_t threshold = t.threshold;
+                const Outcome got = run(c, opt, threshold, background, mode, t.size_ref, t.light);
                 if (!(got == want)) {
-                    fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u size_ref %u background %d: %zu/%zu runs\n",
-                            c.name, mode.name, opt, threshold, size_ref, background, want.runs.size(),
-                            got.runs.size());
+                    fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u size_ref %u%s background %d: %zu/%zu runs\n",
+                            c.name, mode.name, opt, threshold, t.size_ref, t.light ? " light" : "", background,
+                            want.runs.size(), got.runs.size());
                     for (size_t i = 0; i < want.runs.size() && i < got.runs.size(); ++i)
                         if (!(want.runs[i] == got.runs[i]))
                             fprintf(stderr, "  run %zu: pc %x/%x packets %u/%u chain %u/%u blocks %u/%u\n", i,

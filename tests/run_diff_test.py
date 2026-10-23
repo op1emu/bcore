@@ -57,6 +57,8 @@ MATRICES: Dict[str, List[Tuple[str, str]]] = {
         ("O2-t7-bg1", "-O 2 --page-table --chain --tier-threshold 7 --tier-background 1"),
         ("O1-cp-t1", "-O 1 --page-table --chain --tier-threshold 1 --copy-patch"),
         ("O1-cp-t2-ref2", "-O 1 --page-table --chain --tier-threshold 2 --tier-size-ref 2 --copy-patch"),
+        ("O1-cp-t1-light", "-O 1 --page-table --chain --tier-threshold 1 --tier1-pipeline light --copy-patch"),
+        ("O2-t2-bg1-light", "-O 2 --page-table --chain --tier-threshold 2 --tier-background 1 --tier1-pipeline light"),
     ],
     # The copy-and-patch tier 0 against LLVM's: the base runs without
     # --copy-patch. A threshold of 1e9 keeps every block at tier 0.
@@ -70,10 +72,10 @@ MATRICES: Dict[str, List[Tuple[str, str]]] = {
 # Flags the base side drops in each matrix (with their values).
 BASE_STRIP = {
     "standard": [],
-    "tiers": ["--tier-threshold", "--tier-size-ref", "--tier-background", "--copy-patch"],
+    "tiers": ["--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "--copy-patch"],
     "copy-patch": ["--copy-patch"],
 }
-VALUED = {"--tier-threshold", "--tier-size-ref", "--tier-background", "-O", "--opt-level", "--max-steps", "--post-pipeline"}
+VALUED = {"--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "-O", "--opt-level", "--max-steps", "--post-pipeline"}
 
 # Lines that describe the run, not the guest: dropped before comparing.
 DEFAULT_IGNORE = [r"^copy-patch blocks=\d+ fallbacks=\d+$", r"^cp-runtime "]

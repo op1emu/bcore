@@ -53,8 +53,11 @@ public:
     bool init(int opt_level, int codegen_level, bool split = true, bool stencil = false);
     // The IR pipeline, in place; at opt_level 0 only a loop block's guest
     // memory lowered (guest_memory.h). Every module goes through it before
-    // emit.
-    void optimize(llvm::Module& mod);
+    // emit. light: a module without a loop block gets kLightPipeline instead
+    // of the default pipeline (a promotion, Core::set_light_tier1): its
+    // straight-line code needs none of the module, inliner and loop passes.
+    void optimize(llvm::Module& mod, bool light = false);
+    static const char* const kLightPipeline;
     // The module's object file, from the backend; null if that fails. The
     // module is left as compiled.
     std::unique_ptr<llvm::MemoryBuffer> emit(llvm::Module& mod);

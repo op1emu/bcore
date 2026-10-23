@@ -117,7 +117,14 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) 
     return true;
 }
 
-void Compiler::optimize(llvm::Module& mod) {
+// What the default O1 pipeline does to a block's straight-line code, without
+// its module passes (IPSCCP, the inliner's CGSCC walk, globals), loop passes
+// and the per-function passes that find nothing there: about a tenth of a
+// promotion's compile time on the boot.
+const char* const Compiler::kLightPipeline =
+    "function(sroa,early-cse<memssa>,instcombine,simplifycfg,gvn,dse,adce,simplifycfg)";
+
+void Compiler::optimize(llvm::Module& mod, bool light) {
     if (opt_level_ == 0) {
         // No pipeline, but a loop block's guest memory still lowered to the
         // page table, as the pipeline would have (guest_memory.h).
@@ -183,7 +190,11 @@ void Compiler::optimize(llvm::Module& mod) {
         mam_.clear();
         fam_.clear();
     }
-    llvm::ModulePassManager mpm = pb_->buildPerModuleDefaultPipeline(lvl);
+    llvm::ModulePassManager mpm;
+    if (light && !loop_blocks)
+        llvm::cantFail(pb_->parsePassPipeline(mpm, kLightPipeline));
+    else
+        mpm = pb_->buildPerModuleDefaultPipeline(lvl);
     if (!post_pipeline_.empty())
         llvm::cantFail(pb_->parsePassPipeline(mpm, post_pipeline_));  // checked by set_post_pipeline
     mpm.run(mod, mam_);

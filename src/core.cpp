@@ -268,7 +268,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
     // from the initial commit on, a nonzero opt_level changed the printed IR
     // and never the executed code.
     if (opt_level_ != 0 && !tier0) {
-        compiler_->optimize(*result.module);
+        compiler_->optimize(*result.module, promote && light_tier1_);
 #if BCORE_ENABLE_PROFILE
         optimize_end = bcore_profile::monotonic_ns();
         if (want_ir) print(optimized_ir);
@@ -529,6 +529,7 @@ void Core::queue_promotion(Tier0Record& record, uint32_t counter) {
         job.generation = generation_;
         job.fallthrough_pc = result.fallthrough_pc;
         job.exit_kind = result.exit_kind;
+        job.light = light_tier1_;
         for (const llvm::Function& function : *result.module)
             if (!function.isDeclaration()) job.name = function.getName().str();
     }

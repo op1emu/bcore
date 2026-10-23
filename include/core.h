@@ -114,6 +114,11 @@ public:
     // more packets than that starts as many times more before it is
     // compiled again (tier_threshold in tier_table.h).
     void set_tiering(uint32_t threshold, uint32_t size_ref = 0);
+    // Promotions of blocks other than loop blocks optimized with
+    // Compiler::kLightPipeline rather than the default pipeline: cheaper to
+    // compile, for code that runs about as fast. Off by default; untiered
+    // compilations are not affected.
+    void set_light_tier1(bool light) { light_tier1_ = light; }
     // Tier 0 copies its blocks together from stencils built with the core
     // (cp_translator.h) where it can, microseconds where LLVM takes a
     // millisecond: blocks of 16-bit instructions and the common 32-bit ones
@@ -241,6 +246,7 @@ private:
     bool verify_ = true;
     uint32_t tier_threshold_ = 0;
     uint32_t tier_size_ref_ = 0;
+    bool light_tier1_ = false;
     bool copy_patch_ = false;
     std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
     CpRuntimeSettings cp_runtime_settings_;

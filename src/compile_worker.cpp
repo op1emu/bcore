@@ -77,7 +77,7 @@ CompileWorker::Result CompileWorker::compile(Job job) {
         result.end_ns = result.begin_ns;
         return result;
     }
-    compiler_->optimize(*job.module);
+    compiler_->optimize(*job.module, job.light);
     const ModuleCounts counts = count_module(*job.module);
     result.ir_instructions = counts.ir_instructions;
     result.ir_blocks = counts.ir_blocks;
