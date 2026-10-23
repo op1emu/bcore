@@ -158,8 +158,11 @@ python3 tests/run_diff_test.py --base-emu /path/to/old/emu --matrix standard --c
 # ... a setting against the same build without it (tiered against untiered,
 # copy-and-patch against LLVM's tier 0) ...
 python3 tests/run_diff_test.py --matrix tiers --count-packets
-# ... or the IR every block compiles to (emu --dump, host addresses masked)
+# ... or the IR every block compiles to (emu --dump; host addresses are
+# rewritten relative to the base emu reports, every other constant compared)
 python3 tests/run_diff_test.py --base-emu /path/to/old/emu --dump --flags "-O 2"
+# The differential runner's own tests
+python3 -m unittest tests/test_run_diff.py
 ```
 
 Current pass rate: **790 / 827** emulator tests, **827 / 827** disassembler comparison tests.

@@ -252,6 +252,7 @@ jobs:
       - name: Differential test (tiers against untiered, copy-and-patch against LLVM)
         if: ${{ !cancelled() }}
         run: |
+          python3 -m unittest tests/test_run_diff.py
           python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
             -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
           python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
