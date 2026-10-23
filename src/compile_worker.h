@@ -31,6 +31,7 @@ public:
         uint32_t fallthrough_pc = 0;
         std::string name;
         const char* exit_kind = "packet-cap";
+        bool light = false;  // Compiler::optimize's
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
     };

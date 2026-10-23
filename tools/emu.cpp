@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     bool loop_blocks = true;
     uint32_t tier_threshold = 0;
     uint32_t tier_size_ref = 0;
+    bool light_tier1 = false;
     bool copy_patch = false;
     CpRuntimeSettings cp_runtime;
     int tier_background = -1;  // -1 on the dispatching thread; else publish_after
@@ -69,6 +70,9 @@ int main(int argc, char** argv) {
             loop_blocks = false;
         } else if (strcmp(argv[i], "--tier-threshold") == 0 && i + 1 < argc) {
             tier_threshold = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
+        } else if (strcmp(argv[i], "--tier1-pipeline") == 0 && i + 1 < argc &&
+                   (!strcmp(argv[i + 1], "light") || !strcmp(argv[i + 1], "o1"))) {
+            light_tier1 = !strcmp(argv[++i], "light");
         } else if (strcmp(argv[i], "--tier-size-ref") == 0 && i + 1 < argc) {
             tier_size_ref = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--copy-patch") == 0) {
@@ -94,7 +98,7 @@ int main(int argc, char** argv) {
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N [--tier-size-ref N]] [--copy-patch [--no-cp-runtime] [--cp-runtime-opt N] [--cp-runtime-verify] [--cp-runtime-range LO:HI]] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N [--tier-size-ref N] [--tier1-pipeline light|o1]] [--copy-patch [--no-cp-runtime] [--cp-runtime-opt N] [--cp-runtime-verify] [--cp-runtime-range LO:HI]] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -220,6 +224,7 @@ int main(int argc, char** argv) {
     core.set_lazy_state(lazy_state);
     core.set_loop_blocks(loop_blocks);
     core.set_tiering(tier_threshold, tier_size_ref);
+    core.set_light_tier1(light_tier1);
     core.set_copy_patch_runtime(cp_runtime);
     core.set_copy_patch(copy_patch);
     if (tier_background >= 0) core.set_tier_background(true, static_cast<uint64_t>(tier_background));
