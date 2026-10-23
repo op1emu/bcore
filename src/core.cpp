@@ -660,9 +660,13 @@ void Core::set_copy_patch(bool enable) {
 
 void Core::set_copy_patch_runtime(const CpRuntimeSettings& settings) {
 #if BCORE_COPY_PATCH
-    const CpRuntimeSettings& old = cp_runtime_settings_;
-    const bool same = cp_runtime_ && old.opt == settings.opt && old.verify == settings.verify &&
-                      old.range_lo == settings.range_lo && old.range_hi == settings.range_hi;
+    // Against what the stencils kept were built with, which settings given
+    // while off did not change (found in review: turned off, given a new
+    // range and turned on again, it kept building with the old one).
+    const bool same = cp_runtime_ && cp_runtime_->settings().opt == settings.opt &&
+                      cp_runtime_->settings().verify == settings.verify &&
+                      cp_runtime_->settings().range_lo == settings.range_lo &&
+                      cp_runtime_->settings().range_hi == settings.range_hi;
     cp_runtime_settings_ = settings;
     if (settings.enable && !same) {
         if (!cp_runtime_) cp_runtime_ = std::make_unique<bcore_cp::RuntimeStencils>();
