@@ -733,6 +733,23 @@ of 45 IR instructions cost 1.8 ms.
   shared chain exit (3% of a boot's execution samples) and each packet
   compares the loop bottoms, calling bfin_hwloop_step at one (2.6%); the
   execution's host instructions still rose only 0.2%.
+- The rest, built at run time: on the boot to the main display the LLVM
+  tier 0 still had 7,831 blocks, 15.2 s of the CPU thread's 15.5 s of
+  compilation, for 8,562 distinct packets without stencils (6,919
+  parallel). Lifted and checked as the build lifts its own (no field holes:
+  one stencil per encoding) and compiled at -O0 in one module per block,
+  they cost 0.5 ms each; 24 LLVM blocks are left, and the CPU thread's
+  compile time fell 55% (15.0 to 6.7 s), the wall time 20.0 to 12.5 s.
+  Execution rose 7% (0.1 s): -O0 stencils, and every packet's state through
+  CpuState where LLVM's block kept it in registers. At -O2 (the build's
+  level) compilation was 3.5 times as long for 8% less execution.
+- Run time and build must lift the same: one StencilMemory and one check
+  procedure (cp_build), and at -O2 the run time builds 16-bit stencils
+  byte for byte as the build did (cp_runtime_test). Its lift must not read
+  past the packet: a stencil would hold what followed it.
+- A run-time stencil holds for any PC (the same IR lifted at two PCs) and
+  is kept for the process, past Core::invalidate; so is a refusal, so that
+  a packet that cannot be a stencil costs one try.
 - Found in review: code placed in an arena outside an object must live as
   long as the engine, since the cache and the chain table point into it
   (JitEngine keeps every arena it gave out); a tier that reaches RAM
