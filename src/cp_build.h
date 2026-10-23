@@ -105,6 +105,11 @@ inline constexpr uint32_t kPcB = 0xffa01234;
 // A function's IR, but for its attribute groups' numbers (a module numbers
 // them as functions come, and the checks lift one function after another).
 std::string ir_text(llvm::Function* fn);
+// Whether two functions of one module do the same, instruction for
+// instruction (llvm::FunctionComparator): the same operations on the same
+// constants and globals, names and branch weights aside. The run time's
+// check, in a fraction of the time printing both takes.
+bool same_ir(const llvm::Function& a, const llvm::Function& b);
 
 // ---- Holes ----
 
