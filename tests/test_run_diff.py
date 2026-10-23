@@ -114,7 +114,7 @@ class CompareTest(unittest.TestCase):
         self.assertTrue(rd.same(self.outcome(a), self.outcome(a)))
 
     def test_ignored_lines_dropped(self):
-        a = self.emu("a", "echo 'copy-patch blocks=3 fallbacks=1'\necho OK\n")
+        a = self.emu("a", "echo 'copy-patch blocks=3 fallbacks=1'\necho 'cp-runtime built=2 refused=0'\necho OK\n")
         b = self.emu("b", "echo OK\n")
         ignore = rd.DEFAULT_IGNORE
         self.assertTrue(rd.same(self.outcome(a, ignore=ignore), self.outcome(b, ignore=ignore)))
