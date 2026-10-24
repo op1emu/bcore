@@ -309,7 +309,7 @@ bool CpTranslator::place(Arena& arena, uint8_t* code, const Piece& piece, const 
     const int exit = !config.chaining ? 0 : config.dry ? (config.count_chained ? 4 : 3) : (config.count_chained ? 2 : 1);
     for (uint32_t i = 0; i < s.reloc_count; ++i) {
         const Reloc& r = piece.relocs[i];
-        if (r.offset >= piece.size) continue;  // in the dropped jump to the next packet
+        if (r.offset >= piece.size) continue;  // in the dropped jump to what follows
         uint64_t value = 0;
         if (r.hole < kHoleCont) {
             if (!value_of(piece, r, packet, field0, counter, value)) return false;
@@ -317,7 +317,9 @@ bool CpTranslator::place(Arena& arena, uint8_t* code, const Piece& piece, const 
             if (!next) return false;
             value = reinterpret_cast<uintptr_t>(code + next->at);
         } else if (r.hole == kHoleExit) {
-            value = reinterpret_cast<uintptr_t>(arena.exits[exit]);
+            value = reinterpret_cast<uintptr_t>(exit_piece_ >= 0 ? code + pieces_[exit_piece_].at : arena.exits[exit]);
+        } else if (r.hole == kHoleSelf) {
+            value = reinterpret_cast<uintptr_t>(code);
         } else if (r.hole >= kHoleHelper && r.hole < kHoleHelper + kHelperCount) {
             value = reinterpret_cast<uintptr_t>(arena.helpers[r.hole - kHoleHelper]);
         } else {
@@ -345,6 +347,8 @@ bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet,
         value = offsetof(TierTable, count) + 4 * uint64_t(counter);
     } else if (r.hole == kHoleThreshold) {
         value = threshold_;
+    } else if (r.hole == kHoleBlockPc) {
+        value = piece.pc;  // the exit's piece is the block's PC's
     } else {
         return false;
     }
@@ -356,7 +360,7 @@ uint64_t CpTranslator::code_hash(uint32_t counter) const {
     auto mix = [&](const void* data, size_t size) {
         for (size_t i = 0; i < size; ++i) h = (h ^ static_cast<const uint8_t*>(data)[i]) * 1099511628211ull;
     };
-    const uint64_t last_len = pieces_.size() > 1 ? pieces_[pieces_.size() - 2].stencil->bytes : 0;
+    const uint64_t last_len = last_len_;
     for (size_t i = 0; i < pieces_.size(); ++i) {
         const Piece& p = pieces_[i];
         const Stencil& s = *p.stencil;
@@ -378,11 +382,23 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     Block out;
     if (!scan(pc, code, config, out)) return out;
     threshold_ = out.threshold = tier_threshold(config.threshold, config.size_ref, out.packets);
+    // The packet the fall-through stencil follows: its length.
+    last_len_ = pieces_.size() > 1 ? pieces_[pieces_.size() - 2].stencil->bytes : 0;
+    exit_piece_ = -1;
+    if (config.self_loop && config.chaining && !config.dry) {
+        exit_piece_ = int(pieces_.size());
+        pieces_.push_back(CpTranslator::piece(kStencils[kSelfExits[config.count_chained]], pc, 0, -1));
+    }
     size_t total = 0;
     for (size_t i = 0; i < pieces_.size(); ++i) {
         Piece& p = pieces_[i];
         p.at = total;
-        p.size = p.stencil->size - ((p.stencil->flags & kTailCont) && i + 1 < pieces_.size() ? 5 : 0);
+        // The jump to what follows, where it does: the next packet, or the
+        // block's own exit.
+        const bool to_exit = exit_piece_ >= 0 && int(i) + 1 == exit_piece_;
+        const bool drop = to_exit ? (p.stencil->flags & kTailExit) != 0
+                                  : (p.stencil->flags & kTailCont) && i + 1 < pieces_.size();
+        p.size = p.stencil->size - (drop ? 5 : 0);
         total += p.size;
     }
     Arena* arena = arena_for(total + 16);
@@ -391,8 +407,7 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         out.why = "no room";
         return out;
     }
-    // The packet the fall-through stencil follows: its length.
-    const uint64_t last_len = pieces_.size() > 1 ? pieces_[pieces_.size() - 2].stencil->bytes : 0;
+    const uint64_t last_len = last_len_;
     for (size_t i = 0; i < pieces_.size(); ++i) {
         const Piece* next = i + 1 < pieces_.size() ? &pieces_[i + 1] : nullptr;
         const bool fallthrough = pieces_[i].stencil == &kStencils[kFallthrough] && i > 0;

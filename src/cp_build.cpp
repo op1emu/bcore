@@ -48,9 +48,11 @@ bool same_ir(const Function& a, const Function& b) {
 const char* const kHoleNames[kHoleCont] = {
     "bcore_hole_pc", "bcore_hole_packet", "bcore_hole_field0", "bcore_hole_field1", "bcore_hole_field2",
     "bcore_hole_field3", "bcore_hole_counter", "bcore_hole_count_offset", "bcore_hole_threshold",
+    "bcore_hole_block_pc",
 };
 const char* const kContName = "bcore_hole_cont";
 const char* const kExitName = "bcore_hole_exit";
+const char* const kSelfName = "bcore_hole_self";
 
 Constant* value_hole(Module& mod, Hole hole, uint64_t lo, uint64_t hi, Type* ty) {
     auto& ctx = mod.getContext();
@@ -96,6 +98,7 @@ int hole_of(StringRef name) {
         if (name == kHoleNames[i]) return i;
     if (name == kContName) return kHoleCont;
     if (name == kExitName) return kHoleExit;
+    if (name == kSelfName) return kHoleSelf;
     for (unsigned i = 0; i < kHelperCount; ++i)
         if (name == kHelpers[i]) return int(kHoleHelper + i);
     return -1;
@@ -207,5 +210,14 @@ bool tail_cont(const Code& c) {
     return last.hole == kHoleCont && last.kind == kPcRel32 && last.offset + 4u == c.bytes.size() &&
            c.bytes[c.bytes.size() - 5] == 0xe9 && last.addend == -4;
 }
+
+bool tail_exit(const Code& c) {
+    if (c.bytes.size() < 5 || c.relocs.empty()) return false;
+    const Reloc& last = c.relocs.back();
+    return last.hole == kHoleExit && last.kind == kPcRel32 && last.offset + 4u == c.bytes.size() &&
+           c.bytes[c.bytes.size() - 5] == 0xe9 && last.addend == -4;
+}
+
+uint16_t code_flags(const Code& c) { return (tail_cont(c) ? kTailCont : 0) | (tail_exit(c) ? kTailExit : 0); }
 
 }  // namespace bcore_cp

@@ -143,8 +143,11 @@ public:
     // The exit of a copy-and-patch block: its chain exit (set_chaining,
     // set_count_chained) with the next PC and the packet index the CpuState
     // holds, as a block's exit at a PC known only at run time; without
-    // chaining a return.
-    llvm::Function* emit_stencil_exit(llvm::Module& mod, const char* name);
+    // chaining a return. With block_pc and self (a value hole and a code
+    // hole), the exit of one block, placed after it: a next PC of
+    // block_pc goes on to self, the block's start, without the table.
+    llvm::Function* emit_stencil_exit(llvm::Module& mod, const char* name, llvm::Constant* block_pc = nullptr,
+                                      llvm::Function* self = nullptr);
     // A function of the blocks' type and convention (BbFunc, jit_engine.h).
     static llvm::Function* declare_block(llvm::Module& mod, const char* name);
     static void declare_externs(llvm::Module& mod);
@@ -170,11 +173,14 @@ private:
     static void emit_tier_counter(llvm::IRBuilder<>& b, llvm::Value* cpu, llvm::BasicBlock* first_entry,
                                   llvm::Value* counter, llvm::Value* count_offset, llvm::Value* threshold);
     static bool expand_loop_syncs(llvm::Function* fn, llvm::AllocaInst* shadow, llvm::Value* real, bool steady_skip);
-    // direct: a block whose return stays a return.
+    // direct: a block whose return stays a return. entry_pc_value: the
+    // entry PC a next PC known only at run time is compared with for
+    // self_loop (entry_pc where null).
     void emit_chain_exit(llvm::IRBuilder<>& b, llvm::Function* fn, llvm::Value* cpu, llvm::Value* real,
                          llvm::Value* mem,
                          uint32_t entry_pc, llvm::BasicBlock* self_loop, llvm::BasicBlock* direct,
-                         llvm::BasicBlock* first_entry, const std::set<llvm::ReturnInst*>* steady);
+                         llvm::BasicBlock* first_entry, const std::set<llvm::ReturnInst*>* steady,
+                         llvm::Value* entry_pc_value = nullptr);
     // A function's plain returns as one (tier 0).
     static void merge_returns(llvm::Function* fn);
     static llvm::BasicBlock* lb_guard_miss_block(llvm::BasicBlock* guard);

@@ -1,7 +1,10 @@
 // The chain table: which compiled blocks generated code may run next itself
-// (CpuState::chain_table, JitEngine::ChainSlot).
+// (CpuState::chain_table, JitEngine::ChainSlot). The chained runs also as
+// copy-and-patch blocks (opt kCopyPatch), whose own exit runs the block
+// again without the table (CpTranslator::Config::self_loop).
 #include "chain_table.h"
 #include "core.h"
+#include "bcore_profile.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
@@ -51,6 +54,9 @@ static void test_table(int opt) {
     require(core.run(kA) && slot(cpu, kA).pc == kB, "a filtered lookup leaves the slot");
 }
 
+// The copy-and-patch tier 0, as opt: blocks of stencils (tier 0 throughout).
+static constexpr int kCopyPatch = -1;
+
 struct Chained {
     CpuState cpu{};
     FlatMemory mem{0, 0x10000, &cpu};
@@ -58,7 +64,12 @@ struct Chained {
     explicit Chained(int opt, bool dry = false, bool host_cycles = false) {
         core.set_chaining(true, dry);
         core.set_host_cycles(host_cycles);
-        require(core.init(opt), "init");
+        if (opt == kCopyPatch) {
+            mem.enable_page_table();  // as copy-and-patch needs
+            core.set_tiering(0x7fffffff);
+            core.set_copy_patch(true);
+        }
+        require(core.init(opt == kCopyPatch ? 1 : opt), "init");
         cec_init(); evt_init();
     }
     void code(uint32_t pc, std::initializer_list<uint16_t> ops) {
@@ -249,6 +260,25 @@ static void test_refilter_self(int opt) {
             "no native loop once the filter rejects it");
 }
 
+// A hardware loop of one packet at its block's start runs while the budget
+// lasts, as the LLVM blocks' native loop: the same packets, iterations and
+// counts, however the budget falls.
+static void test_hwloop_self(int opt) {
+    for (uint32_t budget : {0u, 1u, 3u, 4u, 9u}) {
+        uint32_t got[2][6];
+        for (int side = 0; side < 2; ++side) {
+            Chained c(side ? opt : 1);
+            c.cpu.lt[0] = 0x400; c.cpu.lb[0] = 0x400; c.cpu.lc[0] = 4;
+            c.code(0x400, {kIncR0, 0x0010});  // one-packet hardware loop; RTS
+            c.cpu.rets = 0x800;
+            const uint32_t retired = c.run(0x400, budget);
+            uint32_t values[6] = {retired, c.cpu.dpregs[0], c.cpu.lc[0], c.cpu.pc, c.cpu.chain_blocks, c.cpu.did_jump};
+            for (int i = 0; i < 6; ++i) got[side][i] = values[i];
+        }
+        for (int i = 0; i < 6; ++i) require(got[0][i] == got[1][i], "a hardware loop at the start, as LLVM's");
+    }
+}
+
 // A pending interrupt returns to the host (which would check it).
 static void test_pending(int opt) {
     Chained c(opt);
@@ -330,7 +360,32 @@ int main() {
         test_host_cycles(opt);
         test_dry(opt);
         test_idle(opt);
+        test_hwloop_self(opt);
     }
+#if BCORE_COPY_PATCH_TEST
+    {
+        const int opt = kCopyPatch;
+        test_budget(opt);
+        test_table_chain(opt);
+        test_self_through_table(opt);
+        test_filtered_self(opt);
+        test_refilter(opt);
+        test_refilter_self(opt);
+        test_uncounted(opt);
+        test_helper_back_edge(opt);
+        test_pending(opt);
+        test_host_cycles(opt);
+        test_dry(opt);
+        test_idle(opt);
+        test_hwloop_self(opt);
+#if BCORE_ENABLE_PROFILE
+        Chained c(opt);
+        c.code(0x100, {kIncR0, 0x2fff});
+        c.run(0x100, 8);
+        require(c.core.stats().copy_patch_blocks == 1, "copy-and-patch blocks");
+#endif
+    }
+#endif
     printf("chain test passed\n");
     return 0;
 }

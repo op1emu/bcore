@@ -134,13 +134,24 @@ Function* BBTranslator::emit_stencil_prologue(Module& mod, const char* name, Con
     return fn;
 }
 
-Function* BBTranslator::emit_stencil_exit(Module& mod, const char* name) {
+Function* BBTranslator::emit_stencil_exit(Module& mod, const char* name, Constant* block_pc, Function* self) {
     auto* fn = stencil_function(mod, name);
     Value* cpu = fn->getArg(0);
     auto* entry = BasicBlock::Create(mod.getContext(), "entry", fn);
     IRBuilder<> b(entry);
     b.CreateRetVoid();
+    // The way back to the block's start, as a block's next does through the
+    // table: the chain exit's self path (the budget, the retired packets,
+    // did_jump), then its first stencil, the prologue, which counts the
+    // start and sets CYCLES.
+    BasicBlock* again = nullptr;
+    if (self && block_pc && chaining_ && unlimited_ && !chain_dry_) {
+        again = BasicBlock::Create(mod.getContext(), "self", fn);
+        IRBuilder<> at(again);
+        at.CreateUnreachable();
+        tail_call(again, self);
+    }
     if (chaining_ && unlimited_)
-        emit_chain_exit(b, fn, cpu, cpu, fn->getArg(1), 0, nullptr, nullptr, nullptr, nullptr);
+        emit_chain_exit(b, fn, cpu, cpu, fn->getArg(1), 0, again, again, nullptr, nullptr, again ? block_pc : nullptr);
     return fn;
 }

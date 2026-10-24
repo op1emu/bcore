@@ -1,8 +1,10 @@
 // A block's last instruction set did_jump itself: its epilog counts the
 // hardware loops down at a loop bottom (LiftVisitor::emit_epilog_jumped) as
 // bfin_hwloop_step does, however the loop registers have changed since the
-// block was compiled -- whether or not a loop ended there then.
+// block was compiled -- whether or not a loop ended there then. Also as a
+// copy-and-patch block (Core::set_copy_patch), whose stencils step inline.
 #include "core.h"
+#include "bcore_profile.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
@@ -34,13 +36,18 @@ static constexpr Ending kEndings[] = {
     {0x1080, "IF !CC JUMP", false, 0},
 };
 
-static unsigned test(int opt, bool chained, const Ending& e, bool hinted) {
+static unsigned test(int opt, bool chained, const Ending& e, bool hinted, bool copy_patch) {
     CpuState cpu{};
     FlatMemory mem(0, 0x1000, &cpu);
     mem.write16(kPc, e.op);
     mem.write16(kPc + 2, 0x2000);  // JUMP.S 0: ends a branch's fallthrough
     Core core(&cpu, &mem);
     core.set_chaining(chained, false);
+    if (copy_patch) {
+        mem.enable_page_table();  // as copy-and-patch needs
+        core.set_tiering(0x7fffffff);  // tier 0 throughout
+        core.set_copy_patch(true);
+    }
     require(core.init(opt), "init");
     cec_init(); evt_init();
 
@@ -49,6 +56,9 @@ static unsigned test(int opt, bool chained, const Ending& e, bool hinted) {
     cpu.lb[1] = kElsewhere;
     cpu.rets = cpu.dpregs[8] = kTarget;
     require(core.run(kPc), "compile");
+#if BCORE_COPY_PATCH_TEST && BCORE_ENABLE_PROFILE
+    if (copy_patch) require(core.stats().copy_patch_blocks == 1, "a copy-and-patch block");
+#endif
 
     unsigned cases = 0;
     for (unsigned bottoms = 0; bottoms < 4; ++bottoms)
@@ -85,9 +95,9 @@ static unsigned test(int opt, bool chained, const Ending& e, bool hinted) {
         require(core.run(kPc), "run");
         if (cpu.pc != expected.pc || cpu.lc[0] != expected.lc[0] || cpu.lc[1] != expected.lc[1] ||
             cpu.rets != expected.rets || cpu.did_jump != expected.did_jump) {
-            fprintf(stderr, "FAIL: -O%d%s %s compiled %s a bottom, bottoms=%u lc=%u,%u cc=%u: "
+            fprintf(stderr, "FAIL: -O%d%s%s %s compiled %s a bottom, bottoms=%u lc=%u,%u cc=%u: "
                             "pc=%x lc=%u,%u rets=%x did_jump=%d, expected pc=%x lc=%u,%u rets=%x did_jump=%d\n",
-                    opt, chained ? " chained" : "", e.name, hinted ? "at" : "not at", bottoms, lc0, lc1, cc,
+                    opt, chained ? " chained" : "", copy_patch ? " copy-patch" : "", e.name, hinted ? "at" : "not at", bottoms, lc0, lc1, cc,
                     cpu.pc, cpu.lc[0], cpu.lc[1], cpu.rets, cpu.did_jump,
                     expected.pc, expected.lc[0], expected.lc[1], expected.rets, expected.did_jump);
             std::exit(1);
@@ -103,7 +113,12 @@ int main() {
         for (bool chained : {false, true})
             for (const Ending& e : kEndings)
                 for (bool hinted : {false, true})
-                    cases += test(opt, chained, e, hinted);
+                    cases += test(opt, chained, e, hinted, false);
+#if BCORE_COPY_PATCH_TEST
+    for (bool chained : {false, true})
+        for (const Ending& e : kEndings)
+            cases += test(1, chained, e, false, true);
+#endif
     printf("hwloop jump test passed (%u cases)\n", cases);
     return 0;
 }

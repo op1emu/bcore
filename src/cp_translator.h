@@ -8,14 +8,19 @@
 // build's (the 16-bit instructions and the 32-bit patterns of
 // cp_patterns.def), or, with set_runtime, one built for the packet at run
 // time (cp_runtime.h: a parallel packet, any other 32-bit instruction). For
-// any other it places nothing and Core compiles the block with LLVM. Its code is, in order: the prologue (the tier counter,
-// and CYCLES with host cycles), each packet's stencil, and for a block the
-// packet cap cuts the fall-through stencil. A packet's path to the next
-// one is a jump to the next stencil, dropped where it is the stencil's
-// last instruction; every path that leaves the block jumps to the exit
-// stencil of its arena: the chain exit of a block whose next PC is known
-// only at run time (BBTranslator::emit_stencil_exit). Helpers are called
-// through jumps in the arena (a stencil's call is PC-relative).
+// any other it places nothing and Core compiles the block with LLVM. Its
+// code is, in order: the prologue (the tier counter, and CYCLES with host
+// cycles), each packet's stencil, for a block the packet cap cuts the
+// fall-through stencil, and, for a block that chains, its own exit
+// (Config::self_loop). A packet's path to the next one is a jump to the
+// next stencil, dropped where it is the stencil's last instruction, and so
+// is a last jump to the block's own exit; every path that leaves the block
+// jumps to that exit, or to the exit stencil of its arena: the chain exit
+// of a block whose next PC is known only at run time
+// (BBTranslator::emit_stencil_exit). A block's own exit runs the block
+// again without the chain table when its next PC is its own (a loop's back
+// edge). Helpers are called through jumps in the arena (a stencil's call is
+// PC-relative).
 //
 // What a block does is what the LLVM tier 0's block does, packet for
 // packet: each stencil is the packet a careful block with no hint lifts
@@ -54,6 +59,11 @@ public:
         bool count_chained = true;
         bool host_cycles = false;  // BBTranslator::set_host_cycles
         bool idle_waits = false;   // a block with IDLE then compiles with LLVM
+        // The block ends in an exit of its own (kSelfExits) that runs the
+        // block again without the chain table when it goes on to its own PC:
+        // only where it chains and not dry, and where the chain filter
+        // takes the block's PC (Core::set_chain_filter).
+        bool self_loop = false;
         uint32_t threshold = 0;    // the tier counter's
         uint32_t size_ref = 0;     // and tier_threshold's (tier_table.h), by the block's packets
         uint32_t max_packets = 256;
@@ -138,6 +148,8 @@ private:
     static Piece piece(const bcore_cp::Stencil& s, uint32_t pc, uint32_t insn, int selected);
 
     uint32_t threshold_ = 0;  // the last block's tier counter's (Block::threshold)
+    uint64_t last_len_ = 0;   // the length of the packet the fall-through stencil follows
+    int exit_piece_ = -1;     // the block's own exit (Config::self_loop): its piece, or -1
     JitEngine& jit_;
     bcore_cp::RuntimeStencils* runtime_ = nullptr;
     std::function<void(const char*, const void*, size_t)> listener_;

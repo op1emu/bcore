@@ -25,8 +25,10 @@ enum Hole : uint8_t {
     kHoleCounter = kHoleField0 + 4,  // the block's tier counter (prologue)
     kHoleCountOffset, // the counter's count's offset in the TierTable
     kHoleThreshold,   // the tier threshold
+    kHoleBlockPc,     // the block's PC (its exit, kSelfExits)
     kHoleCont,        // the next packet's code
-    kHoleExit,        // the block's exit (the arena's exit stencil)
+    kHoleExit,        // the block's exit (its own, kSelfExits, or the arena's exit stencil)
+    kHoleSelf,        // the block's code (its exit, kSelfExits)
     kHoleHelper,      // kHoleHelper + i: the helper kHelpers[i]
 };
 
@@ -60,6 +62,9 @@ enum StencilFlags : uint16_t {
     kCycles = 2,      // reads or writes CYCLES: the block's prologue sets them (host cycles)
     kIdle = 4,        // IDLE, compiled as idle_waits off has it (Core::set_idle_waits)
     kTailCont = 8,    // the code ends in a jmp rel32 to the next packet, which may be dropped
+    // The code ends in a jmp rel32 to the block's exit, which may be dropped
+    // where the exit follows (kSelfExits).
+    kTailExit = 16,
 };
 
 struct Stencil {
@@ -117,6 +122,10 @@ extern const uint32_t kPatterns32Count;
 extern const Selected32 kSelected32[];
 extern const uint32_t kPrologue[2];  // without, with host cycles
 extern const uint32_t kExits[5];     // return; chain; count chained; dry; dry, count chained
+// A chaining block's own exit, at its end (CpTranslator::Config::self_loop):
+// to its own start when its next PC is its own, through the chain table
+// otherwise. Without, with chained blocks counted.
+extern const uint32_t kSelfExits[2];
 // Where a block cut at its last packet goes on (pc the next PC, field 0
 // the packet's length, packet its index): stores them and exits.
 extern const uint32_t kFallthrough;

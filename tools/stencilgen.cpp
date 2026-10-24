@@ -308,7 +308,7 @@ struct Blob {
         s.code = uint32_t(code.size());
         s.size = uint16_t(c.bytes.size());
         s.flags = flags;
-        if (tail_cont(c)) s.flags |= kTailCont;
+        s.flags |= code_flags(c);
         s.relocs = uint32_t(relocs.size());
         s.reloc_count = uint16_t(c.relocs.size());
         s.bytes = bytes;
@@ -456,7 +456,7 @@ int main(int argc, char** argv) {
 
     // The prologues and exits.
     Blob blob;
-    std::vector<uint32_t> prologue(2), exits(5);
+    std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
     uint32_t fallthrough = 0;
     std::string special_error;
     {
@@ -477,6 +477,15 @@ int main(int argc, char** argv) {
             worker.translator().set_chaining(e > 0, e >= 3);
             worker.translator().set_count_chained(e == 2 || e == 4);
             worker.translator().emit_stencil_exit(mod, names[e]);
+        }
+        // A block's own exits: chaining, without and with chained blocks counted.
+        const char* self_names[] = {"exit_self", "exit_self_count"};
+        auto* block_pc = value_hole(mod, kHoleBlockPc, 0, 1ull << 32, i32);
+        auto* self = code_hole(mod, kSelfName);
+        for (int e = 0; e < 2; ++e) {
+            worker.translator().set_chaining(true, false);
+            worker.translator().set_count_chained(e == 1);
+            worker.translator().emit_stencil_exit(mod, self_names[e], block_pc, self);
         }
         // A block cut at its last packet (BBTranslator's packet cap) leaves
         // with the next PC and the packet's length and index stored, as a
@@ -509,6 +518,7 @@ int main(int argc, char** argv) {
         prologue[0] = add("prologue");
         prologue[1] = add("prologue_cycles");
         for (int e = 0; e < 5; ++e) exits[e] = add(names[e]);
+        for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e]);
         fallthrough = add("fallthrough");
     }
     if (!special_error.empty()) {
@@ -588,6 +598,7 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kPrologue[2] = {%u, %u};  // host cycles off, on\n", prologue[0], prologue[1]);
     fprintf(f, "const uint32_t kExits[5] = {%u, %u, %u, %u, %u};  // return, chain, count, dry, dry count\n",
             exits[0], exits[1], exits[2], exits[3], exits[4]);
+    fprintf(f, "const uint32_t kSelfExits[2] = {%u, %u};  // chain, count\n", self_exits[0], self_exits[1]);
     fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
     fprintf(f, "}  // namespace bcore_cp\n");
     fclose(f);
