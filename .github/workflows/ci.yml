@@ -203,12 +203,18 @@ jobs:
           # Tiered compilation (promotions on the worker) against untiered,
           # and (diff-copy-patch) the copy-and-patch tier 0 against LLVM's:
           # every test's exit code, output, packets and returns the same (one
-          # binary, two sets of flags). One configuration of each matrix: the
-          # whole matrices take about 40 CPU-minutes.
+          # binary, two sets of flags). A few configurations of each matrix:
+          # the whole matrices take about 40 CPU-minutes.
           - suite: diff-tiers
             run: |
               python3 -m unittest tests/test_run_diff.py
               python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
+                -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
+          # op1emu's tiering: size-scaled thresholds, and the light tier-1
+          # pipeline over copy-and-patch tier 0.
+          - suite: diff-tiers-ref-light
+            run: |
+              python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
                 -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
           - suite: diff-copy-patch
             run: |
