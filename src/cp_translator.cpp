@@ -157,7 +157,7 @@ void CpTranslator::RunScope::rethrow() {
 }
 
 CpTranslator::Piece CpTranslator::piece(const Stencil& s, uint32_t pc, uint32_t insn, int selected) {
-    return {&s, kCode + s.code, kRelocs + s.relocs, pc, insn, selected, 0, 0};
+    return {&s, kCode + s.code, kRelocs + s.relocs, pc, insn, selected, 0, 0, kCode + s.cold, kRelocs + s.cold_relocs, 0};
 }
 
 bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& out) {
@@ -228,7 +228,8 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
                 }
                 if (found.record) {
                     const auto* r = found.record;
-                    piece = {&r->stencil, r->code.data(), r->relocs.data(), cur, insn, -1, 0, 0};
+                    piece = {&r->stencil, r->code.data(), r->relocs.data(), cur, insn, -1, 0, 0,
+                             r->cold.data(), r->cold_relocs.data(), 0};
                     out.runtime_packets++;
                 } else {
                     // Not known yet in the first pass: lifted now, its
@@ -292,7 +293,7 @@ CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
     for (int e = 0; e < 5; ++e) {
         const Stencil& s = kStencils[kExits[e]];
         uint8_t* at = arena->allocate(CodeArena::Region::Hot, s.size, 16);
-        if (!at || s.reloc_count) return nullptr;  // the exits' code fills in nothing
+        if (!at || s.reloc_count || s.cold_size) return nullptr;  // the exits' code fills in nothing, in one piece
         memcpy(at, kCode + s.code, s.size);
         a->exits[e] = at;
         if (listener_) listener_("bcore_cp_exit", at, s.size);
@@ -301,33 +302,45 @@ CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
     return arenas_.back().get();
 }
 
-bool CpTranslator::place(Arena& arena, uint8_t* code, const Piece& piece, const Piece* next, uint32_t packet,
-                         uint64_t field0, uint32_t counter, const Config& config) {
+bool CpTranslator::place(Arena& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next,
+                         uint32_t packet, uint64_t field0, uint32_t counter, const Config& config) {
     const Stencil& s = *piece.stencil;
-    uint8_t* at = code + piece.at;
-    memcpy(at, piece.code, piece.size);
+    uint8_t* hot_at = code + piece.at;
+    uint8_t* cold_at = cold + piece.cold_at;
+    memcpy(hot_at, piece.code, piece.size);
+    if (s.cold_size) memcpy(cold_at, piece.cold, s.cold_size);
     const int exit = !config.chaining ? 0 : config.dry ? (config.count_chained ? 4 : 3) : (config.count_chained ? 2 : 1);
-    for (uint32_t i = 0; i < s.reloc_count; ++i) {
-        const Reloc& r = piece.relocs[i];
-        if (r.offset >= piece.size) continue;  // in the dropped jump to what follows
-        uint64_t value = 0;
-        if (r.hole < kHoleCont) {
-            if (!value_of(piece, r, packet, field0, counter, value)) return false;
-        } else if (r.hole == kHoleCont) {
-            if (!next) return false;
-            value = reinterpret_cast<uintptr_t>(code + next->at);
-        } else if (r.hole == kHoleExit) {
-            value = reinterpret_cast<uintptr_t>(exit_piece_ >= 0 ? code + pieces_[exit_piece_].at : arena.exits[exit]);
-        } else if (r.hole == kHoleSelf) {
-            value = reinterpret_cast<uintptr_t>(code);
-        } else if (r.hole >= kHoleHelper && r.hole < kHoleHelper + kHelperCount) {
-            value = reinterpret_cast<uintptr_t>(arena.helpers[r.hole - kHoleHelper]);
-        } else {
-            return false;
+    // Each part's relocations; the hot part's last jump may be dropped.
+    auto fill = [&](uint8_t* at, const Reloc* relocs, uint32_t count, size_t size) {
+        for (uint32_t i = 0; i < count; ++i) {
+            const Reloc& r = relocs[i];
+            if (r.offset >= size) continue;  // in the dropped jump to what follows
+            uint64_t value = 0;
+            if (r.hole < kHoleCont) {
+                if (!value_of(piece, r, packet, field0, counter, value)) return false;
+            } else if (r.hole == kHoleCont) {
+                if (!next) return false;
+                value = reinterpret_cast<uintptr_t>(code + next->at);
+            } else if (r.hole == kHoleExit) {
+                value = reinterpret_cast<uintptr_t>(exit_piece_ >= 0 ? code + pieces_[exit_piece_].at : arena.exits[exit]);
+            } else if (r.hole == kHoleSelf) {
+                value = reinterpret_cast<uintptr_t>(code);
+            } else if (r.hole == kHoleHot) {
+                value = reinterpret_cast<uintptr_t>(hot_at);  // the place there in the addend
+            } else if (r.hole == kHoleCold) {
+                if (!s.cold_size) return false;
+                value = reinterpret_cast<uintptr_t>(cold_at);
+            } else if (r.hole >= kHoleHelper && r.hole < kHoleHelper + kHelperCount) {
+                value = reinterpret_cast<uintptr_t>(arena.helpers[r.hole - kHoleHelper]);
+            } else {
+                return false;
+            }
+            if (!patch(at, r, value)) return false;
         }
-        if (!patch(at, r, value)) return false;
-    }
-    return true;
+        return true;
+    };
+    return fill(hot_at, piece.relocs, s.reloc_count, piece.size) &&
+           fill(cold_at, piece.cold_relocs, s.cold_reloc_count, s.cold_size);
 }
 
 bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet, uint64_t field0,
@@ -367,13 +380,18 @@ uint64_t CpTranslator::code_hash(uint32_t counter) const {
         mix(p.code, p.size);
         const bool fallthrough = p.stencil == &kStencils[kFallthrough] && i > 0;
         const uint32_t packet = fallthrough ? uint32_t(i - 1) : uint32_t(i);
-        for (uint32_t k = 0; k < s.reloc_count; ++k) {
-            const Reloc& r = p.relocs[k];
-            if (r.offset >= p.size) continue;
-            mix(&r, sizeof r);
-            uint64_t value = 0;
-            if (r.hole < kHoleCont && value_of(p, r, packet, last_len, counter, value)) mix(&value, sizeof value);
-        }
+        auto relocs = [&](const Reloc* relocs, uint32_t count, size_t size) {
+            for (uint32_t k = 0; k < count; ++k) {
+                const Reloc& r = relocs[k];
+                if (r.offset >= size) continue;
+                mix(&r, sizeof r);
+                uint64_t value = 0;
+                if (r.hole < kHoleCont && value_of(p, r, packet, last_len, counter, value)) mix(&value, sizeof value);
+            }
+        };
+        relocs(p.relocs, s.reloc_count, p.size);
+        mix(p.cold, s.cold_size);
+        relocs(p.cold_relocs, s.cold_reloc_count, s.cold_size);
     }
     return h ? h : 1;
 }
@@ -389,10 +407,12 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         exit_piece_ = int(pieces_.size());
         pieces_.push_back(CpTranslator::piece(kStencils[kSelfExits[config.count_chained]], pc, 0, -1));
     }
-    size_t total = 0;
+    size_t total = 0, cold_total = 0;
     for (size_t i = 0; i < pieces_.size(); ++i) {
         Piece& p = pieces_[i];
         p.at = total;
+        p.cold_at = cold_total;
+        cold_total += p.stencil->cold_size;
         // The jump to what follows, where it does: the next packet, or the
         // block's own exit.
         const bool to_exit = exit_piece_ >= 0 && int(i) + 1 == exit_piece_;
@@ -401,9 +421,10 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         p.size = p.stencil->size - (drop ? 5 : 0);
         total += p.size;
     }
-    Arena* arena = arena_for(total + 16);
+    Arena* arena = arena_for(total + cold_total + 16);
     uint8_t* at = arena ? arena->arena->allocate(CodeArena::Region::Hot, total, 16) : nullptr;
-    if (!at) {
+    uint8_t* cold = at && cold_total ? arena->arena->allocate(CodeArena::Region::Cold, cold_total, 16) : nullptr;
+    if (!at || (cold_total && !cold)) {
         out.why = "no room";
         return out;
     }
@@ -412,14 +433,17 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         const Piece* next = i + 1 < pieces_.size() ? &pieces_[i + 1] : nullptr;
         const bool fallthrough = pieces_[i].stencil == &kStencils[kFallthrough] && i > 0;
         const uint32_t packet = fallthrough ? uint32_t(i - 1) : uint32_t(i);
-        if (!place(*arena, at, pieces_[i], next, packet, last_len, counter, config)) {
+        if (!place(*arena, at, cold, pieces_[i], next, packet, last_len, counter, config)) {
             // Filled with int3: the code is never run (nothing points at it).
             memset(at, 0xcc, total);
+            if (cold) memset(cold, 0xcc, cold_total);
             out.why = "relocation";
             return out;
         }
     }
     out.fn = reinterpret_cast<BbFunc>(at);
     out.size = total;
+    out.cold = cold;
+    out.cold_size = cold_total;
     return out;
 }

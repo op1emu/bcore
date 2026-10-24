@@ -154,13 +154,19 @@ void test_same_as_the_build() {
         const auto* r = rt.find(p).record;
         require(r != nullptr, "no stencil for 16-bit " + std::to_string(p.words[0]));
         const bool code = r->code.size() == s.size && !memcmp(r->code.data(), bcore_cp::kCode + s.code, s.size);
-        bool relocs = r->relocs.size() == s.reloc_count;
-        for (size_t i = 0; relocs && i < r->relocs.size(); ++i) {
-            const auto& a = r->relocs[i];
-            const auto& b = bcore_cp::kRelocs[s.relocs + i];
-            relocs = a.offset == b.offset && a.hole == b.hole && a.kind == b.kind && a.addend == b.addend;
-        }
-        require(code && relocs && r->stencil.flags == s.flags && r->stencil.bytes == s.bytes,
+        const bool cold = r->cold.size() == s.cold_size && !memcmp(r->cold.data(), bcore_cp::kCode + s.cold, s.cold_size);
+        auto same_relocs = [](const std::vector<bcore_cp::Reloc>& got, uint32_t first, uint32_t count) {
+            bool same = got.size() == count;
+            for (size_t i = 0; same && i < got.size(); ++i) {
+                const auto& a = got[i];
+                const auto& b = bcore_cp::kRelocs[first + i];
+                same = a.offset == b.offset && a.hole == b.hole && a.kind == b.kind && a.addend == b.addend;
+            }
+            return same;
+        };
+        const bool relocs = same_relocs(r->relocs, s.relocs, s.reloc_count) &&
+                            same_relocs(r->cold_relocs, s.cold_relocs, s.cold_reloc_count);
+        require(code && cold && relocs && r->stencil.flags == s.flags && r->stencil.bytes == s.bytes,
                 "16-bit " + std::to_string(p.words[0]) + ": not the build's stencil");
         ++same;
     }

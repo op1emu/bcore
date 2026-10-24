@@ -29,6 +29,8 @@ enum Hole : uint8_t {
     kHoleCont,        // the next packet's code
     kHoleExit,        // the block's exit (its own, kSelfExits, or the arena's exit stencil)
     kHoleSelf,        // the block's code (its exit, kSelfExits)
+    kHoleHot,         // the stencil's own hot code, from its cold code (Stencil::cold)
+    kHoleCold,        // the stencil's own cold code, from its hot code
     kHoleHelper,      // kHoleHelper + i: the helper kHelpers[i]
 };
 
@@ -67,6 +69,11 @@ enum StencilFlags : uint16_t {
     kTailExit = 16,
 };
 
+// Its code is in two parts: the hot code, which the translator lays out
+// one stencil after the other, and the cold code (the machine function
+// splitter's, the paths behind rare branches), which it puts in the code
+// arena's cold region; each part branches to the other through kHoleHot and
+// kHoleCold, the place in the other part in the addend.
 struct Stencil {
     uint32_t code;         // offset in the code blob
     uint16_t size;
@@ -75,6 +82,10 @@ struct Stencil {
     uint16_t reloc_count;
     uint8_t bytes;         // the packet's length in bytes
     uint8_t reserved;
+    uint32_t cold;         // the cold code: offset in the blob, size (0 for none), relocations
+    uint16_t cold_size;
+    uint16_t cold_reloc_count;
+    uint32_t cold_relocs;
 };
 
 // A 32-bit field hole's value from the instruction: bits [lsb, lsb + bits),

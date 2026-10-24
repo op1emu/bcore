@@ -205,7 +205,7 @@ std::unique_ptr<llvm::MemoryBuffer> Compiler::emit(llvm::Module& mod) {
     // For the splitter only, after the IR pipeline (see init()).
     if (split_)
         for (llvm::Function& function : mod)
-            if (!function.isDeclaration()) function.setEntryCount(kEntryCount);
+            if (!function.isDeclaration() && !function.hasFnAttribute(kNoSplitAttr)) function.setEntryCount(kEntryCount);
     object_.clear();
     backend_->run(mod);
     if (object_.empty()) return nullptr;

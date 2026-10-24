@@ -135,12 +135,16 @@ void make_local(llvm::Module& mod);
 struct Code {
     std::vector<uint8_t> bytes;
     std::vector<Reloc> relocs;
+    std::vector<uint8_t> cold;  // the cold code (Stencil::cold) and its relocations
+    std::vector<Reloc> cold_relocs;
     std::string error;  // why the code cannot be a stencil
 };
 
 // The hole a relocation's symbol names, or -1.
 int hole_of(llvm::StringRef name);
-// The code of each function of an object (one .text section), by name.
+// The code of each function of an object, by name: its section's or its
+// part of .text, and its cold part (the splitter's .text.split.<name>,
+// which Compiler's stencil mode makes).
 std::map<std::string, Code> extract(const llvm::MemoryBuffer& buffer);
 // The code ends in a jmp rel32 to the next packet, which the translator
 // drops where the next packet follows (kTailCont).

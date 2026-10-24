@@ -62,7 +62,7 @@ bool RuntimeStencils::configure(const Settings& settings) {
     if (!rebuild) return true;
     translator_.reset();
     compiler_ = std::make_unique<Compiler>();
-    if (!compiler_->init(settings.opt, settings.opt, /*split=*/false, /*stencil=*/true)) {
+    if (!compiler_->init(settings.opt, settings.opt, /*split=*/settings.opt > 0, /*stencil=*/true)) {
         compiler_.reset();
         return false;
     }
@@ -228,7 +228,7 @@ void RuntimeStencils::flush() {
             refuse(l.packet, c.error);
             continue;
         }
-        if (c.relocs.size() > 0xffff) {
+        if (c.relocs.size() > 0xffff || c.cold_relocs.size() > 0xffff) {
             refuse(l.packet, "too many relocations");
             continue;
         }
@@ -238,14 +238,15 @@ void RuntimeStencils::flush() {
             Lifted again;
             Packet packet = l.packet;
             std::map<std::string, Code> own;
+            auto same_relocs = [](const std::vector<Reloc>& a, const std::vector<Reloc>& b) {
+                return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](const Reloc& x, const Reloc& y) {
+                           return x.offset == y.offset && x.hole == y.hole && x.kind == y.kind && x.addend == y.addend;
+                       });
+            };
             const bool same = lift(alone, packet, l.name, again).empty() && compile(alone, own) &&
-                              own.count(l.name) && own[l.name].bytes == c.bytes &&
-                              own[l.name].relocs.size() == c.relocs.size() &&
-                              std::equal(c.relocs.begin(), c.relocs.end(), own[l.name].relocs.begin(),
-                                         [](const Reloc& x, const Reloc& y) {
-                                             return x.offset == y.offset && x.hole == y.hole && x.kind == y.kind &&
-                                                    x.addend == y.addend;
-                                         });
+                              own.count(l.name) && own[l.name].bytes == c.bytes && own[l.name].cold == c.cold &&
+                              same_relocs(own[l.name].relocs, c.relocs) &&
+                              same_relocs(own[l.name].cold_relocs, c.cold_relocs);
             if (!same) {
                 refuse(l.packet, "verify: its code depends on its batch");
                 continue;
@@ -256,11 +257,15 @@ void RuntimeStencils::flush() {
         r.stencil.flags = uint16_t(l.flags | code_flags(c));
         r.stencil.reloc_count = uint16_t(c.relocs.size());
         r.stencil.bytes = l.bytes;
+        r.stencil.cold_size = uint16_t(c.cold.size());
+        r.stencil.cold_reloc_count = uint16_t(c.cold_relocs.size());
         r.code = std::move(c.bytes);
         r.relocs = std::move(c.relocs);
+        r.cold = std::move(c.cold);
+        r.cold_relocs = std::move(c.cold_relocs);
         entries_[l.packet] = Entry{&r, false};
         stats_.built++;
-        stats_.code_bytes += r.code.size();
+        stats_.code_bytes += r.code.size() + r.cold.size();
     }
 }
 

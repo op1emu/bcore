@@ -38,6 +38,9 @@ ModuleCounts count_module(const llvm::Module& mod);
 // thread that compiles has a Compiler of its own.
 class Compiler {
 public:
+    // A function the splitter leaves whole (it gets no entry count): code
+    // copied as one piece (the copy-and-patch exits an arena shares).
+    static constexpr const char* kNoSplitAttr = "bcore-no-split";
     Compiler();
     ~Compiler();
     Compiler(const Compiler&) = delete;

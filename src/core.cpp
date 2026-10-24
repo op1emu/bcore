@@ -208,6 +208,13 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
                 char name[32];
                 snprintf(name, sizeof name, "bb_0x%08x%s", pc, careful ? ".careful" : "");
                 profile_->recordCodeLoad(name, reinterpret_cast<const void*>(block.fn), block.size);
+                // Its cold code, apart in the arena, named as LLVM's split parts are.
+                if (block.cold_size) {
+                    profile_->recordBlock((uint64_t(1) << 62) | reinterpret_cast<uintptr_t>(block.cold),
+                                          reinterpret_cast<uintptr_t>(block.cold), block.cold_size, pc, /*variant=*/1);
+                    snprintf(name, sizeof name, "bb_0x%08x%s.cold", pc, careful ? ".careful" : "");
+                    profile_->recordCodeLoad(name, block.cold, block.cold_size);
+                }
             }
             profile_->stats.translate_ns_total += t1 - t0;
             profile_->stats.blocks_translated++;
@@ -217,7 +224,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
                 sink->onCompileStage(pc, "materialize", t1, t1, true);
                 if (want_metrics) {
                     BcoreCompileMetrics metrics;
-                    metrics.object_bytes = block.size;
+                    metrics.object_bytes = block.size + block.cold_size;
                     metrics.object_hash = cp_->code_hash(tier.counter);
                     metrics.terminator = "copy-patch";
                     metrics.tier = 0;
