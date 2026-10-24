@@ -127,6 +127,9 @@ struct CpuState {
     // cycles_base + chain_packets first, as a host that writes CYCLES before
     // every block would.
     uint64_t cycles_base;
+    // Not guest state: a parallel packet's slots 1 and 2 keep their register
+    // writes here for the packet's commit (copy-and-patch, cp_translator.h).
+    uint32_t slot_scratch[2][8];
 };
 
 // ASTAT bit positions (from refs/bfin-sim.h)

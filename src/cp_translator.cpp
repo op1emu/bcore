@@ -164,7 +164,7 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
     words_.clear();
     // Each halfword read from code once: a second pass reads it again here.
     bool again = false;
-    auto read = [&](uint32_t addr) {
+    std::function<uint16_t(uint32_t)> read = [&](uint32_t addr) -> uint16_t {
         if (again)
             for (const auto& [a, w] : words_)
                 if (a == addr) return w;
@@ -187,17 +187,18 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             out.why = why;
             return false;
         };
+        uint32_t packet_index = 0, last_bytes = 0;
         for (uint32_t k = 0; k < config.max_packets; ++k) {
+            const uint32_t index = ++packet_index;
             const uint16_t w = read(cur);
             uint32_t id = 0, insn = w;
             int selected = -1;
             bcore_cp::RuntimeStencils::Packet packet;
             packet.words[0] = w;
             packet.count = 1;
+            const char* why = nullptr;
             if (is16(w)) {
                 id = kIndex16[w];
-            } else if (is_parallel(w) && !runtime_) {
-                return fail("parallel");
             } else {
                 // The decoder reads the second halfword of anything not
                 // 16-bit; a parallel packet's further ones only as its
@@ -205,13 +206,29 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
                 packet.words[1] = read(cur + 2);
                 packet.count = 2;
                 insn = uint32_t(w) << 16 | packet.words[1];
-                const int p = is_parallel(w) ? -1 : match32(insn);
+                const int p = match32(insn);
                 if (p >= 0 && kPatterns32[p].selected >= 0) {
                     selected = kPatterns32[p].selected;
                     const Selected32& sel = kSelected32[selected];
                     id = kKeys32[sel.keys + gather(insn, sel.key_mask)];
-                } else if (p < 0 && !is_parallel(w)) {
-                    id = kUndef32 + 1;
+                } else if (p < 0) {
+                    id = kUndef32 + 1;  // slot 0 too: the packet the decoder abandons
+                }
+                // A parallel packet whose slot 0 takes the instruction: its
+                // pieces (BBTranslator::translate_stencil_body).
+                if (id && (kStencils[id - 1].flags & kBody)) {
+                    const uint32_t first = uint32_t(pieces_.size());
+                    if (compose_parallel(cur, insn, selected, kStencils[id - 1], code, read, index, why)) {
+                        for (size_t i = first; i < pieces_.size(); ++i)
+                            cycles |= (pieces_[i].stencil->flags & kCycles) != 0;
+                        cur += 8;
+                        last_bytes = 8;
+                        continue;
+                    }
+                    pieces_.resize(first);
+                    if (!runtime_) return fail(why);
+                    id = 0;
+                    selected = -1;
                 }
             }
             Piece piece{};
@@ -220,7 +237,7 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             if (id) {
                 piece = CpTranslator::piece(kStencils[id - 1], cur, insn, selected);
             } else if (!runtime_) {
-                return fail(packet.count == 2 ? "32-bit" : "no stencil");
+                return fail(packet.count == 2 ? (is_parallel(w) ? "parallel" : "32-bit") : "no stencil");
             } else {
                 auto found = runtime_->find(packet);
                 while (found.more && packet.count < bcore_cp::StencilMemory::kMaxWords) {
@@ -252,15 +269,20 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             }
             if ((flags & kIdle) && config.idle_waits) return fail("idle");
             cycles |= (flags & kCycles) != 0;
+            piece.packet = index;
             if (piece.stencil) pieces_.push_back(piece);
             cur += bytes;
+            last_bytes = bytes;
             if (flags & kTerminates) break;
         }
         if (!staging) {
             out.fallthrough_pc = cur;
-            out.packets = uint32_t(pieces_.size() - 1);
-            if (!(pieces_.back().stencil->flags & kTerminates))
+            out.packets = packet_index;
+            last_len_ = last_bytes;
+            if (!(pieces_.back().stencil->flags & kTerminates)) {
                 pieces_.push_back(CpTranslator::piece(kStencils[kFallthrough], cur, 0, -1));
+                pieces_.back().packet = packet_index;  // the last packet's
+            }
             pieces_[0] = CpTranslator::piece(kStencils[kPrologue[config.host_cycles && cycles]], pc, 0, -1);
             return true;
         }
@@ -271,6 +293,44 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
     }
     out.why = "no stencil at run time";
     return false;
+}
+
+bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, const Stencil& body, Memory& code,
+                                    const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why) {
+    if (!code.callbacks_preserve_registers()) {
+        why = "parallel: callbacks may change registers";
+        return false;
+    }
+    const uint16_t s1 = read(pc + 4), s2 = read(pc + 6);
+    if (!is16(s1) || !is16(s2)) {
+        why = "parallel: a slot of 32 bits";
+        return false;
+    }
+    const unsigned algn = (body.flags & kSetsDisAlgn) ? 1 : 0;
+    const SlotEntry& e1 = kSlots[(algn * 2) * 2][s1];
+    if (!e1.stencil) {
+        why = "parallel: no stencil for slot 1";
+        return false;
+    }
+    const Stencil& st1 = kStencils[e1.stencil - 1];
+    const SlotEntry& e2 = kSlots[(algn * 2 + ((st1.flags & kDjUnknown) ? 1 : 0)) * 2 + 1][s2];
+    if (!e2.stencil) {
+        why = "parallel: no stencil for slot 2";
+        return false;
+    }
+    const Stencil& st2 = kStencils[e2.stencil - 1];
+    const unsigned tail = ((st2.flags & kDjUnknown) ? 2 : 0) + (((st1.flags | st2.flags) & kSlotStore) ? 1 : 0);
+    auto add = [&](const Stencil& s, uint32_t word, int sel) {
+        pieces_.push_back(CpTranslator::piece(s, pc, word, sel));
+        pieces_.back().packet = packet;
+    };
+    if (!(st1.flags & kNop)) add(st1, 0, -1);
+    if (!(st2.flags & kNop)) add(st2, 0, -1);
+    add(body, insn, selected);
+    if (e1.commit) add(kStencils[e1.commit - 1], 0, -1);
+    if (e2.commit) add(kStencils[e2.commit - 1], 0, -1);
+    add(kStencils[kParallelTail[tail]], 0, -1);
+    return true;
 }
 
 CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
@@ -382,8 +442,7 @@ uint64_t CpTranslator::code_hash(uint32_t counter) const {
         const Piece& p = pieces_[i];
         const Stencil& s = *p.stencil;
         mix(p.code, p.size);
-        const bool fallthrough = p.stencil == &kStencils[kFallthrough] && i > 0;
-        const uint32_t packet = fallthrough ? uint32_t(i - 1) : uint32_t(i);
+        const uint32_t packet = p.packet;
         auto relocs = [&](const Reloc* relocs, uint32_t count, size_t size) {
             for (uint32_t k = 0; k < count; ++k) {
                 const Reloc& r = relocs[k];
@@ -404,8 +463,6 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     Block out;
     if (!scan(pc, code, config, out)) return out;
     threshold_ = out.threshold = tier_threshold(config.threshold, config.size_ref, out.packets);
-    // The packet the fall-through stencil follows: its length.
-    last_len_ = pieces_.size() > 1 ? pieces_[pieces_.size() - 2].stencil->bytes : 0;
     exit_piece_ = -1;
     if (config.self_loop && config.chaining && !config.dry) {
         exit_piece_ = int(pieces_.size());
@@ -435,9 +492,7 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     const uint64_t last_len = last_len_;
     for (size_t i = 0; i < pieces_.size(); ++i) {
         const Piece* next = i + 1 < pieces_.size() ? &pieces_[i + 1] : nullptr;
-        const bool fallthrough = pieces_[i].stencil == &kStencils[kFallthrough] && i > 0;
-        const uint32_t packet = fallthrough ? uint32_t(i - 1) : uint32_t(i);
-        if (!place(*arena, at, cold, pieces_[i], next, packet, last_len, counter, config)) {
+        if (!place(*arena, at, cold, pieces_[i], next, pieces_[i].packet, last_len, counter, config)) {
             // Filled with int3: the code is never run (nothing points at it).
             memset(at, 0xcc, total);
             if (cold) memset(cold, 0xcc, cold_total);
