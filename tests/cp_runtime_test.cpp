@@ -54,8 +54,8 @@ constexpr uint16_t kRts = 0x0010;
 // ADD32 || R3 = [P0++] || NOP (an 8-byte packet each).
 constexpr uint16_t kParallelA[4] = {0xcc04, 0x000a, 0x0000, 0x0000};
 constexpr uint16_t kParallelB[4] = {0xcc04, 0x165c, 0x9003, 0x0000};
-// R0 = SIGNBITS R1 (dsp32shift), not one of cp_patterns.def.
-constexpr uint16_t kPlain32[2] = {0xc606, 0x0001};
+// And ADD32 || R3 = [P0++] || NOP, a third.
+constexpr uint16_t kParallelC[4] = {0xcc04, 0x000a, 0x9003, 0x0000};
 
 struct Rig {
     CpuState cpu{};
@@ -95,9 +95,9 @@ std::vector<uint16_t> words(const uint16_t* w, size_t n) { return std::vector<ui
 
 void test_once_per_encoding() {
     Rig rig({});
-    rig.place(kCode, {words(kParallelA, 4), words(kPlain32, 2), {0x0000}});
+    rig.place(kCode, {words(kParallelA, 4), words(kParallelC, 4), {0x0000}});
     rig.place(kCode + 0x100, {{0x0000}, words(kParallelA, 4)});
-    rig.place(kCode + 0x200, {words(kPlain32, 2), words(kParallelA, 4), words(kParallelB, 4)});
+    rig.place(kCode + 0x200, {words(kParallelC, 4), words(kParallelA, 4), words(kParallelB, 4)});
     rig.run(kCode);
     const CpRuntimeStats first = rig.core->cp_runtime_stats();
     require(first.built == 2 && first.batches == 1, "a block's two missing packets: two stencils, one module");
@@ -121,7 +121,7 @@ void test_verify() {
     CpRuntimeSettings settings;
     settings.verify = true;
     Rig rig(settings);
-    rig.place(kCode, {words(kParallelA, 4), words(kParallelB, 4), words(kPlain32, 2)});
+    rig.place(kCode, {words(kParallelA, 4), words(kParallelB, 4), words(kParallelC, 4)});
     rig.run(kCode);
     const CpRuntimeStats stats = rig.core->cp_runtime_stats();
     require(stats.built == 3 && stats.refused == 0, "a stencil's code depends on its batch");
@@ -226,10 +226,8 @@ public:
 };
 
 void test_reads_end_at_the_block() {
-    // A 32-bit encoding without a build stencil that the lifter takes for
-    // an illegal instruction: a packet of 2 bytes that ends the block.
-    bcore_cp::RuntimeStencils probe;
-    require(probe.configure({}), "configure");
+    // A 32-bit encoding no pattern takes: the undefined instruction, a
+    // packet of 2 bytes that ends the block (the build's kUndef32).
     uint32_t illegal = 0;
     for (uint32_t hi = 0xc000; hi < 0xf800 && !illegal; hi += 0x0101) {
         bool is_parallel = (hi & 0x0800) && (hi & 0xe800) != 0xe800;
@@ -239,15 +237,9 @@ void test_reads_end_at_the_block() {
         while (p < bcore_cp::kPatterns32Count &&
                (insn & bcore_cp::kPatterns32[p].mask) != bcore_cp::kPatterns32[p].value)
             ++p;
-        if (p < bcore_cp::kPatterns32Count && bcore_cp::kPatterns32[p].selected >= 0) continue;
-        bcore_cp::RuntimeStencils::Packet packet;
-        packet.count = 2;
-        packet.words[0] = uint16_t(hi);
-        packet.words[1] = 0xffff;
-        const auto staged = probe.stage(packet, nullptr);
-        if (staged.ok && (staged.flags & bcore_cp::kTerminates) && staged.bytes == 2) illegal = insn;
+        if (p == bcore_cp::kPatterns32Count) illegal = insn;
     }
-    require(illegal != 0, "no illegal 32-bit encoding found");
+    require(illegal != 0, "no undefined 32-bit encoding found");
     CpuState cpu{};
     ReadLog mem(&cpu);
     Core core(&cpu, &mem);
@@ -268,7 +260,7 @@ void test_reads_end_at_the_block() {
     }
     for (uint32_t addr : mem.reads)
         require(addr < kCode + 4, "the translation read past the packet that ends the block");
-    require(core.cp_runtime_stats().built == 1, "the illegal instruction's stencil was not built");
+    require(core.cp_runtime_stats().built == 0, "the undefined instruction's stencil was built at run time");
 #if BCORE_ENABLE_PROFILE
     require(core.stats().copy_patch_blocks == 1, "its block was not made of stencils");
 #endif
