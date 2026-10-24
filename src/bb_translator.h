@@ -162,17 +162,16 @@ public:
     //     packet's;
     //   - a slot's commit: its writes from the scratch to the registers;
     //   - the packet's tail at pc: its epilog with the CEC check or not.
-    // A slot and the tail are lifted with did_jump known clear at their
-    // start, as at a packet's, or not (did_jump_unknown: after a slot that
-    // left it so, StencilLift::did_jump_clear).
+    // A slot and the tail start with did_jump known clear, as a packet does
+    // (a slot leaves it so, StencilLift::did_jump_clear: the build checks).
     StencilLift translate_stencil_body(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
                                        bool parallel);
     StencilLift translate_slot_stencil(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
-                                       int slot, bool dis_algn, bool did_jump_unknown);
+                                       int slot, bool dis_algn);
     static llvm::Function* emit_slot_commit(llvm::Module& mod, const char* name, int slot,
                                             const std::vector<LiftVisitor::SlotWrite>& writes, llvm::Function* cont);
     StencilLift translate_parallel_tail(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
-                                        bool check_cec, bool did_jump_unknown);
+                                        bool check_cec);
     // A copy-and-patch block's start: its tier counter (emit_tier_counter,
     // with holes for the counter, its count's offset and the threshold),
     // CYCLES with host_cycles (emit_host_cycles), then a musttail call of cont.

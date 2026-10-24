@@ -241,19 +241,19 @@ bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, co
         return false;
     }
     const unsigned algn = (body.flags & kSetsDisAlgn) ? 1 : 0;
-    const SlotEntry& e1 = kSlots[(algn * 2) * 2][s1];
+    const SlotEntry& e1 = kSlots[algn * 2][s1];
     if (!e1.stencil) {
         why = "parallel: no stencil for slot 1";
         return false;
     }
     const Stencil& st1 = kStencils[e1.stencil - 1];
-    const SlotEntry& e2 = kSlots[(algn * 2 + ((st1.flags & kDjUnknown) ? 1 : 0)) * 2 + 1][s2];
+    const SlotEntry& e2 = kSlots[algn * 2 + 1][s2];
     if (!e2.stencil) {
         why = "parallel: no stencil for slot 2";
         return false;
     }
     const Stencil& st2 = kStencils[e2.stencil - 1];
-    const unsigned tail = ((st2.flags & kDjUnknown) ? 2 : 0) + (((st1.flags | st2.flags) & kSlotStore) ? 1 : 0);
+    const unsigned tail = ((st1.flags | st2.flags) & kSlotStore) ? 1 : 0;
     auto add = [&](const Stencil& s, uint32_t word, int sel) {
         pieces_.push_back(CpTranslator::piece(s, pc, word, sel));
         pieces_.back().packet = packet;

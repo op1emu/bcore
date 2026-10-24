@@ -865,10 +865,11 @@ packet in the build:
   writing one (seven patterns do: the accumulator ABS and SAT forms and
   SEARCH; they are lifted as a parallel packet's, writes at the end).
 - The lifter's knowledge that did_jump is clear is part of what it emits:
-  it loses it where a memory access's fast and slow paths meet, and the
-  packet's tail lifted with it clear is not the tail lifted without. So a
-  slot after one that left it unknown, and the tail, have a variant each
-  way (kDjUnknown). Not knowing is always right, only slower.
+  the packet's tail lifted with it clear is not the tail lifted without.
+  It used to lose it where a memory access's fast and slow paths meet (see
+  below), so a slot after one that left it unknown, and the tail, had a
+  variant each way; now every slot leaves it known clear, and stencilgen
+  refuses one that does not.
 - A slot is 16 bits the decoder takes in it: most 16-bit ALU instructions
   are legal in slot 1 here, so a slot writes up to 8 fields (the ASTAT
   bits too), not the 2 a load writes.
@@ -898,4 +899,25 @@ Result on the boot to the main display (6 pairs): the CPU thread's compile
 time 5.25 to 0.45 s, execution -9.7%, JIT CPU 9.8 to 4.9 s, work the same.
 The library: 90,666 stencils, 23.9 MB of code, stencilgen 99 s with 10
 jobs; its tables as text would have taken the compiler a gigabyte.
+
+### did_jump across a memory access, for a Memory that keeps nothing
+
+The stencils are lifted against a Memory that does not promise its
+callbacks keep the registers (so they hold for any Memory): where a memory
+access's fast and slow paths met, the lifter dropped its whole register
+cache, and with it the mark that did_jump is clear. But the slow path
+exits when its call sets did_jump, and the fast path cannot set it: after
+the access did_jump is what it was before. Losing the mark made every
+stencil packet with a memory access end in the generic epilog, a call of
+bfin_hwloop_step, instead of the inline one (the loop bottom compares,
+no call); and 15,024 slot 1 and 1,216 slot 2 words left it unknown for
+what followed. LLVM's tier 0 and 1 never lost it: op1emu's Memory keeps
+the registers, and the whole cache carries over.
+
+Keeping the mark across the merge: no slot leaves did_jump unknown (the
+variants for it, and two of the four tails, are gone): 90,666 to 89,091
+stencils, the code 23.9 to 24.6 MB (the inline epilogs are longer than a
+call). On the boot to the main display (6 pairs) execution -22.0%, host
+instructions -12.0%, compile +1.7%; in the synthesizer phase (4 pairs)
+execution -20.3%. Work the same at every mark.
 
