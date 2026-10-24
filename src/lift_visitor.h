@@ -90,6 +90,19 @@ public:
     // the lift used.
     const uint32_t* field_values() const { return field_values_; }
     unsigned fields_used() const { return fields_used_; }
+    // Register holes (stencil mode): data register r is regs[r] where that
+    // is set, an i64 offset in CpuState the translator fills in, so that a
+    // stencil holds for every value of the register fields it came from.
+    // They are read and written in program order and never cached (two
+    // holes may be one register). A lift that reaches a mapped register any
+    // other way (its offset as a constant, a parallel packet's shadow, a
+    // loop block's) sets reg_hole_violation(): its stencil would be wrong
+    // for other registers.
+    void set_stencil_regs(llvm::Constant* const* regs) {
+        for (unsigned i = 0; i < 8; ++i) stencil_regs_[i] = regs ? regs[i] : nullptr;
+        reg_hole_violation_ = false;
+    }
+    bool reg_hole_violation() const { return reg_hole_violation_; }
     // Loop mode (BBTranslator's loop blocks): the visitor's cpu pointer is a
     // shadow copy of the guest state the block keeps in an alloca, and `real`
     // the CpuState the host and the helpers see. The shadow holds the fields
@@ -710,6 +723,9 @@ private:
     llvm::Constant* stencil_pc_ = nullptr;  // set_stencil
     uint32_t stencil_base_ = 0;
     llvm::Constant* stencil_fields_[kFieldHoles] = {};
+    llvm::Constant* stencil_regs_[8] = {};  // set_stencil_regs
+    bool reg_hole_violation_ = false;
+    llvm::Value* reg_hole_ptr(uint32_t idx);
     uint32_t field_values_[kFieldHoles] = {};
     unsigned fields_used_ = 0;
     bool careful_ = false;

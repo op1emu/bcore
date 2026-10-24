@@ -97,6 +97,8 @@ bool LiftVisitor::shadowable(size_t offset) {
 }
 
 Value* LiftVisitor::cpu_field_ptr(size_t offset, Type* ty, const Twine& name) {
+    if (offset < offsetof(CpuState, dpregs) + 32 && stencil_regs_[(offset - offsetof(CpuState, dpregs)) / 4])
+        reg_hole_violation_ = true;
     if (auto [it, fresh] = field_first_pc_.emplace(offset, packet_pc_); !fresh && packet_pc_ < it->second)
         it->second = packet_pc_;
     Value* base = real_cpu_ && !shadowed(offset) ? real_cpu_ : cpu_ptr_;
@@ -351,7 +353,13 @@ void LiftVisitor::on_parallel_end() {
     parallel_slot_ = 0;
 }
 
+Value* LiftVisitor::reg_hole_ptr(uint32_t idx) {
+    if (in_parallel_ || real_cpu_) reg_hole_violation_ = true;  // their shadows key on offsets
+    return builder_.CreateGEP(builder_.getInt8Ty(), cpu_ptr_, stencil_regs_[idx], "reg_hole");
+}
+
 Value* LiftVisitor::load_dreg(uint32_t idx, const Twine& name) {
+    if (idx < 8 && stencil_regs_[idx]) return builder_.CreateLoad(builder_.getInt32Ty(), reg_hole_ptr(idx), name);
     return load_cpu_u32(offsetof(CpuState, dpregs) + idx * 4, name);
 }
 
@@ -361,6 +369,15 @@ Value* LiftVisitor::load_preg(uint32_t idx, const Twine& name) {
 
 
 void LiftVisitor::store_dreg(uint32_t idx, Value* val) {
+    if (idx < 8 && stencil_regs_[idx]) {
+        builder_.CreateStore(val, reg_hole_ptr(idx));
+        // It may be any data register: none of them is known any more.
+        auto* cache = reg_cache_here();
+        if (!cache && builder_.GetInsertBlock()) cache = &reg_cache_[builder_.GetInsertBlock()];
+        if (cache)
+            for (unsigned r = 0; r < 8; ++r) cache->erase(offsetof(CpuState, dpregs) + 4 * r);
+        return;
+    }
     store_cpu_u32(offsetof(CpuState, dpregs) + idx * 4, val);
 }
 
@@ -8683,7 +8700,7 @@ bool LiftVisitor::decode_dsp32shiftimm_A1_ROT(
 // Checks (allreg(grp,regtest) >> shift) & 0xffff == expected; halts on mismatch.
 static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
                                 llvm::Value* did_jump_base, llvm::Value* real_cpu,
-                                llvm::Value* reg_val, uint32_t expected, uint32_t shift) {
+                                llvm::Value* reg_val, llvm::Value* expected, uint32_t shift) {
     auto& ctx = B.getContext();
     auto* fn = B.GetInsertBlock()->getParent();
     auto* bb_fail = llvm::BasicBlock::Create(ctx, "dbga_fail", fn);
@@ -8691,7 +8708,7 @@ static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
 
     auto* shifted = B.CreateLShr(reg_val, B.getInt32(shift), "shifted");
     auto* actual  = B.CreateAnd(shifted, B.getInt32(0xffff), "actual");
-    auto* mismatch = B.CreateICmpNE(actual, B.getInt32(expected & 0xffff), "mismatch");
+    auto* mismatch = B.CreateICmpNE(actual, B.CreateAnd(expected, B.getInt32(0xffff)), "mismatch");
     B.CreateCondBr(mismatch, bb_fail, bb_ok);
 
     B.SetInsertPoint(bb_fail);
@@ -8723,7 +8740,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_lo(uint32_t grp, uint32_t regtest, uin
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 0);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, field_value(expected, 0), 0);
     return true;
 }
 bool LiftVisitor::decode_pseudoDbg_Assert_hi(uint32_t grp, uint32_t regtest, uint32_t expected) {
@@ -8737,7 +8754,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_hi(uint32_t grp, uint32_t regtest, uin
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 16);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, field_value(expected, 0), 16);
     return true;
 }
 bool LiftVisitor::decode_pseudoDbg_Assert_low(uint32_t grp, uint32_t regtest, uint32_t expected) {
@@ -8751,7 +8768,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_low(uint32_t grp, uint32_t regtest, ui
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 0);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, field_value(expected, 0), 0);
     return true;
 }
 bool LiftVisitor::decode_pseudoDbg_Assert_high(uint32_t grp, uint32_t regtest, uint32_t expected) {
@@ -8765,7 +8782,7 @@ bool LiftVisitor::decode_pseudoDbg_Assert_high(uint32_t grp, uint32_t regtest, u
             val = builder_.CreateAShr(builder_.CreateShl(val, builder_.getInt32(24)), builder_.getInt32(24), "ax_sext");
         }
     }
-    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, expected, 16);
+    emit_dbg_assert_ir(builder_, real_cpu_ && !shadowed(offsetof(CpuState, did_jump)) ? real_cpu_ : cpu_ptr_, real_cpu_ ? real_cpu_ : cpu_ptr_, val, field_value(expected, 0), 16);
     return true;
 }
 

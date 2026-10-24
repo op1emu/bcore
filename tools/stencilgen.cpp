@@ -3,8 +3,8 @@
 //
 //   bcore-stencilgen OUT_DIR [--jobs N]
 //
-// writes OUT_DIR/cp_stencils.bin (the code), cp_stencils.inc (the tables
-// cp_translator.cpp includes) and cp_stencils.txt (a report: counts, sizes
+// writes OUT_DIR/cp_stencils.bin (the code), cp_tables.bin (the big tables)
+// and cp_stencils.inc (the rest of the tables, which cp_stencils.cpp includes) and cp_stencils.txt (a report: counts, sizes
 // and every encoding left without a stencil, with the reason).
 //
 // Every 16-bit word the decoder takes for a 16-bit instruction gets a
@@ -139,6 +139,8 @@ struct Item {
     int selected = -1;     // index in kWanted for a 32-bit pattern
     uint32_t key = 0;      // its key fields, packed
     bool full = false;     // the pattern's first key: every value of its hole fields checked
+    unsigned regs_b[kRegHoles] = {};  // the other registers its register holes are checked with
+    bool no_float = false; // compiled without vector code (a constant pool otherwise)
     // Results
     std::string error;
     uint16_t flags = 0;
@@ -150,7 +152,60 @@ struct SelectedInfo {
     int pattern = -1;  // in patterns32()
     uint32_t key_mask = 0;
     Formula fields[4] = {};
+    // Register holes: data register fields, register hole k's value the
+    // field's register number << 2 (infer_regs).
+    Formula regs[kRegHoles] = {};
+    unsigned reg_count = 0;
+    bool pairs = false;  // a hole's register's next is the hole + 4 (register pairs)
 };
+
+// insn with register field k set to values[k].
+uint32_t with_regs(uint32_t insn, const SelectedInfo& info, const unsigned* values) {
+    for (unsigned k = 0; k < info.reg_count; ++k) {
+        const Formula& f = info.regs[k];
+        insn = (insn & ~(7u << f.lsb)) | (values[k] << f.lsb);
+    }
+    return insn;
+}
+
+// Two assignments of registers to the register holes, a and b, which name
+// no register twice (with pairs, the next register too) and none the
+// instruction's other 3-bit fields name, nor the next of those (a pair's
+// other half: the lifter maps registers, not fields, to holes, and reaching
+// a mapped one through a constant field fails the check), and differ for
+// every hole: false if there are not enough.
+bool pick_regs(uint32_t insn, const SelectedInfo& info, const std::vector<std::pair<uint32_t, uint32_t>>& args,
+               unsigned* a, unsigned* b) {
+    unsigned used = 0;
+    for (auto [mask, shift] : args) {
+        if (__builtin_popcount(mask) != 3) continue;
+        bool hole = false;
+        for (unsigned k = 0; k < info.reg_count; ++k) hole |= info.regs[k].lsb == shift;
+        // A field may name a pair, its register and the next.
+        if (!hole) used |= 3u << ((insn >> shift) & 7);
+    }
+    used &= 0xff;
+    static constexpr unsigned kOrderA[8] = {0, 2, 4, 6, 1, 3, 5, 7}, kOrderB[8] = {5, 3, 1, 7, 6, 4, 2, 0};
+    const unsigned span = info.pairs ? 3u : 1u;  // the register, and with pairs its next
+    unsigned ta = used, tb = used;
+    for (unsigned k = 0; k < info.reg_count; ++k) {
+        a[k] = b[k] = 8;
+        for (unsigned r : kOrderA)
+            if (!(ta & (span << r)) && r + (info.pairs ? 1 : 0) < 8) {
+                a[k] = r;
+                ta |= span << r;
+                break;
+            }
+        for (unsigned r : kOrderB)
+            if (!(tb & (span << r)) && r + (info.pairs ? 1 : 0) < 8 && r != a[k]) {
+                b[k] = r;
+                tb |= span << r;
+                break;
+            }
+        if (a[k] == 8 || b[k] == 8) return false;
+    }
+    return true;
+}
 
 // A worker: a context, a translator, a compiler.
 class Worker {
@@ -162,9 +217,24 @@ public:
 
     // Lifts item at pc into mod as `name`; false with item.error set if the
     // lift is not one stencil.
-    BBTranslator::StencilLift lift(Module& mod, const Item& item, uint32_t pc, const char* name) {
+    BBTranslator::StencilLift lift(Module& mod, const Item& item, uint32_t pc, const char* name,
+                                   const SelectedInfo* info = nullptr) {
         memory_.set(pc, item.insn, item.len);
         auto holes = packet_holes(mod);
+        if (info) {
+            auto* i64 = Type::getInt64Ty(mod.getContext());
+            for (unsigned k = 0; k < info->reg_count; ++k)
+                holes.regs[(item.insn >> info->regs[k].lsb) & 7] = value_hole(mod, Hole(kHoleReg0 + k), 0, 32, i64);
+            // A register pair's other half: the next register, at the next
+            // offset (dpregs is contiguous; R7's next is P0, as for the
+            // lifter), where no field names it.
+            for (unsigned k = 0; k < info->reg_count && info->pairs; ++k) {
+                const unsigned r = (item.insn >> info->regs[k].lsb) & 7;
+                if (r + 1 < 8 && !holes.regs[r + 1])
+                    holes.regs[r + 1] = ConstantExpr::getAdd(value_hole(mod, Hole(kHoleReg0 + k), 0, 32, i64),
+                                                             ConstantInt::get(i64, 4));
+            }
+        }
         return translator_.translate_stencil(mod, name, pc, holes);
     }
 
@@ -173,7 +243,9 @@ public:
                  const std::vector<SelectedInfo>& selected, const char* name) {
         auto& ctx = batch.getContext();
         Module scratch("scratch", ctx);
-        auto a = lift(scratch, item, kPcA, "s");
+        const SelectedInfo* regs =
+            item.selected >= 0 && selected[item.selected].reg_count ? &selected[item.selected] : nullptr;
+        auto a = lift(scratch, item, kPcA, "s", regs);
         const std::string text = ir_text(a.fn);
         a.fn->eraseFromParent();
         // An illegal 32-bit instruction raises its exception as a packet of 2.
@@ -181,12 +253,28 @@ public:
             item.error = "decodes to another length";
             return;
         }
-        auto b = lift(scratch, item, kPcB, "s");
+        auto b = lift(scratch, item, kPcB, "s", regs);
         const bool same = ir_text(b.fn) == text;
         b.fn->eraseFromParent();
         if (!same) {
             item.error = "IR depends on the PC";
             return;
+        }
+        if (regs) {
+            // Other registers in the holes: the same IR, and no other way to them.
+            if (a.reg_violation) {
+                item.error = "a register hole reached another way";
+                return;
+            }
+            Item other = item;
+            other.insn = with_regs(item.insn, *regs, item.regs_b);
+            auto c = lift(scratch, other, kPcA, "s", regs);
+            const bool same_regs = ir_text(c.fn) == text && !c.reg_violation;
+            c.fn->eraseFromParent();
+            if (!same_regs) {
+                item.error = "IR depends on a register field's value";
+                return;
+            }
         }
         if (item.selected >= 0) {
             const SelectedInfo& info = selected[item.selected];
@@ -195,7 +283,8 @@ public:
             item.error = "a 16-bit instruction with field holes";
             return;
         }
-        auto lifted = lift(batch, item, kPcA, name);
+        auto lifted = lift(batch, item, kPcA, name, regs);
+        if (item.no_float) lifted.fn->addFnAttr(Attribute::NoImplicitFloat);
         if (verifyFunction(*lifted.fn, &errs())) {
             item.error = "IR does not verify";
             lifted.fn->eraseFromParent();
@@ -228,7 +317,7 @@ public:
             if (first_match(patterns, insn) != info.pattern) continue;
             Item other = item;
             other.insn = insn;
-            auto lifted = lift(scratch, other, kPcA, "s");
+            auto lifted = lift(scratch, other, kPcA, "s", info.reg_count ? &info : nullptr);
             const bool same = ir_text(lifted.fn) == text;
             const bool values = expect(lifted, insn);
             lifted.fn->eraseFromParent();
@@ -334,10 +423,76 @@ struct Blob {
     }
 };
 
-void write_array_u32(FILE* f, const char* decl, const std::vector<uint32_t>& v) {
-    fprintf(f, "%s = {", decl);
-    for (size_t i = 0; i < v.size(); ++i) fprintf(f, "%s%u,", i % 16 ? "" : "\n    ", v[i]);
-    fprintf(f, "\n};\n");
+// A pattern's register holes: its 3-bit fields as data registers (with
+// pairs if that takes more), the largest set of them for which lifts with
+// two other assignments of registers are the same IR and reach the
+// registers no other way. None for a pattern with more 3-bit fields than
+// holes, or with no encoding the lifter takes.
+void infer_regs(Worker& worker, const std::vector<Pattern>& patterns, SelectedInfo& info) {
+    const Pattern& p = patterns[info.pattern];
+    // An encoding of the pattern the lifter takes as a legal 4-byte
+    // instruction, its multi-issue bit clear (a lone instruction).
+    uint32_t base = 0;
+    bool found = false;
+    {
+        std::mt19937 rng(p.value);
+        LLVMContext ctx;
+        Module mod("probe", ctx);
+        for (int attempt = 0; attempt < 256 && !found; ++attempt) {
+            const uint32_t fill = attempt == 0 ? 0x5a5a5a5au : attempt == 1 ? 0u : uint32_t(rng());
+            base = p.value | (fill & ~p.mask & ~0x08000000u);
+            if (first_match(patterns, base) != info.pattern || is16(uint16_t(base >> 16)) ||
+                is_parallel(uint16_t(base >> 16)))
+                continue;
+            Item probe;
+            probe.len = 4;
+            probe.insn = base;
+            auto l = worker.lift(mod, probe, kPcA, "s");
+            found = l.bytes == 4 && !l.terminated;
+            l.fn->eraseFromParent();
+        }
+    }
+    if (!found) return;
+    std::vector<unsigned> cand;
+    for (unsigned i = 0; i < p.args.size(); ++i)
+        if (__builtin_popcount(p.args[i].first) == 3) cand.push_back(i);
+    if (cand.empty() || cand.size() > kRegHoles) return;
+    SelectedInfo best = info;
+    auto trial = [&](unsigned subset, bool pairs) {
+        SelectedInfo t = info;
+        t.pairs = pairs;
+        t.reg_count = 0;
+        for (unsigned j = 0; j < cand.size(); ++j)
+            if (subset >> j & 1) t.regs[t.reg_count++] = {uint8_t(p.args[cand[j]].second), 3, 2, kFormulaUsed};
+        unsigned a[kRegHoles], b[kRegHoles];
+        if (!pick_regs(base, t, p.args, a, b)) return false;
+        LLVMContext ctx;
+        Module mod("infer", ctx);
+        Item ia;
+        ia.len = 4;
+        ia.insn = with_regs(base, t, a);
+        Item ib = ia;
+        ib.insn = with_regs(base, t, b);
+        if (first_match(patterns, ia.insn) != info.pattern || first_match(patterns, ib.insn) != info.pattern)
+            return false;
+        auto la = worker.lift(mod, ia, kPcA, "s", &t);
+        const std::string ta = ir_text(la.fn);
+        la.fn->eraseFromParent();
+        auto lb = worker.lift(mod, ib, kPcA, "s", &t);
+        const bool ok = !la.reg_violation && !lb.reg_violation && la.bytes == 4 && ta == ir_text(lb.fn);
+        lb.fn->eraseFromParent();
+        if (ok && t.reg_count > best.reg_count) best = t;
+        return ok;
+    };
+    // Largest sets first; without pairs, then with them if that takes more.
+    const unsigned all = (1u << cand.size()) - 1;
+    for (bool pairs : {false, true}) {
+        bool done = false;
+        for (int size = int(cand.size()); size > 0 && !done; --size)
+            for (unsigned subset = all; subset && !done; --subset)
+                if (__builtin_popcount(subset) == size && size > int(best.reg_count)) done = trial(subset, pairs);
+    }
+    info = best;
 }
 
 }  // namespace
@@ -371,9 +526,18 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+    // cp_patterns.def's, then every DSP instruction, with register holes.
+    std::vector<Wanted> wanted(std::begin(kWanted), std::end(kWanted));
+    const size_t first_auto = wanted.size();
+    for (const Pattern& p : patterns) {
+        bool listed = false;
+        for (const Wanted& w : kWanted) listed |= p.name == w.name;
+        if (!listed && p.name.rfind("dsp32", 0) == 0) wanted.push_back({p.name.c_str(), {HoleSpec{}, HoleSpec{}}});
+    }
     std::vector<SelectedInfo> selected;
     std::vector<std::string> problems;
-    for (const Wanted& w : kWanted) {
+    Worker inferrer;
+    for (const Wanted& w : wanted) {
         SelectedInfo info;
         for (size_t i = 0; i < patterns.size(); ++i)
             if (patterns[i].name == w.name) info.pattern = int(i);
@@ -395,6 +559,8 @@ int main(int argc, char** argv) {
                               uint8_t(kFormulaUsed | (spec.sign ? kFormulaSign : 0) | (spec.pc ? kFormulaPc : 0))};
             holes |= mask;
         }
+        if (selected.size() >= first_auto) infer_regs(inferrer, patterns, info);
+        for (unsigned k = 0; k < info.reg_count; ++k) holes |= 7u << info.regs[k].lsb;
         info.key_mask = ~p.mask & ~holes;
         selected.push_back(info);
     }
@@ -412,6 +578,17 @@ int main(int argc, char** argv) {
         const SelectedInfo& info = selected[s];
         const Pattern& p = patterns[info.pattern];
         const unsigned key_bits = __builtin_popcount(info.key_mask);
+        if (key_bits > 16) {  // a stencil for each of more keys than that: none
+            fprintf(stderr, "stencilgen: %s has %u key bits, no stencils\n", p.name.c_str(), key_bits);
+            selected[s].key_mask = 0;
+            Item item;
+            item.insn = p.value;
+            item.len = 4;
+            item.selected = int(s);
+            item.error = "too many keys";
+            items.push_back(item);
+            continue;
+        }
         // A value of the hole fields that is no special case.
         uint32_t hole_bits = 0;
         for (auto& f : info.fields)
@@ -421,13 +598,19 @@ int main(int argc, char** argv) {
             uint32_t spread = 0, v = key;
             for (uint32_t m = info.key_mask; m; m &= m - 1, v >>= 1)
                 if (v & 1) spread |= m & -m;
-            const uint32_t insn = p.value | spread | hole_bits;
+            uint32_t insn = p.value | spread | hole_bits;
             Item item;
+            if (info.reg_count) {
+                unsigned a[kRegHoles];
+                if (!pick_regs(insn, info, p.args, a, item.regs_b)) item.error = "no registers left for the holes";
+                insn = with_regs(insn, info, a);
+            }
             item.insn = insn;
             item.len = 4;
             item.selected = int(s);
             item.key = key;
-            if (is16(uint16_t(insn >> 16)) || is_parallel(uint16_t(insn >> 16)))
+            if (!item.error.empty()) {
+            } else if (is16(uint16_t(insn >> 16)) || is_parallel(uint16_t(insn >> 16)))
                 item.error = "not a 32-bit encoding";
             else if (first_match(patterns, insn) != info.pattern)
                 item.error = "an earlier pattern takes it";
@@ -437,37 +620,95 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Lift, check and compile, in batches of 64 per module.
-    constexpr size_t kBatch = 64;
-    std::atomic<size_t> next{0};
-    std::vector<std::thread> threads;
-    for (unsigned t = 0; t < jobs; ++t)
-        threads.emplace_back([&] {
+    // A 32-bit encoding no pattern takes: the undefined instruction, the
+    // same IR for every such encoding (checked on samples).
+    const size_t undef_item = items.size();
+    {
+        std::vector<uint32_t> undef;
+        std::mt19937 rng(32);
+        for (int tries = 0; undef.size() < 4096 && tries < (1 << 22); ++tries) {
+            const uint32_t insn = undef.empty() ? 0xc0000000u | 0x07ff0000u : uint32_t(rng());
+            if (!is16(uint16_t(insn >> 16)) && !is_parallel(uint16_t(insn >> 16)) && first_match(patterns, insn) < 0)
+                undef.push_back(insn);
+        }
+        Item item;
+        item.len = 4;
+        if (undef.empty()) {
+            item.error = "no undefined 32-bit encoding";
+        } else {
+            item.insn = undef[0];
             Worker worker;
-            for (;;) {
-                const size_t start = next.fetch_add(kBatch);
-                if (start >= items.size()) break;
-                const size_t end = std::min(items.size(), start + kBatch);
-                LLVMContext ctx;
-                Module mod("stencils", ctx);
-                std::vector<std::string> names(end - start);
-                for (size_t i = start; i < end; ++i) {
-                    if (!items[i].error.empty()) continue;
-                    names[i - start] = "st_" + std::to_string(i);
-                    worker.prepare(mod, items[i], patterns, selected, names[i - start].c_str());
-                }
-                std::map<std::string, Code> code;
-                worker.compile(mod, code);
-                for (size_t i = start; i < end; ++i) {
-                    if (!items[i].error.empty()) continue;
-                    auto it = code.find(names[i - start]);
-                    if (it == code.end()) items[i].error = "no code";
-                    else if (!it->second.error.empty()) items[i].error = it->second.error;
-                    else items[i].code = std::move(it->second);
+            LLVMContext ctx;
+            Module mod("undef", ctx);
+            std::string ref;
+            for (uint32_t insn : undef) {
+                Item other = item;
+                other.insn = insn;
+                auto l = worker.lift(mod, other, kPcA, "u");
+                const std::string text = ir_text(l.fn);
+                l.fn->eraseFromParent();
+                if (ref.empty()) ref = text;
+                if (text != ref) {
+                    item.error = "the undefined instruction's IR depends on its encoding";
+                    break;
                 }
             }
-        });
-    for (auto& t : threads) t.join();
+        }
+        items.push_back(item);
+    }
+
+    // Lift, check and compile, in batches of 64 per module.
+    auto build = [&](const std::vector<size_t>& todo) {
+        constexpr size_t kBatch = 64;
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> threads;
+        for (unsigned t = 0; t < jobs; ++t)
+            threads.emplace_back([&] {
+                Worker worker;
+                for (;;) {
+                    const size_t start = next.fetch_add(kBatch);
+                    if (start >= todo.size()) break;
+                    const size_t end = std::min(todo.size(), start + kBatch);
+                    LLVMContext ctx;
+                    Module mod("stencils", ctx);
+                    std::vector<std::string> names(end - start);
+                    for (size_t j = start; j < end; ++j) {
+                        Item& item = items[todo[j]];
+                        if (!item.error.empty()) continue;
+                        names[j - start] = "st_" + std::to_string(todo[j]);
+                        worker.prepare(mod, item, patterns, selected, names[j - start].c_str());
+                    }
+                    std::map<std::string, Code> code;
+                    worker.compile(mod, code);
+                    for (size_t j = start; j < end; ++j) {
+                        Item& item = items[todo[j]];
+                        if (!item.error.empty()) continue;
+                        auto it = code.find(names[j - start]);
+                        if (it == code.end()) item.error = "no code";
+                        else if (!it->second.error.empty()) item.error = it->second.error;
+                        else item.code = std::move(it->second);
+                    }
+                }
+            });
+        for (auto& t : threads) t.join();
+    };
+    {
+        std::vector<size_t> all(items.size());
+        for (size_t i = 0; i < items.size(); ++i) all[i] = i;
+        build(all);
+    }
+    // Code that loads a constant from a pool (vector code the lifter's
+    // stores turned into) is no stencil: again without vector code.
+    {
+        std::vector<size_t> again;
+        for (size_t i = 0; i < items.size(); ++i)
+            if (items[i].error.rfind("relocation against '.LCPI", 0) == 0) {
+                items[i].error.clear();
+                items[i].no_float = true;
+                again.push_back(i);
+            }
+        if (!again.empty()) build(again);
+    }
 
     // The prologues and exits.
     Blob blob;
@@ -547,13 +788,22 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> keys_base(selected.size(), 0);
     std::map<std::string, unsigned> reasons;
     size_t made16 = 0, total16 = 0, made32 = 0, total32 = 0;
+    uint32_t undef32 = 0;
     for (size_t i = 0; i < items.size(); ++i) {
         Item& item = items[i];
+        if (i == undef_item) {
+            if (!item.error.empty()) {
+                fprintf(stderr, "stencilgen: undefined 32-bit instruction: %s\n", item.error.c_str());
+                return 1;
+            }
+            undef32 = blob.add(item.code, item.flags, item.bytes);
+            continue;
+        }
         const bool wide = i >= first32;
         if (wide && item.key == 0) keys_base[item.selected] = uint32_t(keys32.size());
         uint32_t entry = 0;
         if (item.error.empty()) entry = blob.add(item.code, item.flags, item.bytes) + 1;
-        else reasons[(wide ? kWanted[item.selected].name + std::string(": ") : std::string("16-bit: ")) + item.error]++;
+        else reasons[(wide ? wanted[item.selected].name + std::string(": ") : std::string("16-bit: ")) + item.error]++;
         if (wide) {
             keys32.push_back(entry);
             if (item.error != "an earlier pattern takes it" && item.error != "not a 32-bit encoding") {
@@ -576,6 +826,33 @@ int main(int argc, char** argv) {
         perror(bin.c_str());
         return 1;
     }
+    // cp_tables.bin: the big tables as the library lays them out (it is
+    // built for the same target, by the same compiler), each at a multiple
+    // of 16, which cp_stencils.cpp names with .incbin; text would take the
+    // compiler a gigabyte.
+    struct Table { const char* name; const void* data; size_t size; size_t at; };
+    Table tables[] = {
+        {"STENCILS", blob.stencils.data(), blob.stencils.size() * sizeof(Stencil), 0},
+        {"RELOCS", blob.relocs.data(), blob.relocs.size() * sizeof(bcore_cp::Reloc), 0},
+        {"INDEX16", index16.data(), index16.size() * sizeof(uint32_t), 0},
+        {"KEYS32", keys32.data(), keys32.size() * sizeof(uint32_t), 0},
+    };
+    const std::string tables_bin = out_dir + "/cp_tables.bin";
+    if (FILE* t = fopen(tables_bin.c_str(), "wb")) {
+        size_t at = 0;
+        for (Table& table : tables) {
+            static const uint8_t zeros[16] = {};
+            fwrite(zeros, 1, (16 - at % 16) % 16, t);
+            at += (16 - at % 16) % 16;
+            table.at = at;
+            fwrite(table.data, 1, table.size, t);
+            at += table.size;
+        }
+        fclose(t);
+    } else {
+        perror(tables_bin.c_str());
+        return 1;
+    }
     // cp_stencils.inc
     const std::string inc = out_dir + "/cp_stencils.inc";
     FILE* f = fopen(inc.c_str(), "w");
@@ -584,18 +861,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     fprintf(f, "// Generated by bcore-stencilgen (tools/stencilgen.cpp). Do not edit.\n");
+    for (const Table& table : tables)
+        fprintf(f, "#define CP_TABLE_%s %zu, %zu\n", table.name, table.at, table.size);
     fprintf(f, "namespace bcore_cp {\n");
     fprintf(f, "const uint32_t kCodeSize = %zu;\n", blob.code.size());
-    fprintf(f, "const Stencil kStencils[] = {\n");
-    for (const Stencil& s : blob.stencils)
-        fprintf(f, "    {%u, %u, %u, %u, %u, %u, 0, %u, %u, %u, %u},\n", s.code, s.size, s.flags, s.relocs, s.reloc_count,
-                s.bytes, s.cold, s.cold_size, s.cold_reloc_count, s.cold_relocs);
-    fprintf(f, "};\nconst Reloc kRelocs[] = {\n");
-    for (const bcore_cp::Reloc& r : blob.relocs) fprintf(f, "    {%u, %u, %u, %d},\n", r.offset, r.hole, r.kind, r.addend);
-    if (blob.relocs.empty()) fprintf(f, "    {0, 0, 0, 0},\n");
-    fprintf(f, "};\n");
-    write_array_u32(f, "const uint32_t kIndex16[0x10000]", index16);
-    write_array_u32(f, "const uint32_t kKeys32[]", keys32);
     fprintf(f, "const Pattern32 kPatterns32[] = {\n");
     for (size_t i = 0; i < patterns.size(); ++i) {
         int sel = -1;
@@ -610,7 +879,9 @@ int main(int argc, char** argv) {
         const SelectedInfo& info = selected[s];
         fprintf(f, "    {0x%08x, %u, {", info.key_mask, keys_base[s]);
         for (auto& x : info.fields) fprintf(f, "{%u, %u, %u, %u}, ", x.lsb, x.bits, x.shift, x.flags);
-        fprintf(f, "}},  // %s\n", kWanted[s].name);
+        fprintf(f, "}, {");
+        for (auto& x : info.regs) fprintf(f, "{%u, %u, %u, %u}, ", x.lsb, x.bits, x.shift, x.flags);
+        fprintf(f, "}},  // %s\n", wanted[s].name);
     }
     fprintf(f, "};\n");
     fprintf(f, "const uint32_t kPrologue[2] = {%u, %u};  // host cycles off, on\n", prologue[0], prologue[1]);
@@ -618,6 +889,7 @@ int main(int argc, char** argv) {
             exits[0], exits[1], exits[2], exits[3], exits[4]);
     fprintf(f, "const uint32_t kSelfExits[2] = {%u, %u};  // chain, count\n", self_exits[0], self_exits[1]);
     fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
+    fprintf(f, "const uint32_t kUndef32 = %u;\n", undef32);
     fprintf(f, "}  // namespace bcore_cp\n");
     fclose(f);
 

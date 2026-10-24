@@ -210,6 +210,8 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
                     selected = kPatterns32[p].selected;
                     const Selected32& sel = kSelected32[selected];
                     id = kKeys32[sel.keys + gather(insn, sel.key_mask)];
+                } else if (p < 0 && !is_parallel(w)) {
+                    id = kUndef32 + 1;
                 }
             }
             Piece piece{};
@@ -362,6 +364,8 @@ bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet,
         value = threshold_;
     } else if (r.hole == kHoleBlockPc) {
         value = piece.pc;  // the exit's piece is the block's PC's
+    } else if (r.hole >= kHoleReg0 && r.hole < kHoleReg0 + kRegHoles && piece.selected >= 0) {
+        value = field_hole_value(kSelected32[piece.selected].regs[r.hole - kHoleReg0], piece.insn, piece.pc);
     } else {
         return false;
     }

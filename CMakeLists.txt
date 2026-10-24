@@ -110,14 +110,15 @@ if(BCORE_COPY_PATCH)
     set_target_properties(bcore-stencilgen PROPERTIES FOLDER "Core")
     set(BCORE_CP_GEN ${CMAKE_CURRENT_BINARY_DIR}/cp_gen)
     add_custom_command(
-        OUTPUT ${BCORE_CP_GEN}/cp_stencils.inc ${BCORE_CP_GEN}/cp_stencils.bin ${BCORE_CP_GEN}/cp_stencils.txt
+        OUTPUT ${BCORE_CP_GEN}/cp_stencils.inc ${BCORE_CP_GEN}/cp_stencils.bin ${BCORE_CP_GEN}/cp_tables.bin
+               ${BCORE_CP_GEN}/cp_stencils.txt
         COMMAND ${CMAKE_COMMAND} -E make_directory ${BCORE_CP_GEN}
         COMMAND bcore-stencilgen ${BCORE_CP_GEN}
         DEPENDS bcore-stencilgen
         COMMENT "Building the copy-and-patch stencils"
         VERBATIM)
     set_source_files_properties(src/cp_stencils.cpp PROPERTIES
-        OBJECT_DEPENDS "${BCORE_CP_GEN}/cp_stencils.inc;${BCORE_CP_GEN}/cp_stencils.bin")
+        OBJECT_DEPENDS "${BCORE_CP_GEN}/cp_stencils.inc;${BCORE_CP_GEN}/cp_stencils.bin;${BCORE_CP_GEN}/cp_tables.bin")
     set(BCORE_CP_SOURCES src/cp_stencils.cpp src/cp_translator.cpp ${BCORE_CP_GEN}/cp_stencils.inc)
 endif()
 
@@ -137,6 +138,7 @@ target_include_directories(bfin-core
 target_compile_definitions(bfin-core PRIVATE
     BCORE_COPY_PATCH=$<BOOL:${BCORE_COPY_PATCH}>
     CP_STENCILS_BIN="${BCORE_CP_GEN}/cp_stencils.bin"
+    CP_TABLES_BIN="${BCORE_CP_GEN}/cp_tables.bin"
 )
 target_link_libraries(bfin-core PUBLIC bcore-lift)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

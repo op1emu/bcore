@@ -26,7 +26,8 @@ enum Hole : uint8_t {
     kHoleCountOffset, // the counter's count's offset in the TierTable
     kHoleThreshold,   // the tier threshold
     kHoleBlockPc,     // the block's PC (its exit, kSelfExits)
-    kHoleCont,        // the next packet's code
+    kHoleReg0,        // kHoleReg0 + i: register hole i, a data register's offset in CpuState
+    kHoleCont = kHoleReg0 + 4,  // the next packet's code
     kHoleExit,        // the block's exit (its own, kSelfExits, or the arena's exit stencil)
     kHoleSelf,        // the block's code (its exit, kSelfExits)
     kHoleHot,         // the stencil's own hot code, from its cold code (Stencil::cold)
@@ -88,6 +89,8 @@ struct Stencil {
     uint32_t cold_relocs;
 };
 
+inline constexpr unsigned kRegHoles = 4;
+
 // A 32-bit field hole's value from the instruction: bits [lsb, lsb + bits),
 // sign-extended if `sign`, shifted left by `shift`, plus the PC if `pc`.
 struct Formula {
@@ -113,11 +116,13 @@ struct Pattern32 {
 
 // A pattern with stencils: one per value of the key fields (key_mask's
 // bits, packed from the lowest), stencil + 1 in kKeys32[keys + key], 0 for
-// a key with none.
+// a key with none. Its register holes (regs) are data register fields: the
+// register's offset in CpuState, its number << 2 (dpregs is at 0).
 struct Selected32 {
     uint32_t key_mask;
     uint32_t keys;
     Formula fields[4];
+    Formula regs[kRegHoles];
 };
 
 // The tables (cp_stencils.cpp, from the generated cp_stencils.inc), where
@@ -140,5 +145,8 @@ extern const uint32_t kSelfExits[2];
 // Where a block cut at its last packet goes on (pc the next PC, field 0
 // the packet's length, packet its index): stores them and exits.
 extern const uint32_t kFallthrough;
+// A 32-bit instruction no pattern takes (the undefined instruction's
+// exception, a packet of 2 that ends the block).
+extern const uint32_t kUndef32;
 
 }  // namespace bcore_cp

@@ -70,6 +70,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil(Module& mod, const cha
     visitor.set_careful(true);
     visitor.set_idle_waits(idle_waits_);
     visitor.set_stencil(holes.pc, pc, holes.fields);
+    visitor.set_stencil_regs(holes.regs);
 
     // As translate_as lifts a packet, between the block's entry (the loads
     // the lifter puts there) and what follows.
@@ -117,6 +118,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil(Module& mod, const cha
     out.cycles = visitor.accesses_cycles();
     for (unsigned i = 0; i < LiftVisitor::kFieldHoles; ++i) out.field_values[i] = visitor.field_values()[i];
     out.fields_used = visitor.fields_used();
+    out.reg_violation = visitor.reg_hole_violation();
     return out;
 }
 

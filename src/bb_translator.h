@@ -116,6 +116,7 @@ public:
         llvm::Constant* pc = nullptr;      // i32: the packet's PC
         llvm::Constant* packet = nullptr;  // i32: its index in the block, from 1
         llvm::Constant* fields[LiftVisitor::kFieldHoles] = {};  // i32 (LiftVisitor::set_stencil)
+        llvm::Constant* regs[8] = {};      // i64 offsets of data registers (LiftVisitor::set_stencil_regs)
         llvm::Function* cont = nullptr;    // the next packet's code
         llvm::Function* exit = nullptr;    // where every path that leaves the block goes
     };
@@ -126,6 +127,7 @@ public:
         bool cycles = false;      // reads or writes CYCLES (see emit_stencil_prologue)
         uint32_t field_values[LiftVisitor::kFieldHoles] = {};  // LiftVisitor::field_values
         unsigned fields_used = 0;
+        bool reg_violation = false;  // LiftVisitor::reg_hole_violation
     };
     // The packet at pc, read through this translator's Memory, as the
     // function `name`, compiled as packet `holes.packet` of a careful block

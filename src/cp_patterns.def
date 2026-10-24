@@ -39,3 +39,8 @@ CP_PATTERN(LDSTidxI_ST_16,        CP_FIELD(2, 1, 1, 0), CP_NONE)
 CP_PATTERN(LDSTidxI_ST_B,         CP_FIELD(2, 1, 0, 0), CP_NONE)
 CP_PATTERN(Linkage_LINK,          CP_FIELD(0, 0, 2, 0), CP_NONE)
 CP_PATTERN(Linkage_UNLINK,        CP_NONE, CP_NONE)
+// The testsuite's assertion (bfin-sim's dbga): its expected value a hole.
+CP_PATTERN(pseudoDbg_Assert_lo,   CP_FIELD(2, 0, 0, 0), CP_NONE)
+CP_PATTERN(pseudoDbg_Assert_hi,   CP_FIELD(2, 0, 0, 0), CP_NONE)
+CP_PATTERN(pseudoDbg_Assert_low,  CP_FIELD(2, 0, 0, 0), CP_NONE)
+CP_PATTERN(pseudoDbg_Assert_high, CP_FIELD(2, 0, 0, 0), CP_NONE)

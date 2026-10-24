@@ -48,7 +48,7 @@ bool same_ir(const Function& a, const Function& b) {
 const char* const kHoleNames[kHoleCont] = {
     "bcore_hole_pc", "bcore_hole_packet", "bcore_hole_field0", "bcore_hole_field1", "bcore_hole_field2",
     "bcore_hole_field3", "bcore_hole_counter", "bcore_hole_count_offset", "bcore_hole_threshold",
-    "bcore_hole_block_pc",
+    "bcore_hole_block_pc", "bcore_hole_reg0", "bcore_hole_reg1", "bcore_hole_reg2", "bcore_hole_reg3",
 };
 const char* const kContName = "bcore_hole_cont";
 const char* const kExitName = "bcore_hole_exit";

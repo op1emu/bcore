@@ -188,8 +188,21 @@ std::vector<Instruction> instructions() {
             uint32_t spread = 0, v = key;
             for (uint32_t m = sel.key_mask; m; m &= m - 1, v >>= 1)
                 if (v & 1) spread |= m & -m;
+            unsigned reg_count = 0;
+            while (reg_count < bcore_cp::kRegHoles && (sel.regs[reg_count].flags & bcore_cp::kFormulaUsed)) ++reg_count;
             for (int sample = 0; sample < 4; ++sample) {
-                const uint32_t insn = pattern.value | spread | (rng() & free_bits);
+                uint32_t insn = pattern.value | spread | (rng() & free_bits);
+                // Register holes: two of them the same register, or all.
+                auto set_reg = [&](unsigned k, uint32_t r) {
+                    insn = (insn & ~(7u << sel.regs[k].lsb)) | (r << sel.regs[k].lsb);
+                };
+                if (reg_count >= 2 && sample == 2) {
+                    const unsigned a = rng() % reg_count, b = (a + 1 + rng() % (reg_count - 1)) % reg_count;
+                    set_reg(b, (insn >> sel.regs[a].lsb) & 7);
+                } else if (reg_count >= 2 && sample == 3) {
+                    const uint32_t r = rng() % 8;
+                    for (unsigned k = 0; k < reg_count; ++k) set_reg(k, r);
+                }
                 // The decoder takes the first pattern that matches.
                 uint32_t first = 0;
                 while ((insn & bcore_cp::kPatterns32[first].mask) != bcore_cp::kPatterns32[first].value) ++first;
@@ -221,7 +234,7 @@ std::vector<Instruction> runtime_instructions(size_t count32, size_t parallel) {
         if (pattern.selected < 0) plain.push_back(p);
         if ((pattern.value >> 28) == 0xc) dsp.push_back(p);
     }
-    for (size_t tries = 0; out.size() < count32 && tries < 100 * count32; ++tries) {
+    for (size_t tries = 0; !plain.empty() && out.size() < count32 && tries < 100 * count32; ++tries) {
         const auto& pattern = bcore_cp::kPatterns32[plain[rng() % plain.size()]];
         const uint32_t insn = (pattern.value | (rng() & ~pattern.mask)) & ~0x08000000u;
         if (!is16(uint16_t(insn >> 16)) && first_match(insn) >= 0 &&
