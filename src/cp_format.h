@@ -73,7 +73,6 @@ enum StencilFlags : uint16_t {
     kSetsDisAlgn = 64,  // a slot 0 that leaves DISALGNEXCPT on: the slots' dis_algn entries
     kSlotStore = 128,   // a slot that writes memory: the packet's tail checks CEC
     kNop = 256,         // a slot that does nothing: the translator leaves it out
-    kDjUnknown = 512,   // a slot after which did_jump is not known clear: what follows is lifted so
 };
 
 // Its code is in two parts: the hot code, which the translator lays out
@@ -156,16 +155,13 @@ extern const uint32_t kFallthrough;
 extern const uint32_t kUndef32;
 // A parallel packet's slots 1 and 2: for each 16-bit word, its stencil and
 // its commit's (+ 1, 0 for none: no stencil, an instruction the slot does
-// not take; no commit, no register written), by
-// [(dis_algn * 2 + did_jump not known clear) * 2 + slot - 1] (slot 1 always
-// starts with it known clear).
+// not take; no commit, no register written), by [dis_algn * 2 + slot - 1].
 struct SlotEntry {
     uint32_t stencil;
     uint32_t commit;
 };
-extern const SlotEntry kSlots[8][0x10000];
-// A parallel packet's tail (its epilog), by [did_jump not known clear * 2 +
-// CEC check].
-extern const uint32_t kParallelTail[4];
+extern const SlotEntry kSlots[4][0x10000];
+// A parallel packet's tail (its epilog), by [CEC check].
+extern const uint32_t kParallelTail[2];
 
 }  // namespace bcore_cp

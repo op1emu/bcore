@@ -190,8 +190,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil_body(Module& mod, cons
 }
 
 BBTranslator::StencilLift BBTranslator::translate_slot_stencil(Module& mod, const char* name, uint32_t pc,
-                                                               const StencilHoles& holes, int slot, bool dis_algn,
-                                                               bool did_jump_unknown) {
+                                                               const StencilHoles& holes, int slot, bool dis_algn) {
     StencilLift out;
     auto& ctx = mod.getContext();
     declare_externs(mod);
@@ -209,7 +208,6 @@ BBTranslator::StencilLift BBTranslator::translate_slot_stencil(Module& mod, cons
     builder.CreateBr(insn_entry);
     builder.SetInsertPoint(insn);
     visitor.carry_reg_cache(entry, insn);
-    if (did_jump_unknown) visitor.forget_did_jump_clear();
     const uint32_t slot_pc = pc + 2 + 2 * uint32_t(slot);
     visitor.begin_slot(slot, dis_algn);
     visitor.set_pc(slot_pc);
@@ -253,8 +251,7 @@ Function* BBTranslator::emit_slot_commit(Module& mod, const char* name, int slot
 }
 
 BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, const char* name, uint32_t pc,
-                                                                const StencilHoles& holes, bool check_cec,
-                                                                bool did_jump_unknown) {
+                                                                const StencilHoles& holes, bool check_cec) {
     StencilLift out;
     auto& ctx = mod.getContext();
     declare_externs(mod);
@@ -272,7 +269,6 @@ BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, con
     builder.CreateBr(insn_entry);
     builder.SetInsertPoint(insn);
     visitor.carry_reg_cache(entry, insn);
-    if (did_jump_unknown) visitor.forget_did_jump_clear();
     visitor.set_pc(pc);
     visitor.set_checks_cec_pending(check_cec);
     visitor.set_fallthrough_pc(pc + 8);

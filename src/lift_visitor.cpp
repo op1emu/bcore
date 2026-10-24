@@ -251,9 +251,11 @@ bool LiftVisitor::lb_absent(uint32_t insn_pc) {
 
 // After a memory access diamond: the fast path touches only guest RAM, the
 // slow path calls read*/write*, which keep the registers only if the Memory
-// says so (Memory::callbacks_preserve_registers()).
+// says so (Memory::callbacks_preserve_registers()). did_jump is as before
+// either way: the slow path exits if its call set it.
 void LiftVisitor::carry_reg_cache_over_access(BasicBlock* from, BasicBlock* to) {
     if (mem_keeps_regs_) carry_reg_cache(from, to);
+    else if (reg_cache_[from].count(kDidJumpClear)) reg_cache_[to][kDidJumpClear] = builder_.getInt8(0);
 }
 
 // A halt returns to the host (CpuState::chain_budget), as the CEC's do.

@@ -160,15 +160,13 @@ struct Item {
     uint16_t flags = 0;
     uint8_t bytes = 0;
     Code code;
-    // A slot piece's variants, v = dis_algn * 2 + did_jump not known clear
-    // at its start (slot 1 starts with it known clear: v 1 and 3 none): its
-    // writes, flags, and its code, or the variant's whose IR it shares
-    // (same_as[v] < v).
-    static constexpr int kVariants = 4;
+    // A slot piece's variants, v = dis_algn: its writes, flags, and its
+    // code, or the variant's whose IR it shares (same_as[v] < v).
+    static constexpr int kVariants = 2;
     bool has[kVariants] = {};
     std::vector<LiftVisitor::SlotWrite> writes[kVariants];
     uint16_t slot_flags[kVariants] = {};
-    int same_as[kVariants] = {0, 1, 2, 3};
+    int same_as[kVariants] = {0, 1};
     Code variant_code[kVariants];
 };
 
@@ -254,12 +252,12 @@ public:
         memory_.set(pc, item.insn, 4);
         return translator_.translate_stencil_body(mod, name, pc, holes_for(mod, item, info), parallel);
     }
-    BBTranslator::StencilLift lift_slot(Module& mod, uint16_t word, int slot, int variant, uint32_t pc,
+    BBTranslator::StencilLift lift_slot(Module& mod, uint16_t word, int slot, bool dis_algn, uint32_t pc,
                                         const char* name) {
         uint16_t words[4] = {0xc803, 0x1800, 0, 0};  // MNOP, then the slots
         words[slot + 1] = word;
         memory_.set_words(pc, words, 4);
-        return translator_.translate_slot_stencil(mod, name, pc, packet_holes(mod), slot, variant >> 1, variant & 1);
+        return translator_.translate_slot_stencil(mod, name, pc, packet_holes(mod), slot, dis_algn);
     }
     BBTranslator::StencilHoles holes_for(Module& mod, const Item& item, const SelectedInfo* info) {
         auto holes = packet_holes(mod);
@@ -418,13 +416,13 @@ public:
 
     // A 16-bit word in slot 1 or 2, in each variant: legal there, the
     // same IR at another PC, its writes fitting the scratch, no way out but
-    // the packet's exits.
+    // the packet's exits, did_jump known clear after it (what follows is
+    // lifted so).
     void prepare_slot(Module& batch, Item& item, const char* name) {
         auto& ctx = batch.getContext();
         Module scratch("scratch", ctx);
         std::string texts[Item::kVariants];
         for (int v = 0; v < Item::kVariants; ++v) {
-            if (item.slot == 1 && (v & 1)) continue;
             auto a = lift_slot(scratch, uint16_t(item.insn), item.slot, v, kPcA, "s");
             texts[v] = ir_text(a.fn);
             a.fn->eraseFromParent();
@@ -438,11 +436,11 @@ public:
             if (!same) item.error = "IR depends on the PC";
             else if (a.slot_conflict) item.error = "the slot's writes do not fit the scratch";
             else if (a.terminated) item.error = "the slot ends the packet";
+            else if (!a.did_jump_clear) item.error = "did_jump not known clear after the slot";
             if (!item.error.empty()) return;
             item.has[v] = true;
             item.writes[v] = a.writes;
-            item.slot_flags[v] = (a.checks_cec ? kSlotStore : 0) | (a.cycles ? kCycles : 0) |
-                                 (a.did_jump_clear ? 0 : kDjUnknown);
+            item.slot_flags[v] = (a.checks_cec ? kSlotStore : 0) | (a.cycles ? kCycles : 0);
             for (int u = 0; u < v; ++u)
                 if (item.has[u] && texts[u] == texts[v] && item.same_as[u] == u) {
                     item.same_as[v] = u;
@@ -956,7 +954,7 @@ int main(int argc, char** argv) {
     // The prologues and exits.
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
-    uint32_t fallthrough = 0, parallel_tail[4] = {};
+    uint32_t fallthrough = 0, parallel_tail[2] = {};
     std::string special_error;
     {
         Worker worker;
@@ -1006,18 +1004,18 @@ int main(int argc, char** argv) {
         }
         // A parallel packet's tail, without and with the CEC check: the same
         // IR at another PC.
-        const char* tail_names[] = {"ptail", "ptail_cec", "ptail_dj", "ptail_dj_cec"};
-        for (int t = 0; t < 4; ++t) {
+        const char* tail_names[] = {"ptail", "ptail_cec"};
+        for (int t = 0; t < 2; ++t) {
             Module scratch("tail", ctx);
             std::string texts[2];
             for (int k = 0; k < 2; ++k) {
                 auto l = worker.translator().translate_parallel_tail(scratch, "t", k ? kPcB : kPcA,
-                                                                     packet_holes(scratch), t & 1, t >> 1);
+                                                                     packet_holes(scratch), t == 1);
                 texts[k] = ir_text(l.fn);
                 l.fn->eraseFromParent();
             }
             if (texts[0] != texts[1]) special_error += std::string(tail_names[t]) + ": IR depends on the PC\n";
-            worker.translator().translate_parallel_tail(mod, tail_names[t], kPcA, packet_holes(mod), t & 1, t >> 1);
+            worker.translator().translate_parallel_tail(mod, tail_names[t], kPcA, packet_holes(mod), t == 1);
         }
         // The exits an arena shares are copied whole (CpTranslator::arena_for).
         for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
@@ -1036,7 +1034,7 @@ int main(int argc, char** argv) {
         for (int e = 0; e < 5; ++e) exits[e] = add(names[e]);
         for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e]);
         fallthrough = add("fallthrough");
-        for (int t = 0; t < 4; ++t) parallel_tail[t] = add(tail_names[t]);
+        for (int t = 0; t < 2; ++t) parallel_tail[t] = add(tail_names[t]);
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -1078,8 +1076,8 @@ int main(int argc, char** argv) {
             commit_of[commit_key(commits[j].first, commits[j].second)] = blob.add(it->second, 0, 0);
         }
     }
-    std::vector<uint32_t> slots(8 * 0x10000 * 2, 0);  // SlotEntry kSlots[8][0x10000]
-    size_t made_slot[2] = {}, legal_slot[2] = {}, dj_unknown[2] = {};
+    std::vector<uint32_t> slots(4 * 0x10000 * 2, 0);  // SlotEntry kSlots[4][0x10000]
+    size_t made_slot[2] = {}, legal_slot[2] = {};
 
     std::vector<uint32_t> index16(0x10000, 0), keys32;
     std::vector<uint32_t> keys_base(selected.size(), 0);
@@ -1104,7 +1102,6 @@ int main(int argc, char** argv) {
                 continue;
             }
             ++made_slot[item.slot - 1];
-            dj_unknown[item.slot - 1] += item.has[0] && (item.slot_flags[0] & kDjUnknown);
             for (int v = 0; v < Item::kVariants; ++v) {
                 if (!item.has[v]) continue;
                 const Code& code = item.variant_code[item.same_as[v]];
@@ -1210,8 +1207,7 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kSelfExits[2] = {%u, %u};  // chain, count\n", self_exits[0], self_exits[1]);
     fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
     fprintf(f, "const uint32_t kUndef32 = %u;\n", undef32);
-    fprintf(f, "const uint32_t kParallelTail[4] = {%u, %u, %u, %u};  // [did_jump unknown * 2 + CEC check]\n",
-            parallel_tail[0], parallel_tail[1], parallel_tail[2], parallel_tail[3]);
+    fprintf(f, "const uint32_t kParallelTail[2] = {%u, %u};  // [CEC check]\n", parallel_tail[0], parallel_tail[1]);
     fprintf(f, "}  // namespace bcore_cp\n");
     fclose(f);
 
@@ -1222,8 +1218,6 @@ int main(int argc, char** argv) {
         fprintf(r, "32-bit: %zu of %zu keys have stencils\n", made32, total32);
         fprintf(r, "slots: %zu of %zu slot 1 words, %zu of %zu slot 2 words have stencils; %zu commits\n", made_slot[0],
                 legal_slot[0], made_slot[1], legal_slot[1], commit_of.size());
-        fprintf(r, "slots: did_jump not known clear after %zu slot 1 words, %zu slot 2 words\n", dj_unknown[0],
-                dj_unknown[1]);
         fprintf(r, "stencils: %zu, code %zu bytes, relocations %zu\n", blob.stencils.size(), blob.code.size(),
                 blob.relocs.size());
         fprintf(r, "without a stencil:\n");

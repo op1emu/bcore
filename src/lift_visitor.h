@@ -127,11 +127,6 @@ public:
     void set_checks_cec_pending(bool check) { check_cec_pending_ = check; }
     // Whether did_jump is known clear where the builder is.
     bool did_jump_known_clear() { return did_jump_clear(); }
-    // From here on did_jump is not known clear (a piece after one that left
-    // it so).
-    void forget_did_jump_clear() {
-        if (auto* cache = reg_cache_here()) cache->erase(kDidJumpClear);
-    }
     bool has_pending_exits() const { return !pending_exits_.empty(); }
     // Whether DISALGNEXCPT is in effect for the rest of the packet.
     bool dis_algn() const { return dis_algn_expt_; }
