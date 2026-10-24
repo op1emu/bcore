@@ -116,6 +116,7 @@ bool same_ir(const llvm::Function& a, const llvm::Function& b);
 extern const char* const kHoleNames[kHoleCont];
 extern const char* const kContName;
 extern const char* const kExitName;
+extern const char* const kSelfName;
 
 // A value hole: a global whose address is the value, in [lo, hi) (so that
 // the backend can take it for an immediate of that width), as a constant
@@ -144,5 +145,9 @@ std::map<std::string, Code> extract(const llvm::MemoryBuffer& buffer);
 // The code ends in a jmp rel32 to the next packet, which the translator
 // drops where the next packet follows (kTailCont).
 bool tail_cont(const Code& code);
+// The code ends in a jmp rel32 to the block's exit (kTailExit).
+bool tail_exit(const Code& code);
+// The flags the code itself sets: kTailCont, kTailExit.
+uint16_t code_flags(const Code& code);
 
 }  // namespace bcore_cp

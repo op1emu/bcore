@@ -253,7 +253,7 @@ void RuntimeStencils::flush() {
         }
         Record& r = records_.emplace_back();
         r.stencil.size = uint16_t(c.bytes.size());
-        r.stencil.flags = uint16_t(l.flags | (tail_cont(c) ? kTailCont : 0));
+        r.stencil.flags = uint16_t(l.flags | code_flags(c));
         r.stencil.reloc_count = uint16_t(c.relocs.size());
         r.stencil.bytes = l.bytes;
         r.code = std::move(c.bytes);

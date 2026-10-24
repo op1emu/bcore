@@ -187,6 +187,9 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         config.idle_waits = idle_waits_;
         config.threshold = tier.threshold;
         config.size_ref = tier.size_ref;
+        // Its own exit goes back to its start without the table only where
+        // the table would hold it: a PC the filter takes.
+        config.self_loop = chaining_ && !chain_dry_ && (!chain_filter_ || chain_filter_(pc));
         const CpTranslator::Block block = cp_->translate(pc, *tier.code, tier.counter, config);
         cp_built = block.built;
         if (block.fn) {

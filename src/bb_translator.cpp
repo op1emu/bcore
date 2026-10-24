@@ -721,7 +721,8 @@ void BBTranslator::merge_returns(Function* fn) {
 
 void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Value* real, Value* mem,
                                    uint32_t entry_pc, BasicBlock* self_loop, BasicBlock* direct,
-                                   BasicBlock* first_entry, const std::set<ReturnInst*>* steady) {
+                                   BasicBlock* first_entry, const std::set<ReturnInst*>* steady,
+                                   Value* entry_pc_value) {
     std::vector<ReturnInst*> returns;
     for (auto& block : *fn)
         if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator()); ret && &block != direct)
@@ -921,7 +922,8 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         // A hardware loop's back edge to the block's start, mostly.
         auto* self = BasicBlock::Create(ctx, "chain_self", fn);
         auto* other = BasicBlock::Create(ctx, "chain_other", fn);
-        b.CreateCondBr(b.CreateICmpEQ(next, b.getInt32(entry_pc)), self, other, weights_loop(ctx));
+        b.CreateCondBr(b.CreateICmpEQ(next, entry_pc_value ? entry_pc_value : b.getInt32(entry_pc)), self, other,
+                       weights_loop(ctx));
         b.SetInsertPoint(self);
         if (chain(total, tail, next, clear)) b.CreateBr(self_loop);
         b.SetInsertPoint(other);
