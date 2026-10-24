@@ -313,6 +313,10 @@ if(BCORE_BUILD_FAULT_TESTS)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
         add_test(NAME bcore-cp-stencil-test COMMAND bcore-cp-stencil-test)
         set_tests_properties(bcore-cp-stencil-test PROPERTIES COST 190)
+        # The run-time stencils at opt 2, split as the build's are (every
+        # 8th instruction: their compile is the slower).
+        add_test(NAME bcore-cp-stencil-test-o2 COMMAND bcore-cp-stencil-test 8 2)
+        set_tests_properties(bcore-cp-stencil-test-o2 PROPERTIES COST 60)
         add_executable(bcore-cp-runtime-test tests/cp_runtime_test.cpp)
         target_link_libraries(bcore-cp-runtime-test PRIVATE bfin-core)
         target_include_directories(bcore-cp-runtime-test PRIVATE ${LLVM_INCLUDE_DIRS})

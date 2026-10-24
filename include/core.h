@@ -44,6 +44,7 @@ struct CpRuntimeStats {
     uint64_t batches = 0;  // modules compiled
     uint64_t lift_ns = 0, compile_ns = 0, extract_ns = 0;
     uint64_t code_bytes = 0;
+    uint64_t cold_bytes = 0;  // of code_bytes, the cold parts (split above opt 0)
     std::map<std::string, uint64_t> reasons;
 };
 
