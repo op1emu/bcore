@@ -36,7 +36,6 @@ int main(int argc, char** argv) {
     uint32_t tier_size_ref = 0;
     bool light_tier1 = false;
     bool copy_patch = false;
-    CpRuntimeSettings cp_runtime;
     int tier_background = -1;  // -1 on the dispatching thread; else publish_after
     const char* post_pipeline = nullptr;
     uint64_t max_steps = 0; // 0 = unlimited
@@ -77,17 +76,6 @@ int main(int argc, char** argv) {
             tier_size_ref = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--copy-patch") == 0) {
             copy_patch = true;
-        } else if (strcmp(argv[i], "--no-cp-runtime") == 0) {
-            cp_runtime.enable = false;
-        } else if (strcmp(argv[i], "--cp-runtime-opt") == 0 && i + 1 < argc) {
-            cp_runtime.opt = static_cast<int>(strtol(argv[++i], nullptr, 0));
-        } else if (strcmp(argv[i], "--cp-runtime-verify") == 0) {
-            cp_runtime.verify = true;
-        } else if (strcmp(argv[i], "--cp-runtime-range") == 0 && i + 1 < argc) {
-            // LO:HI, of RuntimeStencils::key_hash
-            char* end = nullptr;
-            cp_runtime.range_lo = strtoull(argv[++i], &end, 0);
-            cp_runtime.range_hi = end && *end == ':' ? strtoull(end + 1, nullptr, 0) : cp_runtime.range_lo;
         } else if (strcmp(argv[i], "--tier-background") == 0 && i + 1 < argc) {
             tier_background = static_cast<int>(strtol(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--post-pipeline") == 0 && i + 1 < argc) {
@@ -98,7 +86,7 @@ int main(int argc, char** argv) {
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N [--tier-size-ref N] [--tier1-pipeline light|o1]] [--copy-patch [--no-cp-runtime] [--cp-runtime-opt N] [--cp-runtime-verify] [--cp-runtime-range LO:HI]] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N [--tier-size-ref N] [--tier1-pipeline light|o1]] [--copy-patch] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -225,7 +213,6 @@ int main(int argc, char** argv) {
     core.set_loop_blocks(loop_blocks);
     core.set_tiering(tier_threshold, tier_size_ref);
     core.set_light_tier1(light_tier1);
-    core.set_copy_patch_runtime(cp_runtime);
     core.set_copy_patch(copy_patch);
     if (tier_background >= 0) core.set_tier_background(true, static_cast<uint64_t>(tier_background));
     if (!core.init(opt_level)) {
@@ -275,15 +262,6 @@ int main(int argc, char** argv) {
             fprintf(stderr, "copy-patch blocks=%llu fallbacks=%llu\n",
                     (unsigned long long)core.stats().copy_patch_blocks,
                     (unsigned long long)core.stats().copy_patch_fallbacks);
-        if (copy_patch && cp_runtime.enable) {
-            const CpRuntimeStats st = core.cp_runtime_stats();
-            fprintf(stderr, "cp-runtime built=%llu refused=%llu hits=%llu batches=%llu bytes=%llu lift=%.3fs compile=%.3fs extract=%.3fs\n",
-                    (unsigned long long)st.built, (unsigned long long)st.refused, (unsigned long long)st.hits,
-                    (unsigned long long)st.batches, (unsigned long long)st.code_bytes, st.lift_ns / 1e9,
-                    st.compile_ns / 1e9, st.extract_ns / 1e9);
-            for (const auto& [why, n] : st.reasons)
-                fprintf(stderr, "cp-runtime refused %llu: %s\n", (unsigned long long)n, why.c_str());
-        }
     }
     return cpu.exit_code;
 }

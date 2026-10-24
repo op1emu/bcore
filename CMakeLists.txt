@@ -55,7 +55,6 @@ add_library(bcore-lift STATIC
     src/bb_translator.cpp
     src/bb_stencil.cpp
     src/cp_build.cpp
-    src/cp_runtime.cpp
     src/packet_state.cpp
     src/guest_memory.cpp
     src/guest_speculation.cpp
@@ -313,16 +312,12 @@ if(BCORE_BUILD_FAULT_TESTS)
     if(BCORE_COPY_PATCH)
         add_executable(bcore-cp-stencil-test tests/cp_stencil_test.cpp)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
-        add_test(NAME bcore-cp-stencil-test COMMAND bcore-cp-stencil-test)
-        set_tests_properties(bcore-cp-stencil-test PROPERTIES COST 190)
-        # The run-time stencils at opt 2, split as the build's are (every
-        # 8th instruction: their compile is the slower).
-        add_test(NAME bcore-cp-stencil-test-o2 COMMAND bcore-cp-stencil-test 8 2)
-        set_tests_properties(bcore-cp-stencil-test-o2 PROPERTIES COST 60)
-        add_executable(bcore-cp-runtime-test tests/cp_runtime_test.cpp)
-        target_link_libraries(bcore-cp-runtime-test PRIVATE bfin-core)
-        target_include_directories(bcore-cp-runtime-test PRIVATE ${LLVM_INCLUDE_DIRS})
-        add_test(NAME bcore-cp-runtime-test COMMAND bcore-cp-runtime-test)
+        # Every third of the build's stencils' samples (a 32-bit key has four:
+        # each key's are all reached), and 100000 random parallel packets.
+        add_test(NAME bcore-cp-stencil-test COMMAND bcore-cp-stencil-test 3)
+        set_tests_properties(bcore-cp-stencil-test PROPERTIES COST 400)
+        add_test(NAME bcore-cp-stencil-test-parallel COMMAND bcore-cp-stencil-test 1 parallel 100000)
+        set_tests_properties(bcore-cp-stencil-test-parallel PROPERTIES COST 160)
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
     set_tests_properties(bcore-loop-block-test PROPERTIES COST 300)

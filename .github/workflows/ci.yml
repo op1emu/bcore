@@ -94,9 +94,9 @@ jobs:
               bcore-profile-test bcore-chain-test bcore-hwloop-jump-test
               bcore-code-arena-test bcore-lazy-state-test bcore-lb-guard-test
               bcore-loop-block-test bcore-steady-skip-test bcore-tier-test
-              bcore-cp-stencil-test bcore-cp-runtime-test
+              bcore-cp-stencil-test
             ctest-args: >-
-              -R 'bcore-profile-test|bcore-chain-test|bcore-hwloop-jump-test|bcore-code-arena-test|bcore-lazy-state-test|bcore-lb-guard-test|bcore-loop-block-test|bcore-steady-skip-test|bcore-tier-test|bcore-cp-stencil-test|bcore-cp-runtime-test'
+              -R 'bcore-profile-test|bcore-chain-test|bcore-hwloop-jump-test|bcore-code-arena-test|bcore-lazy-state-test|bcore-lb-guard-test|bcore-loop-block-test|bcore-steady-skip-test|bcore-tier-test|bcore-cp-stencil-test'
           # The core without the copy-and-patch tier, as hosts other than
           # x86-64 build it.
           - config: nocp

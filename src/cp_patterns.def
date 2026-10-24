@@ -1,6 +1,8 @@
-// The 32-bit patterns the copy-and-patch tier 0 has stencils for
-// (cp_format.h), with the field holes their lifts take
-// (LiftVisitor::field_value and pc_field, slot by slot):
+// The 32-bit patterns whose immediates and PC-relative values are field
+// holes in their copy-and-patch stencils (cp_format.h), with the holes their
+// lifts take (LiftVisitor::field_value and pc_field, slot by slot); every
+// other 32-bit pattern (the DSP instructions) has stencils too, with
+// register holes stencilgen infers:
 //   CP_PATTERN(opcode, hole0, hole1)
 // A hole is CP_NONE or CP_FIELD(arg, sign, shift, pc): the pattern's
 // argument `arg` (in the order the decoder passes them), sign-extended or

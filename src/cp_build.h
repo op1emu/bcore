@@ -1,8 +1,7 @@
 #pragma once
 
-// Building a copy-and-patch stencil (cp_format.h) from the lifter: what
-// tools/stencilgen.cpp does at build time and cp_runtime.h at run time for
-// the packets the build left without one. A stencil is the packet
+// Building a copy-and-patch stencil (cp_format.h) from the lifter, as
+// tools/stencilgen.cpp does at build time. A stencil is the packet
 // BBTranslator::translate_stencil lifts with the holes made here, compiled
 // by a Compiler in stencil mode; extract() takes each function's code and
 // relocations from the object and says why one cannot be a stencil.
@@ -48,22 +47,17 @@ public:
     // four, and the second half of a third slot that looks like a 32-bit
     // instruction (decodeInstruction, which then calls the packet illegal).
     static constexpr int kMaxWords = 5;
-    // A packet of `count` halfwords (up to kMaxWords) at pc. With fetch, a
-    // read of the halfword after them asks fetch for it (its index from pc)
-    // and adds it, so that the packet is the halfwords the lift read, in
-    // the order the decoder reads them.
-    void set_words(uint32_t pc, const uint16_t* words, int count,
-                   std::function<uint16_t(int)> fetch = nullptr) {
+    // A packet of `count` halfwords (up to kMaxWords) at pc.
+    void set_words(uint32_t pc, const uint16_t* words, int count) {
         pc_ = pc;
         count_ = count;
         for (int i = 0; i < kMaxWords; ++i) words_[i] = i < count ? words[i] : 0;
-        fetch_ = std::move(fetch);
         outside_ = false;
     }
     int count() const { return count_; }
     const uint16_t* words() const { return words_; }
-    // Whether the lifter read any halfword but the packet's (and those
-    // fetched) since set: then the stencil would depend on what follows.
+    // Whether the lifter read any halfword but the packet's since set: then
+    // the stencil would depend on what follows.
     bool read_outside() const { return outside_; }
     uint32_t base() const override { return 0; }
     uint32_t size() const override { return 0; }
@@ -72,10 +66,6 @@ public:
         const uint32_t i = (addr - pc_) / 2;
         const bool aligned = addr >= pc_ && !((addr - pc_) & 1);
         if (aligned && i < uint32_t(count_)) return words_[i];
-        if (aligned && fetch_ && i == uint32_t(count_) && count_ < kMaxWords) {
-            words_[count_] = fetch_(count_);
-            return words_[count_++];
-        }
         outside_ = true;
         return 0;
     }
@@ -91,8 +81,7 @@ public:
 private:
     uint32_t pc_ = 0;
     mutable uint16_t words_[kMaxWords] = {};
-    mutable int count_ = 0;
-    std::function<uint16_t(int)> fetch_;
+    int count_ = 0;
     mutable bool outside_ = false;
     uint8_t* dummy_ = nullptr;
 };
@@ -105,11 +94,6 @@ inline constexpr uint32_t kPcB = 0xffa01234;
 // A function's IR, but for its attribute groups' numbers (a module numbers
 // them as functions come, and the checks lift one function after another).
 std::string ir_text(llvm::Function* fn);
-// Whether two functions of one module do the same, instruction for
-// instruction (llvm::FunctionComparator): the same operations on the same
-// constants and globals, names and branch weights aside. The run time's
-// check, in a fraction of the time printing both takes.
-bool same_ir(const llvm::Function& a, const llvm::Function& b);
 
 // ---- Holes ----
 

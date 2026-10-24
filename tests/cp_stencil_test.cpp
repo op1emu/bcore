@@ -1,22 +1,21 @@
 // Every copy-and-patch stencil (Core::set_copy_patch) against the LLVM tier
-// 0 it stands for: each 16-bit encoding with a stencil, samples of each key
-// of the 32-bit patterns (cp_patterns.def), and packets the build has no
-// stencil for, whose stencils are built at run time
-// (Core::set_copy_patch_runtime): parallel packets and the other 32-bit
-// instructions. Each is the first packet of a block [packet, RTS], run from
-// the same random guest state in two cores, one with stencils and one
-// without. The guest state, memory and
+// 0 it stands for: each 16-bit encoding, samples of each key of the 32-bit
+// patterns (two register holes the same register in some), and random
+// parallel packets, which the translator puts together from the build's
+// pieces (or, an illegal one, compiles with LLVM). Each is the first packet
+// of a block [packet, RTS], run from the same random guest state in two
+// cores, one with stencils and one without. The guest state, memory and
 // every host callback (with the packet index it sees, the guest time of
 // op1emu's devices) must be the same.
 //
 // The states make each path run somewhere: loop bottoms at the
 // instruction (with every loop count), CC both ways, pointers into RAM
 // (aligned or not), into memory with no page (the callbacks), an
-// interrupt pending.
+// interrupt pending; and loads whose callback raises an exception.
 //
-// Arguments: a stride (every n-th instruction only, a quick check) and the
-// run-time stencils' opt (CpRuntimeSettings::opt, 0 by default; above 0
-// they are split, their cold parts placed apart as the build's are).
+// Arguments: a stride (every n-th instruction only, a quick check), or
+// "STRIDE parallel N" for N random parallel packets alone.
+
 #include "core.h"
 #include "mmr.h"
 #include "bcore_profile.h"
@@ -25,6 +24,7 @@
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -102,17 +102,12 @@ struct Side {
     CpuState cpu{};
     std::unique_ptr<TraceMemory> mem;
     std::unique_ptr<Core> core;
-    Side(bool copy_patch, int runtime_opt) {
+    explicit Side(bool copy_patch) {
         mem = std::make_unique<TraceMemory>(&cpu);
         core = std::make_unique<Core>(&cpu, mem.get());
         core->set_chaining(true, false);
         core->set_tiering(0x7fffffff);  // tier 0 throughout
         core->set_copy_patch(copy_patch);
-        if (copy_patch) {
-            CpRuntimeSettings settings;
-            settings.opt = runtime_opt;
-            core->set_copy_patch_runtime(settings);
-        }
         require(core->init(1), "init");
     }
 };
@@ -179,6 +174,7 @@ struct Instruction {
     // whose callback raises an exception, in an interrupt's handler (where
     // the exception leaves the registers alone, as the callbacks promise).
     bool raises = false;
+    bool body = false;  // a slot 0 piece's key, NOP slots: made of the build's pieces
 };
 
 std::vector<Instruction> instructions() {
@@ -215,41 +211,32 @@ std::vector<Instruction> instructions() {
                 // The decoder takes the first pattern that matches.
                 uint32_t first = 0;
                 while ((insn & bcore_cp::kPatterns32[first].mask) != bcore_cp::kPatterns32[first].value) ++first;
-                if (first == p) out.push_back({insn, 4});
+                if (first != p) continue;
+                // A key with the multi-issue bit: slot 0's piece, in a packet
+                // with NOP slots.
+                const uint32_t entry = bcore_cp::kKeys32[sel.keys + key];
+                if (bcore_cp::kStencils[entry - 1].flags & bcore_cp::kBody)
+                    out.push_back({uint64_t(insn) << 32, 8, false, true});
+                else
+                    out.push_back({insn, 4});
             }
         }
     }
     return out;
 }
 
-// Packets whose stencils are built at run time: 32-bit instructions of the
-// patterns without stencils, and parallel packets, a DSP instruction (any
-// 32-bit pattern of 0xc000, the multi-issue bit set) and two 16-bit slots
-// (mostly NOPs and loads and stores, as the guest's are), legal or not.
-std::vector<Instruction> runtime_instructions(size_t count32, size_t parallel) {
+// Parallel packets: a DSP instruction (any 32-bit pattern of 0xc000, the
+// multi-issue bit set) and two 16-bit slots (mostly NOPs, loads and stores
+// and words the slot takes, as the guest's are), legal or not.
+std::vector<Instruction> parallel_instructions(size_t parallel) {
     std::vector<Instruction> out;
     std::mt19937 rng(11);
-    auto first_match = [](uint32_t insn) {
-        for (uint32_t p = 0; p < bcore_cp::kPatterns32Count; ++p)
-            if ((insn & bcore_cp::kPatterns32[p].mask) == bcore_cp::kPatterns32[p].value) return int(p);
-        return -1;
-    };
     auto is16 = [](uint16_t w) {
         return (w & 0xc000) != 0xc000 || (w & 0xff00) == 0xf800 || (w & 0xff00) == 0xf900 || (w & 0xff00) == 0xff00;
     };
-    std::vector<uint32_t> plain, dsp;
-    for (uint32_t p = 0; p < bcore_cp::kPatterns32Count; ++p) {
-        const auto& pattern = bcore_cp::kPatterns32[p];
-        if (pattern.selected < 0) plain.push_back(p);
-        if ((pattern.value >> 28) == 0xc) dsp.push_back(p);
-    }
-    for (size_t tries = 0; !plain.empty() && out.size() < count32 && tries < 100 * count32; ++tries) {
-        const auto& pattern = bcore_cp::kPatterns32[plain[rng() % plain.size()]];
-        const uint32_t insn = (pattern.value | (rng() & ~pattern.mask)) & ~0x08000000u;
-        if (!is16(uint16_t(insn >> 16)) && first_match(insn) >= 0 &&
-            bcore_cp::kPatterns32[first_match(insn)].selected < 0)
-            out.push_back({insn, 4});
-    }
+    std::vector<uint32_t> dsp;
+    for (uint32_t p = 0; p < bcore_cp::kPatterns32Count; ++p)
+        if ((bcore_cp::kPatterns32[p].value >> 28) == 0xc) dsp.push_back(p);
     // A slot's word: a NOP, a load or store, one the slot takes (the
     // build's pieces), or any.
     std::vector<uint16_t> legal[2];
@@ -293,33 +280,26 @@ uint64_t hash_data(const TraceMemory& mem) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const unsigned stride = argc > 1 ? unsigned(atoi(argv[1])) : 1;
-    const int runtime_opt = argc > 2 ? atoi(argv[2]) : 0;
-    // "parallel N": N random parallel packets only (most of them pieces of
-    // the build's stencils).
-    const bool parallel_only = argc > 3 && !strcmp(argv[3], "parallel");
-    const size_t parallel = parallel_only && argc > 4 ? size_t(atol(argv[4])) : 24000;
+    // [STRIDE] [parallel N]: every STRIDE-th instruction; or N random
+    // parallel packets alone.
+    const unsigned stride = argc > 1 ? std::max(1, atoi(argv[1])) : 1;
+    const bool parallel_only = argc > 2 && !strcmp(argv[2], "parallel");
+    const size_t parallel = parallel_only && argc > 3 ? size_t(atol(argv[3])) : 24000;
     auto all = parallel_only ? std::vector<Instruction>{} : instructions();
-    const size_t built_stencils = all.size();
     {
-        const auto more = runtime_instructions(parallel_only ? 0 : 8000, parallel);
+        const auto more = parallel_instructions(parallel);
         all.insert(all.end(), more.begin(), more.end());
     }
     std::vector<Instruction> todo;
-    size_t todo_built = 0;  // of todo, those with the build's stencils (first)
-    for (size_t i = 0; i < all.size(); i += stride) {
-        todo.push_back(all[i]);
-        todo_built += i < built_stencils;
-    }
-    printf("cp_stencil_test: %zu instructions, run-time stencils at opt %d\n", todo.size(), runtime_opt);
+    for (size_t i = 0; i < all.size(); i += stride) todo.push_back(all[i]);
+    printf("cp_stencil_test: %zu instructions\n", todo.size());
 
     // A core holds at most TierTable::kCounters tier-0 blocks: a fresh pair
     // for each chunk.
     constexpr size_t kChunk = 20000;
-    size_t compared = 0, made = 0, made_built = 0;
-    uint64_t cold_bytes = 0, runtime_built = 0;
+    size_t compared = 0, made = 0, refused = 0;
     for (size_t begin = 0; begin < todo.size(); begin += kChunk) {
-        Side cp(true, runtime_opt), llvm(false, runtime_opt);
+        Side cp(true), llvm(false);
         const size_t end = std::min(todo.size(), begin + kChunk);
         for (size_t i = begin; i < end; ++i) {
             const Instruction& in = todo[i];
@@ -354,7 +334,10 @@ int main(int argc, char** argv) {
             }
             const uint64_t got = cp.core->stats().copy_patch_blocks - before;
             made += got;
-            if (i < todo_built) made_built += got;
+            if (!got && (in.len < 8 || in.body)) {  // the build has stencils for each
+                fprintf(stderr, "no stencil block for %0*llx\n", in.len * 2, (unsigned long long)in.insn);
+                ++refused;
+            }
             char what[64];
             snprintf(what, sizeof what, "%s %0*llx at %08x", in.len == 2 ? "16-bit" : in.len == 4 ? "32-bit" : "parallel",
                      in.len * 2, (unsigned long long)in.insn, pc);
@@ -363,24 +346,13 @@ int main(int argc, char** argv) {
             require(hash_data(*cp.mem) == hash_data(*llvm.mem), std::string("memory after ") + what);
             ++compared;
         }
-        cold_bytes += cp.core->cp_runtime_stats().cold_bytes;
-        runtime_built += cp.core->cp_runtime_stats().built;
     }
-    printf("cp_stencil_test: %zu compared, %zu made of stencils; %zu of them with stencils built at run time, %zu "
-           "made of stencils\n",
-           compared, made, compared - todo_built, made - made_built);
-    printf("cp_stencil_test: %llu stencils built at run time\n", (unsigned long long)runtime_built);
+    printf("cp_stencil_test: %zu compared, %zu made of stencils\n", compared, made);
 #if BCORE_ENABLE_PROFILE  // the count is a profiling counter
-    require(made_built == todo_built, "every block of the build's stencils made of stencils");
-    // Packets the run time refuses compile with LLVM (compared all the
-    // same): a few illegal encodings at most.
-    require((made - made_built) * 100 >= (compared - todo_built) * 99, "the run time refused more than 1% of its packets");
+    require(refused == 0, "a lone instruction's or slot 0 piece's block not made of stencils");
+    // Parallel packets the build has no pieces for (an illegal slot,
+    // SEARCH) compile with LLVM, compared all the same.
 #endif
-    // Split or not as the opt says: the cold parts ran above (an exception,
-    // a memory callback, a loop bottom are in them).
-    printf("cp_stencil_test: run-time stencils' cold parts %llu bytes\n", (unsigned long long)cold_bytes);
-    require(runtime_opt > 0 ? cold_bytes > 0 || runtime_built == 0 : cold_bytes == 0,
-            "run-time stencils split above opt 0 only");
     printf("PASS\n");
     return 0;
 }
