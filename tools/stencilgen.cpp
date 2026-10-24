@@ -9,16 +9,27 @@
 //
 // Every 16-bit word the decoder takes for a 16-bit instruction gets a
 // stencil, and every value of the key fields of each pattern in
-// cp_patterns.def (the fields that are not holes). Each is the packet
+// cp_patterns.def and of each DSP pattern (whose data register fields are
+// register holes, infer_regs). Each is the packet
 // BBTranslator::translate_stencil lifts, compiled at O2 for generic x86-64
-// (Compiler::init's stencil mode). The checks that make a stencil hold for
+// (Compiler::init's stencil mode). A parallel packet is made of pieces:
+// each 16-bit word in slot 1 and in slot 2 (its writes to the slot
+// scratch, in a variant for each entry state), each DSP key with the
+// multi-issue bit as slot 0 (the body), a commit for each set of slot
+// writes, and the packet's tail. The checks that make a stencil hold for
 // every PC and every value of its holes:
 //   - the lift at two PCs is the same IR: nothing in it depends on the PC
 //     but the PC hole;
 //   - for a 32-bit pattern, lifts with other values of the hole fields
-//     (all of them for fields up to 12 bits, 4096 samples beyond) are the
-//     same IR, and the values the lifter took for the holes are the ones
-//     the pattern's formula gives;
+//     (all of them for fields up to 12 bits, 4096 samples beyond) and
+//     other registers in the register holes are the same IR, the values the
+//     lifter took for the holes are the ones the pattern's formula gives,
+//     and no register hole's register is reached another way;
+//   - a body reads no field after writing it (or is lifted as a parallel
+//     packet's, writes at the end), is the same IR with the multi-issue bit
+//     clear, and its code goes on only: no exit, no helper;
+//   - a slot piece's writes fit the scratch, and it does not end the
+//     packet;
 //   - every relocation of the compiled code is one the translator fills
 //     in: a value hole as an absolute 32-bit field, the next packet, the
 //     exit or a helper as a 32-bit PC-relative one. An encoding whose code
@@ -365,6 +376,21 @@ public:
             item.error = "slot 0 reads a field after writing it";
             return;
         }
+        // The multi-issue bit is the packet's, not the instruction's: the
+        // same piece with it clear (where a pattern still takes it).
+        {
+            Item lone = item;
+            lone.insn &= ~0x08000000u;
+            if (first_match(patterns, lone.insn) == info.pattern) {
+                auto m = lift_body(scratch, lone, kPcA, "s", regs, parallel);
+                const bool same_m = ir_text(m.fn) == text;
+                m.fn->eraseFromParent();
+                if (!same_m) {
+                    item.error = "IR depends on the multi-issue bit";
+                    return;
+                }
+            }
+        }
         if (regs) {
             if (a.reg_violation) {
                 item.error = "a register hole reached another way";
@@ -637,6 +663,20 @@ void infer_regs(Worker& worker, const std::vector<Pattern>& patterns, SelectedIn
     info = best;
 }
 
+// A slot 0 piece runs between the slots and their commits: it may go on
+// only (to the next piece), touch no memory and leave nothing to the
+// block's exits.
+bool body_relocs_ok(const Code& code) {
+    for (const auto* relocs : {&code.relocs, &code.cold_relocs})
+        for (const bcore_cp::Reloc& r : *relocs) {
+            const unsigned h = r.hole;
+            const bool on = h == kHolePc || h == kHolePacket || h == kHoleCont || h == kHoleHot || h == kHoleCold ||
+                            (h >= kHoleField0 && h < kHoleField0 + 4u) || (h >= kHoleReg0 && h < kHoleReg0 + kRegHoles);
+            if (!on) return false;
+        }
+    return true;
+}
+
 // Whether a pattern's slot 0 pieces read a field after writing it (with
 // its register holes: a data register after another's store), on samples
 // of its keys: then they are lifted as a parallel packet's, which make
@@ -887,6 +927,8 @@ int main(int argc, char** argv) {
                         auto it = code.find(names[j - start]);
                         if (it == code.end()) item.error = "no code";
                         else if (!it->second.error.empty()) item.error = it->second.error;
+                        else if ((item.flags & kBody) && !body_relocs_ok(it->second))
+                            item.error = "slot 0 has a way out or calls a helper";
                         else item.code = std::move(it->second);
                     }
                 }
@@ -1037,7 +1079,7 @@ int main(int argc, char** argv) {
         }
     }
     std::vector<uint32_t> slots(8 * 0x10000 * 2, 0);  // SlotEntry kSlots[8][0x10000]
-    size_t made_slot[2] = {}, legal_slot[2] = {};
+    size_t made_slot[2] = {}, legal_slot[2] = {}, dj_unknown[2] = {};
 
     std::vector<uint32_t> index16(0x10000, 0), keys32;
     std::vector<uint32_t> keys_base(selected.size(), 0);
@@ -1062,6 +1104,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             ++made_slot[item.slot - 1];
+            dj_unknown[item.slot - 1] += item.has[0] && (item.slot_flags[0] & kDjUnknown);
             for (int v = 0; v < Item::kVariants; ++v) {
                 if (!item.has[v]) continue;
                 const Code& code = item.variant_code[item.same_as[v]];
@@ -1179,6 +1222,8 @@ int main(int argc, char** argv) {
         fprintf(r, "32-bit: %zu of %zu keys have stencils\n", made32, total32);
         fprintf(r, "slots: %zu of %zu slot 1 words, %zu of %zu slot 2 words have stencils; %zu commits\n", made_slot[0],
                 legal_slot[0], made_slot[1], legal_slot[1], commit_of.size());
+        fprintf(r, "slots: did_jump not known clear after %zu slot 1 words, %zu slot 2 words\n", dj_unknown[0],
+                dj_unknown[1]);
         fprintf(r, "stencils: %zu, code %zu bytes, relocations %zu\n", blob.stencils.size(), blob.code.size(),
                 blob.relocs.size());
         fprintf(r, "without a stencil:\n");
