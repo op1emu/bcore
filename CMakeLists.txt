@@ -313,11 +313,18 @@ if(BCORE_BUILD_FAULT_TESTS)
         add_executable(bcore-cp-stencil-test tests/cp_stencil_test.cpp)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
         # Every third of the build's stencils' samples (a 32-bit key has four:
-        # each key's are all reached), and 100000 random parallel packets.
-        add_test(NAME bcore-cp-stencil-test COMMAND bcore-cp-stencil-test 3)
-        set_tests_properties(bcore-cp-stencil-test PROPERTIES COST 400)
+        # each key's are all reached), in four shards that run in parallel,
+        # and 100000 random parallel packets.
+        foreach(offset 0 3 6 9)
+            add_test(NAME bcore-cp-stencil-test-${offset} COMMAND bcore-cp-stencil-test 12 ${offset})
+            set_tests_properties(bcore-cp-stencil-test-${offset} PROPERTIES COST 200)
+        endforeach()
         add_test(NAME bcore-cp-stencil-test-parallel COMMAND bcore-cp-stencil-test 1 parallel 100000)
-        set_tests_properties(bcore-cp-stencil-test-parallel PROPERTIES COST 160)
+        set_tests_properties(bcore-cp-stencil-test-parallel PROPERTIES COST 300)
+        # A Memory whose callbacks change registers: every parallel packet
+        # compiled with LLVM, the rest still stencils.
+        add_test(NAME bcore-cp-stencil-test-clobber COMMAND bcore-cp-stencil-test 32 clobber 20000)
+        set_tests_properties(bcore-cp-stencil-test-clobber PROPERTIES COST 200)
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
     set_tests_properties(bcore-loop-block-test PROPERTIES COST 300)

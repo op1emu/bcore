@@ -885,7 +885,14 @@ after the commits each fail it. A load whose callback raises an exception
 must be tested in a supervisor handler: from user mode the exception
 switches SP, which a Memory that promises callbacks keep the registers
 breaks, and LLVM's tier 0 (which keeps them cached) and the stencils then
-differ, the build's lone stencils as much as the pieces.
+differ, the build's lone stencils as much as the pieces. A Memory whose
+callbacks do change registers (and say so) gets no composed packets, and
+the test checks it: one that changes them while promising otherwise
+makes composed packets differ from LLVM's. The lone stencils are lifted
+as for a Memory that keeps nothing, so they hold for either. stencilgen
+refuses a body with any relocation but the next piece and its value holes,
+or whose IR changes with the multi-issue bit. The stride-3 run took 18
+minutes on one thread; ctest runs it as four shards.
 
 Result on the boot to the main display (6 pairs): the CPU thread's compile
 time 5.25 to 0.45 s, execution -9.7%, JIT CPU 9.8 to 4.9 s, work the same.

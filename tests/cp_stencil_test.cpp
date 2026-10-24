@@ -13,8 +13,12 @@
 // (aligned or not), into memory with no page (the callbacks), an
 // interrupt pending; and loads whose callback raises an exception.
 //
-// Arguments: a stride (every n-th instruction only, a quick check), or
-// "STRIDE parallel N" for N random parallel packets alone.
+// Arguments: a stride and an offset (every n-th instruction from the
+// offset only: ctest runs a stride's shards in parallel); "STRIDE parallel
+// N" for N random parallel packets alone; or "STRIDE clobber N", every
+// n-th instruction and N parallel packets with a Memory whose callbacks
+// change a data register: no parallel packet is made of pieces then (they
+// need callbacks_preserve_registers()), the rest the same.
 
 #include "core.h"
 #include "mmr.h"
@@ -58,6 +62,9 @@ public:
     // A read outside the RAM raises an exception (a guest one, as a bus
     // error would: did_jump set in the middle of a packet).
     bool read_raises = false;
+    // Each callback changes a data register (and says it may).
+    bool clobbers = false;
+    bool callbacks_preserve_registers() const override { return !clobbers; }
 
     uint8_t read8(uint32_t addr) const override {
         if (addr < kRam) return FlatMemory::read8(addr);
@@ -92,6 +99,7 @@ private:
         char line[96];
         snprintf(line, sizeof line, "%s %08x %08x packets=%u", what, addr, value, cpu_->packets);
         const_cast<TraceMemory*>(this)->log.push_back(line);
+        if (clobbers) cpu_->dpregs[(addr >> 2) & 7] ^= 0x5a5a0001u;
         if (what[0] == 'r' && read_raises) cec_exception(cpu_, 0x26, const_cast<TraceMemory*>(this));
         return addr * 0x9e3779b1u;
     }
@@ -102,8 +110,9 @@ struct Side {
     CpuState cpu{};
     std::unique_ptr<TraceMemory> mem;
     std::unique_ptr<Core> core;
-    explicit Side(bool copy_patch) {
+    Side(bool copy_patch, bool clobbers) {
         mem = std::make_unique<TraceMemory>(&cpu);
+        mem->clobbers = clobbers;
         core = std::make_unique<Core>(&cpu, mem.get());
         core->set_chaining(true, false);
         core->set_tiering(0x7fffffff);  // tier 0 throughout
@@ -228,6 +237,26 @@ std::vector<Instruction> instructions() {
 // Parallel packets: a DSP instruction (any 32-bit pattern of 0xc000, the
 // multi-issue bit set) and two 16-bit slots (mostly NOPs, loads and stores
 // and words the slot takes, as the guest's are), legal or not.
+// Whether slot 0 of a parallel packet whose first 32 bits are insn has a
+// body (its key's stencil, as CpTranslator::scan finds it): the packet is
+// made of pieces then, if anything. Otherwise slot 0 does not take the
+// instruction, and the packet raises its exception as a lone stencil.
+bool slot0_has_body(uint32_t insn) {
+    using namespace bcore_cp;
+    for (uint32_t p = 0; p < kPatterns32Count; ++p) {
+        if ((insn & kPatterns32[p].mask) != kPatterns32[p].value) continue;
+        if (kPatterns32[p].selected < 0) return false;
+        const Selected32& sel = kSelected32[kPatterns32[p].selected];
+        uint32_t key = 0;
+        unsigned bit = 0;
+        for (uint32_t m = sel.key_mask; m; m &= m - 1, ++bit)
+            if (insn & m & -m) key |= 1u << bit;
+        const uint32_t id = kKeys32[sel.keys + key];
+        return id && (kStencils[id - 1].flags & kBody);
+    }
+    return false;
+}
+
 std::vector<Instruction> parallel_instructions(size_t parallel) {
     std::vector<Instruction> out;
     std::mt19937 rng(11);
@@ -280,18 +309,23 @@ uint64_t hash_data(const TraceMemory& mem) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // [STRIDE] [parallel N]: every STRIDE-th instruction; or N random
-    // parallel packets alone.
+    // [STRIDE [OFFSET]] [parallel N | clobber N]: every STRIDE-th
+    // instruction from OFFSET; N random parallel packets alone; or every
+    // STRIDE-th instruction and N parallel packets, callbacks clobbering.
     const unsigned stride = argc > 1 ? std::max(1, atoi(argv[1])) : 1;
     const bool parallel_only = argc > 2 && !strcmp(argv[2], "parallel");
-    const size_t parallel = parallel_only && argc > 3 ? size_t(atol(argv[3])) : 24000;
-    auto all = parallel_only ? std::vector<Instruction>{} : instructions();
+    const bool clobbers = argc > 2 && !strcmp(argv[2], "clobber");
+    const size_t offset = argc > 2 && !parallel_only && !clobbers ? size_t(atol(argv[2])) : 0;
+    const size_t parallel = (parallel_only || clobbers) && argc > 3 ? size_t(atol(argv[3])) : 24000;
+    std::vector<Instruction> todo;
+    if (!parallel_only) {
+        const auto lone = instructions();
+        for (size_t i = offset; i < lone.size(); i += stride) todo.push_back(lone[i]);
+    }
     {
         const auto more = parallel_instructions(parallel);
-        all.insert(all.end(), more.begin(), more.end());
+        for (size_t i = clobbers ? 0 : offset; i < more.size(); i += clobbers ? 1 : stride) todo.push_back(more[i]);
     }
-    std::vector<Instruction> todo;
-    for (size_t i = 0; i < all.size(); i += stride) todo.push_back(all[i]);
     printf("cp_stencil_test: %zu instructions\n", todo.size());
 
     // A core holds at most TierTable::kCounters tier-0 blocks: a fresh pair
@@ -299,7 +333,7 @@ int main(int argc, char** argv) {
     constexpr size_t kChunk = 20000;
     size_t compared = 0, made = 0, refused = 0;
     for (size_t begin = 0; begin < todo.size(); begin += kChunk) {
-        Side cp(true), llvm(false);
+        Side cp(true, clobbers), llvm(false, clobbers);
         const size_t end = std::min(todo.size(), begin + kChunk);
         for (size_t i = begin; i < end; ++i) {
             const Instruction& in = todo[i];
@@ -334,8 +368,12 @@ int main(int argc, char** argv) {
             }
             const uint64_t got = cp.core->stats().copy_patch_blocks - before;
             made += got;
-            if (!got && (in.len < 8 || in.body)) {  // the build has stencils for each
+            if (!got && (in.len < 8 || (in.body && !clobbers))) {  // the build has stencils for each
                 fprintf(stderr, "no stencil block for %0*llx\n", in.len * 2, (unsigned long long)in.insn);
+                ++refused;
+            }
+            if (got && in.len == 8 && clobbers && slot0_has_body(uint32_t(in.insn >> 32))) {
+                fprintf(stderr, "parallel %016llx made of pieces, callbacks clobbering\n", (unsigned long long)in.insn);
                 ++refused;
             }
             char what[64];
@@ -349,7 +387,7 @@ int main(int argc, char** argv) {
     }
     printf("cp_stencil_test: %zu compared, %zu made of stencils\n", compared, made);
 #if BCORE_ENABLE_PROFILE  // the count is a profiling counter
-    require(refused == 0, "a lone instruction's or slot 0 piece's block not made of stencils");
+    require(refused == 0, "a block made of stencils or not against the rules above");
     // Parallel packets the build has no pieces for (an illegal slot,
     // SEARCH) compile with LLVM, compared all the same.
 #endif
