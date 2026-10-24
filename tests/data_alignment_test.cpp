@@ -114,6 +114,21 @@ int main() {
         require(core.run(0x100),"run DISALGNEXCPT");
         require(mem.faults==0 && cpu.dpregs[0]==0x12345678 && cpu.iregs[0]==0x205,"suppressed load aligns down");
         ++count;
+        // DISALGNEXCPT lasts for its packet only: a later load in the same block faults.
+        for(bool cp:{false,true}) {
+            if(cp && mode!=3) continue;  // copy-and-patch needs the page table
+            Ram mem(mode);CpuState cpu{};Core core(&cpu,&mem);require(core.init(opt),"init packet scope");
+            core.set_copy_patch(cp);
+            cec_init();evt_init();evt_write(EVT_BASE+12,0x300);cec_return_rti(&cpu);
+            mem.write32(0x100,0xc000cc12);mem.write32(0x104,0x00009c00);  // DISALGNEXCPT || R0 = [I0++] || NOP
+            mem.write16(0x108,0x9c01);mem.write16(0x10a,0x2000);           // R1 = [I0++]
+            mem.write32(0x200,0x12345678);cpu.iregs[0]=0x201;cpu.dpregs[1]=7;
+            require(core.run(0x100),"run packet scope");
+            require(cpu.dpregs[0]==0x12345678,"the packet's own load aligns down");
+            require(mem.faults==1 && mem.fault_addr==0x205 && cpu.retx==0x108,"the next packet's load faults");
+            require(cpu.dpregs[1]==7 && cpu.iregs[0]==0x205,"no commit of the faulting load");
+            ++count;
+        }
     }
     printf("PASS: %d data alignment cases (callback/raw/fastmem/page table, O0/O2)\n",count);
 }

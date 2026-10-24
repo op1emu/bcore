@@ -129,8 +129,12 @@ public:
     // (set_loop_mode's fields) or the chain exit's own.
     bool shadowed(size_t offset) const;
     static bool shadowable(size_t offset);
-    // The packet being lifted (BBTranslator, before each).
-    void set_packet_pc(uint32_t pc) { packet_pc_ = pc; }
+    // The packet being lifted (BBTranslator, before each). DISALGNEXCPT
+    // lasts for its own packet only (bfin-sim clears it at each instruction).
+    void set_packet_pc(uint32_t pc) {
+        packet_pc_ = pc;
+        dis_algn_expt_ = false;
+    }
     // For each CpuState field the block reaches through its cpu pointer, the
     // first packet's PC that does; and the packets that take a back edge or
     // jump to a constant PC, with that PC.
