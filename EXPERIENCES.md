@@ -803,3 +803,38 @@ of 45 IR instructions cost 1.8 ms.
   through the page table must ask the Memory whether it shows one now, not
   use the table noted earlier (a host hides it to see every access); and
   the core must build without the tier, which CI now does on x86-64 too.
+
+## Copy-and-patch code: what its time was
+
+- On the boot to the main display the stencils' code was 77% of the
+  generated code's execution (1.0 s in blocks never promoted, 0.6 s in
+  blocks before their promotion), at an IPC of 1.27 against tier 1's 1.98:
+  icache stalls (ICACHE_DATA and ICACHE_TAG) were 24% of its cycles. Each
+  packet's stencil was its hot path, a jump over its own cold paths (the
+  loop-bottom step, the memory callbacks, exits) and then the jump to the
+  next: about 220 bytes a packet, of which the hot path was under half.
+- cycles:upp put 9.5% of the stencils' samples on the `push %rax` that
+  opened nearly every stencil and 3% on the loop-bottom compares. Neither
+  was the cost: an 8-byte stack alignment for stencil modules (which took
+  the push and pop away; LLVM 15's shrink-wrapping does not sink a frame
+  past the entry's loads, and helpers then need call-aligning trampolines
+  chosen by each stencil's .stack_sizes frame) and stepping hardware loops
+  inline instead of calling bfin_hwloop_step each cut host instructions by
+  0.2-0.3% and changed execution by nothing an A/B could see, before the
+  split as after it. A precise sample at a jump's target is the jump's
+  cost and the front end's, not the instruction's. Dropped.
+- Splitting the stencils as LLVM's blocks are (Compiler's stencil mode with
+  the machine function splitter: each function gets a section of its own
+  and its cold part .text.split.<name>; the hot and cold parts branch to
+  each other through holes of their own) halved the hot code: a mean of
+  124 bytes, 17,393 stencils ending in a jump to the next packet that the
+  translator drops, and the boot's placed code 55.6 -> 36.8 MB. Execution
+  -12.5%. The exits an arena shares are copied whole and stay unsplit
+  (Compiler::kNoSplitAttr).
+- A block's own chain exit, back to its start without the chain table on
+  its own next PC: -1.0% alone (not resolved), -2.6% once split.
+- The run-time stencils are split above -O0 only: at -O0 the splitter's
+  block-frequency analyses added 5% to their compile time, for 0.5% fewer
+  execution instructions.
+- Together, boot to main display: execution -11.2% (8 pairs, 95% CI
+  -12.7..-9.7%), compile unchanged.
