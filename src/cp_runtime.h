@@ -78,6 +78,8 @@ public:
         Stencil stencil{};
         std::vector<uint8_t> code;
         std::vector<Reloc> relocs;
+        std::vector<uint8_t> cold;  // its cold code (Stencil::cold)
+        std::vector<Reloc> cold_relocs;
     };
     struct Stats {
         uint64_t hits = 0;       // lookups that found a stencil (or found none, refused before)

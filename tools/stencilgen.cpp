@@ -157,7 +157,7 @@ class Worker {
 public:
     Worker() : translator_(&memory_) {
         translator_.set_lazy_state(true);
-        compiler_.init(2, 2, /*split=*/false, /*stencil=*/true);
+        compiler_.init(2, 2, /*split=*/true, /*stencil=*/true);
     }
 
     // Lifts item at pc into mod as `name`; false with item.error set if the
@@ -299,6 +299,12 @@ struct Blob {
     uint32_t add(const Code& c, uint16_t flags, uint8_t bytes) {
         std::string key(c.bytes.begin(), c.bytes.end());
         key.append(reinterpret_cast<const char*>(c.relocs.data()), c.relocs.size() * sizeof(bcore_cp::Reloc));
+        key.push_back('|');
+        key.append(c.cold.begin(), c.cold.end());
+        key.append(reinterpret_cast<const char*>(c.cold_relocs.data()), c.cold_relocs.size() * sizeof(bcore_cp::Reloc));
+        // The parts' lengths, so that no two of them run into each other.
+        for (size_t n : {c.bytes.size(), c.relocs.size(), c.cold.size(), c.cold_relocs.size()})
+            key.append(reinterpret_cast<const char*>(&n), sizeof n);
         key.append(reinterpret_cast<const char*>(&flags), sizeof flags);
         key.push_back(char(bytes));
         auto it = dedup.find(key);
@@ -314,6 +320,15 @@ struct Blob {
         s.bytes = bytes;
         code.insert(code.end(), c.bytes.begin(), c.bytes.end());
         relocs.insert(relocs.end(), c.relocs.begin(), c.relocs.end());
+        if (!c.cold.empty()) {
+            while (code.size() % 4) code.push_back(0xcc);
+            s.cold = uint32_t(code.size());
+            s.cold_size = uint16_t(c.cold.size());
+            code.insert(code.end(), c.cold.begin(), c.cold.end());
+        }
+        s.cold_relocs = uint32_t(relocs.size());
+        s.cold_reloc_count = uint16_t(c.cold_relocs.size());
+        relocs.insert(relocs.end(), c.cold_relocs.begin(), c.cold_relocs.end());
         stencils.push_back(s);
         return dedup[key] = uint32_t(stencils.size() - 1);
     }
@@ -505,6 +520,8 @@ int main(int argc, char** argv) {
             call->setTailCallKind(CallInst::TCK_MustTail);
             b.CreateRetVoid();
         }
+        // The exits an arena shares are copied whole (CpTranslator::arena_for).
+        for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
         std::map<std::string, Code> code;
         worker.compile(mod, code);
         auto add = [&](const char* name) -> uint32_t {
@@ -571,7 +588,8 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kCodeSize = %zu;\n", blob.code.size());
     fprintf(f, "const Stencil kStencils[] = {\n");
     for (const Stencil& s : blob.stencils)
-        fprintf(f, "    {%u, %u, %u, %u, %u, %u, 0},\n", s.code, s.size, s.flags, s.relocs, s.reloc_count, s.bytes);
+        fprintf(f, "    {%u, %u, %u, %u, %u, %u, 0, %u, %u, %u, %u},\n", s.code, s.size, s.flags, s.relocs, s.reloc_count,
+                s.bytes, s.cold, s.cold_size, s.cold_reloc_count, s.cold_relocs);
     fprintf(f, "};\nconst Reloc kRelocs[] = {\n");
     for (const bcore_cp::Reloc& r : blob.relocs) fprintf(f, "    {%u, %u, %u, %d},\n", r.offset, r.hole, r.kind, r.addend);
     if (blob.relocs.empty()) fprintf(f, "    {0, 0, 0, 0},\n");

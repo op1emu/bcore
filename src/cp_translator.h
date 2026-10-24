@@ -12,9 +12,11 @@
 // code is, in order: the prologue (the tier counter, and CYCLES with host
 // cycles), each packet's stencil, for a block the packet cap cuts the
 // fall-through stencil, and, for a block that chains, its own exit
-// (Config::self_loop). A packet's path to the next one is a jump to the
-// next stencil, dropped where it is the stencil's last instruction, and so
-// is a last jump to the block's own exit; every path that leaves the block
+// (Config::self_loop). Stencils are split (cp_format.h's Stencil): the
+// block is their hot parts, one after the other, and their cold parts lie
+// in the arena's cold region. A packet's path to the next one is a jump to
+// the next stencil, dropped where it ends the hot part, and so is a last
+// jump to the block's own exit; every path that leaves the block
 // jumps to that exit, or to the exit stencil of its arena: the chain exit
 // of a block whose next PC is known only at run time
 // (BBTranslator::emit_stencil_exit). A block's own exit runs the block
@@ -74,6 +76,8 @@ public:
         uint32_t packets = 0;
         uint32_t threshold = 0;    // its tier counter's: tier_threshold of its packets
         size_t size = 0;           // its code's bytes, at fn
+        uint8_t* cold = nullptr;   // its cold code (in the arena's cold region), cold_size bytes
+        size_t cold_size = 0;
         const char* why = nullptr; // why there is none
         // Packets whose stencils were built at run time (set_runtime), and
         // how many of them this translation built.
@@ -127,6 +131,9 @@ private:
         int selected;  // the 32-bit pattern (kSelected32), or -1
         size_t at;     // offset in the block's code
         size_t size;   // bytes placed
+        const uint8_t* cold = nullptr;  // its cold code (Stencil::cold) and relocations
+        const bcore_cp::Reloc* cold_relocs = nullptr;
+        size_t cold_at = 0;  // offset in the block's cold code
     };
     // An arena's helper jumps and exit stencils, placed when the arena is
     // first used.
@@ -137,7 +144,7 @@ private:
     };
     bool scan(uint32_t pc, Memory& code, const Config& config, Block& out);
     Arena* arena_for(size_t size);
-    bool place(Arena& arena, uint8_t* code, const Piece& piece, const Piece* next, uint32_t packet,
+    bool place(Arena& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next, uint32_t packet,
                uint64_t field0, uint32_t counter, const Config& config);
     // A value hole's value in a piece (packet: its index in the block;
     // field0: the length of the packet the fall-through stencil follows).

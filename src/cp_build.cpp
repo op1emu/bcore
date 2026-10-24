@@ -104,6 +104,17 @@ int hole_of(StringRef name) {
     return -1;
 }
 
+namespace {
+
+// A function's code in an object: its section (hot) and the splitter's
+// .text.split.<name> (cold), if any.
+struct Part {
+    std::string name;
+    bool cold;
+};
+
+}  // namespace
+
 std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
     std::map<std::string, Code> out;
     auto file = object::ObjectFile::createObjectFile(buffer.getMemBufferRef());
@@ -113,9 +124,10 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
     }
     auto* elf = dyn_cast<object::ELFObjectFileBase>(file->get());
     if (!elf) return out;
-    struct Range { uint64_t start, size; std::string name; };
+    // Each function: its code's section and offset there. A section can hold
+    // several (one .text without function sections), or one each.
+    struct Range { uint64_t start, size; std::string name; uint64_t section; };
     std::vector<Range> ranges;
-    std::optional<object::SectionRef> text;
     for (const object::ELFSymbolRef sym : elf->symbols()) {
         auto type = sym.getType();
         if (!type || *type != object::SymbolRef::ST_Function) {
@@ -132,43 +144,98 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
             continue;
         }
         if (*section == elf->section_end()) continue;
-        ranges.push_back({*addr, sym.getSize(), name->str()});
-        text = **section;
+        ranges.push_back({*addr, sym.getSize(), name->str(), (*section)->getIndex()});
     }
-    if (!text) return out;
-    auto contents = text->getContents();
-    if (!contents) {
-        consumeError(contents.takeError());
-        return out;
-    }
-    for (auto& r : ranges) {
-        Code& code = out[r.name];
-        code.bytes.assign(contents->bytes_begin() + r.start, contents->bytes_begin() + r.start + r.size);
-    }
+    auto section_name = [&](const object::SectionRef& section) -> std::string {
+        auto name = section.getName();
+        if (name) return name->str();
+        consumeError(name.takeError());
+        return {};
+    };
+    // Where an offset in a section lies: a function's code, hot or cold, and
+    // the offset there.
+    std::map<uint64_t, std::string> cold_of;  // section index -> function
     for (const object::SectionRef& section : elf->sections()) {
-        auto relocated = section.getRelocatedSection();
+        const std::string name = section_name(section);
+        static constexpr const char kSplit[] = ".text.split.";
+        if (name.rfind(kSplit, 0) == 0) cold_of[section.getIndex()] = name.substr(sizeof kSplit - 1);
+    }
+    auto locate = [&](uint64_t section, uint64_t offset, Part& part, uint64_t& at) {
+        if (auto it = cold_of.find(section); it != cold_of.end()) {
+            part = {it->second, true};
+            at = offset;
+            return true;
+        }
+        for (auto& r : ranges)
+            if (r.section == section && offset >= r.start && offset < r.start + r.size) {
+                part = {r.name, false};
+                at = offset - r.start;
+                return true;
+            }
+        // The end of a function: where a branch may go (an emptied block).
+        for (auto& r : ranges)
+            if (r.section == section && offset == r.start + r.size) {
+                part = {r.name, false};
+                at = offset - r.start;
+                return true;
+            }
+        return false;
+    };
+    for (const object::SectionRef& section : elf->sections()) {
+        auto contents = section.getContents();
+        if (!contents) {
+            consumeError(contents.takeError());
+            continue;
+        }
+        if (auto it = cold_of.find(section.getIndex()); it != cold_of.end()) {
+            out[it->second].cold.assign(contents->bytes_begin(), contents->bytes_end());
+            continue;
+        }
+        for (auto& r : ranges)
+            if (r.section == section.getIndex())
+                out[r.name].bytes.assign(contents->bytes_begin() + r.start, contents->bytes_begin() + r.start + r.size);
+    }
+    for (const object::SectionRef& rela : elf->sections()) {
+        auto relocated = rela.getRelocatedSection();
         if (!relocated) {
             consumeError(relocated.takeError());
             continue;
         }
-        if (*relocated == elf->section_end() || **relocated != *text) continue;
-        for (const object::RelocationRef& rel : section.relocations()) {
-            const uint64_t offset = rel.getOffset();
-            auto it = std::find_if(ranges.begin(), ranges.end(),
-                                   [&](const Range& r) { return offset >= r.start && offset < r.start + r.size; });
-            if (it == ranges.end()) continue;
-            Code& code = out[it->name];
+        if (*relocated == elf->section_end()) continue;
+        const object::SectionRef target = **relocated;
+        for (const object::RelocationRef& rel : rela.relocations()) {
+            Part from;
+            uint64_t offset = 0;
+            if (!locate(target.getIndex(), rel.getOffset(), from, offset)) continue;
+            Code& code = out[from.name];
             auto sym = rel.getSymbol();
             std::string name;
+            int hole = -1;
+            auto addend = object::ELFRelocationRef(rel).getAddend();
+            int64_t add = addend ? *addend : 0;
+            if (!addend) consumeError(addend.takeError());
             if (sym != elf->symbol_end()) {
                 auto n = sym->getName();
                 if (n) name = n->str();
                 else consumeError(n.takeError());
+                hole = hole_of(name);
+                // A branch between the function's hot and cold code: to a
+                // symbol or a section, the place in it in the addend.
+                auto section = sym->getSection();
+                auto addr = sym->getAddress();
+                if (hole < 0 && section && addr && *section != elf->section_end()) {
+                    Part to;
+                    uint64_t at = 0;
+                    if (locate((*section)->getIndex(), *addr, to, at) && to.name == from.name) {
+                        hole = to.cold ? kHoleCold : kHoleHot;
+                        add += int64_t(at);
+                    }
+                } else if (!section || !addr) {
+                    if (!section) consumeError(section.takeError());
+                    if (!addr) consumeError(addr.takeError());
+                }
+                if (name.empty()) name = "a section";
             }
-            const int hole = hole_of(name);
-            auto addend = object::ELFRelocationRef(rel).getAddend();
-            const int64_t add = addend ? *addend : 0;
-            if (!addend) consumeError(addend.takeError());
             int kind = -1;
             switch (rel.getType()) {
             case ELF::R_X86_64_32: kind = kAbs32; break;
@@ -193,13 +260,15 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
                 if (code.error.empty()) code.error = why;
                 continue;
             }
-            code.relocs.push_back({uint16_t(offset - it->start), uint8_t(hole), uint8_t(kind), int32_t(add)});
+            (from.cold ? code.cold_relocs : code.relocs)
+                .push_back({uint16_t(offset), uint8_t(hole), uint8_t(kind), int32_t(add)});
         }
     }
+    auto by_offset = [](const bcore_cp::Reloc& a, const bcore_cp::Reloc& b) { return a.offset < b.offset; };
     for (auto& [name, code] : out) {
-        if (code.bytes.size() > 0xffff && code.error.empty()) code.error = "too large";
-        std::sort(code.relocs.begin(), code.relocs.end(),
-                  [](const bcore_cp::Reloc& a, const bcore_cp::Reloc& b) { return a.offset < b.offset; });
+        if ((code.bytes.size() > 0xffff || code.cold.size() > 0xffff) && code.error.empty()) code.error = "too large";
+        std::sort(code.relocs.begin(), code.relocs.end(), by_offset);
+        std::sort(code.cold_relocs.begin(), code.cold_relocs.end(), by_offset);
     }
     return out;
 }
