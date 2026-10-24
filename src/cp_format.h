@@ -68,6 +68,12 @@ enum StencilFlags : uint16_t {
     // The code ends in a jmp rel32 to the block's exit, which may be dropped
     // where the exit follows (kSelfExits).
     kTailExit = 16,
+    // A parallel packet's pieces (kSlots, kKeys32 with the multi-issue bit):
+    kBody = 32,         // slot 0's instruction alone (BBTranslator::translate_stencil_body)
+    kSetsDisAlgn = 64,  // a slot 0 that leaves DISALGNEXCPT on: the slots' dis_algn entries
+    kSlotStore = 128,   // a slot that writes memory: the packet's tail checks CEC
+    kNop = 256,         // a slot that does nothing: the translator leaves it out
+    kDjUnknown = 512,   // a slot after which did_jump is not known clear: what follows is lifted so
 };
 
 // Its code is in two parts: the hot code, which the translator lays out
@@ -148,5 +154,18 @@ extern const uint32_t kFallthrough;
 // A 32-bit instruction no pattern takes (the undefined instruction's
 // exception, a packet of 2 that ends the block).
 extern const uint32_t kUndef32;
+// A parallel packet's slots 1 and 2: for each 16-bit word, its stencil and
+// its commit's (+ 1, 0 for none: no stencil, an instruction the slot does
+// not take; no commit, no register written), by
+// [(dis_algn * 2 + did_jump not known clear) * 2 + slot - 1] (slot 1 always
+// starts with it known clear).
+struct SlotEntry {
+    uint32_t stencil;
+    uint32_t commit;
+};
+extern const SlotEntry kSlots[8][0x10000];
+// A parallel packet's tail (its epilog), by [did_jump not known clear * 2 +
+// CEC check].
+extern const uint32_t kParallelTail[4];
 
 }  // namespace bcore_cp

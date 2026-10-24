@@ -136,8 +136,8 @@ public:
 
 static void test_throwing_stencils() {
     // Tier 0 throughout (1000 starts are never reached), on this thread or
-    // with the worker; and the load in a parallel packet, whose stencil is
-    // built at run time.
+    // with the worker; and the load in a parallel packet's slot, one of the
+    // packet's pieces.
     for (int mode : {1, 2, 3}) {
         CpuState cpu{};
         ThrowingPagedMemory mem(&cpu);
@@ -174,7 +174,7 @@ static void test_throwing_stencils() {
         require(core.stats().copy_patch_blocks > 0, "no block was made of stencils");
 #endif
 #if BCORE_COPY_PATCH_TEST
-        if (mode == 3) require(core.cp_runtime_stats().built == 1, "the parallel packet's stencil was not built");
+        if (mode == 3) require(core.cp_runtime_stats().built == 0, "the parallel packet's stencil was built at run time");
 #endif
     }
 }

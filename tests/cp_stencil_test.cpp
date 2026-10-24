@@ -18,6 +18,7 @@
 // run-time stencils' opt (CpRuntimeSettings::opt, 0 by default; above 0
 // they are split, their cold parts placed apart as the build's are).
 #include "core.h"
+#include "mmr.h"
 #include "bcore_profile.h"
 #include "../src/cec.h"
 #include "../src/cp_format.h"
@@ -54,6 +55,9 @@ class TraceMemory : public FlatMemory {
 public:
     explicit TraceMemory(CpuState* cpu) : FlatMemory(0, kRam, cpu), cpu_(cpu) { enable_page_table(); }
     std::vector<std::string> log;
+    // A read outside the RAM raises an exception (a guest one, as a bus
+    // error would: did_jump set in the middle of a packet).
+    bool read_raises = false;
 
     uint8_t read8(uint32_t addr) const override {
         if (addr < kRam) return FlatMemory::read8(addr);
@@ -88,6 +92,7 @@ private:
         char line[96];
         snprintf(line, sizeof line, "%s %08x %08x packets=%u", what, addr, value, cpu_->packets);
         const_cast<TraceMemory*>(this)->log.push_back(line);
+        if (what[0] == 'r' && read_raises) cec_exception(cpu_, 0x26, const_cast<TraceMemory*>(this));
         return addr * 0x9e3779b1u;
     }
     CpuState* cpu_;
@@ -170,6 +175,10 @@ void random_state(CpuState& cpu, std::mt19937& rng, uint32_t pc) {
 struct Instruction {
     uint64_t insn;
     int len;  // bytes
+    // A packet whose load reaches P0 at an address the callbacks answer, and
+    // whose callback raises an exception, in an interrupt's handler (where
+    // the exception leaves the registers alone, as the callbacks promise).
+    bool raises = false;
 };
 
 std::vector<Instruction> instructions() {
@@ -241,10 +250,17 @@ std::vector<Instruction> runtime_instructions(size_t count32, size_t parallel) {
             bcore_cp::kPatterns32[first_match(insn)].selected < 0)
             out.push_back({insn, 4});
     }
-    auto slot = [&]() -> uint16_t {
-        switch (rng() % 4) {
+    // A slot's word: a NOP, a load or store, one the slot takes (the
+    // build's pieces), or any.
+    std::vector<uint16_t> legal[2];
+    for (uint32_t w = 0; w < 0x10000; ++w)
+        for (int k = 0; k < 2; ++k)
+            if (bcore_cp::kSlots[k][w].stencil) legal[k].push_back(uint16_t(w));
+    auto slot_word = [&](int k) -> uint16_t {
+        switch (rng() % 6) {
         case 0: case 1: return 0x0000;                     // NOP
         case 2: return uint16_t(0x8000 | (rng() & 0x1fff));  // loads and stores
+        case 3: case 4: return legal[k][rng() % legal[k].size()];
         default:
             for (;;) {
                 const uint16_t w = uint16_t(rng());
@@ -257,8 +273,14 @@ std::vector<Instruction> runtime_instructions(size_t count32, size_t parallel) {
         const auto& pattern = bcore_cp::kPatterns32[dsp[rng() % dsp.size()]];
         const uint32_t insn = pattern.value | (rng() & ~pattern.mask) | 0x08000000u;
         if ((insn >> 16 & 0xe800) == 0xe800) continue;  // not a multi-issue encoding
-        out.push_back({uint64_t(insn) << 32 | uint64_t(slot()) << 16 | slot(), 8});
+        const uint16_t s1 = slot_word(0), s2 = slot_word(1);
+        out.push_back({uint64_t(insn) << 32 | uint64_t(s1) << 16 | s2, 8});
     }
+    // MNOP || R0 = [P0] || a slot 2, its load raising an exception; and
+    // R0 = [P0] alone.
+    for (int i = 0; i < 200 && parallel; ++i) out.push_back({0x9000, 2, true});
+    for (int i = 0; i < 2000 && parallel; ++i)
+        out.push_back({0xc8031800ull << 32 | uint64_t(0x9000) << 16 | slot_word(1), 8, true});
     return out;
 }
 
@@ -273,10 +295,14 @@ uint64_t hash_data(const TraceMemory& mem) {
 int main(int argc, char** argv) {
     const unsigned stride = argc > 1 ? unsigned(atoi(argv[1])) : 1;
     const int runtime_opt = argc > 2 ? atoi(argv[2]) : 0;
-    auto all = instructions();
+    // "parallel N": N random parallel packets only (most of them pieces of
+    // the build's stencils).
+    const bool parallel_only = argc > 3 && !strcmp(argv[3], "parallel");
+    const size_t parallel = parallel_only && argc > 4 ? size_t(atol(argv[4])) : 24000;
+    auto all = parallel_only ? std::vector<Instruction>{} : instructions();
     const size_t built_stencils = all.size();
     {
-        const auto more = runtime_instructions(8000, 24000);
+        const auto more = runtime_instructions(parallel_only ? 0 : 8000, parallel);
         all.insert(all.end(), more.begin(), more.end());
     }
     std::vector<Instruction> todo;
@@ -291,7 +317,7 @@ int main(int argc, char** argv) {
     // for each chunk.
     constexpr size_t kChunk = 20000;
     size_t compared = 0, made = 0, made_built = 0;
-    uint64_t cold_bytes = 0;
+    uint64_t cold_bytes = 0, runtime_built = 0;
     for (size_t begin = 0; begin < todo.size(); begin += kChunk) {
         Side cp(true, runtime_opt), llvm(false, runtime_opt);
         const size_t end = std::min(todo.size(), begin + kChunk);
@@ -307,13 +333,22 @@ int main(int argc, char** argv) {
             CpuState start;
             random_state(start, rng, pc);
             const bool pending = rng() % 8 == 0;
+            if (in.raises) start.dpregs[8] = kNoPage + 0x40;
             const uint64_t before = cp.core->stats().copy_patch_blocks;
             for (Side* side : {&cp, &llvm}) {
                 side->cpu = start;
                 side->mem->log.clear();
+                side->mem->read_raises = in.raises;
                 cec_init();
                 evt_init();
                 if (pending) cec_raise(&side->cpu, 14);
+                if (in.raises) {  // in interrupt 7's handler, supervisor
+                    evt_write(EVT_BASE + 4 * 3, 0x8100);
+                    evt_write(EVT_BASE + 4 * 7, 0x8180);
+                    cec_mmr_write(&side->cpu, CEC_MMR_BASE + 4, 1u << 7);
+                    cec_raise(&side->cpu, 7);
+                    cec_return_rti(&side->cpu);
+                }
                 side->cpu.chain_budget = 1;  // this block only
                 require(side->core->run(pc), "run");
             }
@@ -329,10 +364,12 @@ int main(int argc, char** argv) {
             ++compared;
         }
         cold_bytes += cp.core->cp_runtime_stats().cold_bytes;
+        runtime_built += cp.core->cp_runtime_stats().built;
     }
     printf("cp_stencil_test: %zu compared, %zu made of stencils; %zu of them with stencils built at run time, %zu "
            "made of stencils\n",
            compared, made, compared - todo_built, made - made_built);
+    printf("cp_stencil_test: %llu stencils built at run time\n", (unsigned long long)runtime_built);
 #if BCORE_ENABLE_PROFILE  // the count is a profiling counter
     require(made_built == todo_built, "every block of the build's stencils made of stencils");
     // Packets the run time refuses compile with LLVM (compared all the
@@ -342,7 +379,8 @@ int main(int argc, char** argv) {
     // Split or not as the opt says: the cold parts ran above (an exception,
     // a memory callback, a loop bottom are in them).
     printf("cp_stencil_test: run-time stencils' cold parts %llu bytes\n", (unsigned long long)cold_bytes);
-    require(runtime_opt > 0 ? cold_bytes > 0 : cold_bytes == 0, "run-time stencils split above opt 0 only");
+    require(runtime_opt > 0 ? cold_bytes > 0 || runtime_built == 0 : cold_bytes == 0,
+            "run-time stencils split above opt 0 only");
     printf("PASS\n");
     return 0;
 }

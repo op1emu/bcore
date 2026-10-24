@@ -103,6 +103,51 @@ public:
         reg_hole_violation_ = false;
     }
     bool reg_hole_violation() const { return reg_hole_violation_; }
+
+    // A parallel packet's slot on its own (copy-and-patch, cp_translator.h):
+    // the 16-bit instruction of slot 1 or 2, lifted as in its packet (its
+    // reads see the registers from before the packet, DISALGNEXCPT as slot
+    // 0 left it), but its register writes kept for the packet's commit:
+    // end_slot() stores them to CpuState::slot_scratch[slot - 1], in the
+    // order of the SlotWrites it returns, and a half register's write is
+    // its 16 bits alone (the commit merges them into the register as it is
+    // then, after slot 0 and slot 1 have written theirs).
+    struct SlotWrite {
+        size_t offset;
+        int half;  // 0 the whole field, 1 its low 16 bits, 2 its high
+    };
+    void begin_slot(int slot, bool dis_algn);
+    std::vector<SlotWrite> end_slot();
+    // Whether the slot's writes are more than the scratch holds, or one
+    // field written twice.
+    bool slot_conflict() const { return slot_conflict_; }
+    // Whether a memory write (which may make an interrupt pending) wants
+    // cec_check_pending after the packet.
+    bool checks_cec_pending() const { return check_cec_pending_; }
+    void set_checks_cec_pending(bool check) { check_cec_pending_ = check; }
+    // Whether did_jump is known clear where the builder is.
+    bool did_jump_known_clear() { return did_jump_clear(); }
+    // From here on did_jump is not known clear (a piece after one that left
+    // it so).
+    void forget_did_jump_clear() {
+        if (auto* cache = reg_cache_here()) cache->erase(kDidJumpClear);
+    }
+    bool has_pending_exits() const { return !pending_exits_.empty(); }
+    // Whether DISALGNEXCPT is in effect for the rest of the packet.
+    bool dis_algn() const { return dis_algn_expt_; }
+    // A packet's slot 0 lifted on its own (copy-and-patch): with check on,
+    // reads_after_write() says whether it read a field it had written (or a
+    // data register after a register hole's store, or a hole after a data
+    // register's: two may be one register). Without, it reads every field
+    // as it was before the instruction, as in a parallel packet, and its
+    // writes may be done as it makes them.
+    void set_body_check(bool check) {
+        body_check_ = check;
+        body_raw_ = false;
+        body_stored_.clear();
+        body_dreg_stored_ = body_hole_stored_ = false;
+    }
+    bool reads_after_write() const { return body_raw_; }
     // Loop mode (BBTranslator's loop blocks): the visitor's cpu pointer is a
     // shadow copy of the guest state the block keeps in an alloca, and `real`
     // the CpuState the host and the helpers see. The shadow holds the fields
@@ -726,6 +771,17 @@ private:
     llvm::Constant* stencil_regs_[8] = {};  // set_stencil_regs
     bool reg_hole_violation_ = false;
     llvm::Value* reg_hole_ptr(uint32_t idx);
+    bool slot_mode_ = false;      // begin_slot
+    bool slot_conflict_ = false;
+    struct SlotHalf { size_t offset; int half; llvm::Value* val; };
+    std::vector<SlotHalf> slot_halves_;
+    bool body_check_ = false;     // set_body_check
+    bool body_raw_ = false;
+    bool body_dreg_stored_ = false;  // a data register stored, through a hole or not
+    bool body_hole_stored_ = false;
+    bool merging_ = false;        // a half write's load of its register
+    std::set<size_t> body_stored_;
+    void note_body_load(size_t offset, bool hole);
     uint32_t field_values_[kFieldHoles] = {};
     unsigned fields_used_ = 0;
     bool careful_ = false;

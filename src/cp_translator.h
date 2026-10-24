@@ -134,6 +134,7 @@ private:
         const uint8_t* cold = nullptr;  // its cold code (Stencil::cold) and relocations
         const bcore_cp::Reloc* cold_relocs = nullptr;
         size_t cold_at = 0;  // offset in the block's cold code
+        uint32_t packet = 0; // the packet's index in the block, from 1 (a parallel packet's pieces share it)
     };
     // An arena's helper jumps and exit stencils, placed when the arena is
     // first used.
@@ -143,6 +144,14 @@ private:
         uint8_t* exits[5] = {};
     };
     bool scan(uint32_t pc, Memory& code, const Config& config, Block& out);
+    // A parallel packet at pc whose slot 0 (insn) has a body stencil, as
+    // pieces: slot 1, slot 2, the body, the slots' commits, the packet's
+    // tail (BBTranslator::translate_stencil_body). False with why where a
+    // slot has no stencil, or the packet's memory callbacks may change
+    // registers (the body runs after the slots' accesses, which its reads
+    // must not see).
+    bool compose_parallel(uint32_t pc, uint32_t insn, int selected, const bcore_cp::Stencil& body, Memory& code,
+                          const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why);
     Arena* arena_for(size_t size);
     bool place(Arena& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next, uint32_t packet,
                uint64_t field0, uint32_t counter, const Config& config);

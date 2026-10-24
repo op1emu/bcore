@@ -128,6 +128,19 @@ public:
         uint32_t field_values[LiftVisitor::kFieldHoles] = {};  // LiftVisitor::field_values
         unsigned fields_used = 0;
         bool reg_violation = false;  // LiftVisitor::reg_hole_violation
+        // translate_stencil_body: whether it read a field after writing it
+        // (LiftVisitor::reads_after_write), and left DISALGNEXCPT on.
+        bool reads_after_write = false;
+        bool dis_algn = false;
+        // translate_slot_stencil: whether the slot takes the instruction,
+        // and its writes (LiftVisitor::end_slot), whether they fit, whether
+        // it wants the CEC check after the packet, and whether did_jump is
+        // known clear on its way on.
+        bool legal = true;
+        std::vector<LiftVisitor::SlotWrite> writes;
+        bool slot_conflict = false;
+        bool checks_cec = false;
+        bool did_jump_clear = true;
     };
     // The packet at pc, read through this translator's Memory, as the
     // function `name`, compiled as packet `holes.packet` of a careful block
@@ -136,6 +149,30 @@ public:
     // holes.cont, every other in one of holes.exit. pc gives the offsets of
     // the PCs the code uses from the hole holes.pc.
     StencilLift translate_stencil(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes);
+    // A parallel packet's pieces (cp_translator.h), which run in the order
+    // slot 1, slot 2, slot 0, slot 1's commit, slot 2's, the tail:
+    //   - slot 0, the 32-bit instruction at pc, alone: its effect, with no
+    //     packet state, epilog or exit (it calls no helper and cannot
+    //     leave), then holes.cont. With parallel, its writes are made at
+    //     its end, as a parallel packet's, else as it makes them, which is
+    //     the same where it reads no field after writing one;
+    //   - slot (1 or 2), the 16-bit instruction at pc + 2 + 2 * slot of the
+    //     packet at pc, dis_algn as slot 0 left it, its register writes to
+    //     CpuState::slot_scratch (LiftVisitor::begin_slot); its exits as the
+    //     packet's;
+    //   - a slot's commit: its writes from the scratch to the registers;
+    //   - the packet's tail at pc: its epilog with the CEC check or not.
+    // A slot and the tail are lifted with did_jump known clear at their
+    // start, as at a packet's, or not (did_jump_unknown: after a slot that
+    // left it so, StencilLift::did_jump_clear).
+    StencilLift translate_stencil_body(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
+                                       bool parallel);
+    StencilLift translate_slot_stencil(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
+                                       int slot, bool dis_algn, bool did_jump_unknown);
+    static llvm::Function* emit_slot_commit(llvm::Module& mod, const char* name, int slot,
+                                            const std::vector<LiftVisitor::SlotWrite>& writes, llvm::Function* cont);
+    StencilLift translate_parallel_tail(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
+                                        bool check_cec, bool did_jump_unknown);
     // A copy-and-patch block's start: its tier counter (emit_tier_counter,
     // with holes for the counter, its count's offset and the threshold),
     // CYCLES with host_cycles (emit_host_cycles), then a musttail call of cont.

@@ -50,12 +50,12 @@ void require(bool ok, const std::string& why) {
 constexpr uint32_t kRam = 0x200000;
 constexpr uint32_t kCode = 0x10000;
 constexpr uint16_t kRts = 0x0010;
-// Two legal parallel packets: a dsp32alu ADD32 || NOP || NOP, and another
-// ADD32 || R3 = [P0++] || NOP (an 8-byte packet each).
-constexpr uint16_t kParallelA[4] = {0xcc04, 0x000a, 0x0000, 0x0000};
-constexpr uint16_t kParallelB[4] = {0xcc04, 0x165c, 0x9003, 0x0000};
-// And ADD32 || R3 = [P0++] || NOP, a third.
-constexpr uint16_t kParallelC[4] = {0xcc04, 0x000a, 0x9003, 0x0000};
+// Legal parallel packets the build has no stencils for (SEARCH, whose
+// slot 0 piece reaches its register holes through the packet's shadow):
+// SEARCH || NOP || NOP, SEARCH || R3 = [P0++] || NOP, and another.
+constexpr uint16_t kParallelA[4] = {0xcc0d, 0x0210, 0x0000, 0x0000};
+constexpr uint16_t kParallelB[4] = {0xcc0d, 0x0218, 0x9003, 0x0000};
+constexpr uint16_t kParallelC[4] = {0xcc0d, 0x0220, 0x9003, 0x0000};
 
 struct Rig {
     CpuState cpu{};
@@ -148,10 +148,17 @@ void test_same_as_the_build() {
             require(rt.stage(packets[i], nullptr).ok, "16-bit " + std::to_string(packets[i].words[0]) + " refused");
         rt.flush();
     }
-    size_t same = 0;
+    size_t same = 0, refused = 0;
     for (const auto& p : packets) {
         const bcore_cp::Stencil& s = bcore_cp::kStencils[bcore_cp::kIndex16[p.words[0]] - 1];
-        const auto* r = rt.find(p).record;
+        const auto found = rt.find(p);
+        const auto* r = found.record;
+        // The build compiles the few whose vector code loads a constant
+        // again without (stencilgen's noimplicitfloat); the run time refuses them.
+        if (!r && found.known()) {
+            ++refused;
+            continue;
+        }
         require(r != nullptr, "no stencil for 16-bit " + std::to_string(p.words[0]));
         const bool code = r->code.size() == s.size && !memcmp(r->code.data(), bcore_cp::kCode + s.code, s.size);
         const bool cold = r->cold.size() == s.cold_size && !memcmp(r->cold.data(), bcore_cp::kCode + s.cold, s.cold_size);
@@ -170,7 +177,8 @@ void test_same_as_the_build() {
                 "16-bit " + std::to_string(p.words[0]) + ": not the build's stencil");
         ++same;
     }
-    printf("cp_runtime_test: %zu 16-bit stencils the same as the build's\n", same);
+    require(refused * 100 <= packets.size(), "the run time refused more than 1% of the 16-bit sample");
+    printf("cp_runtime_test: %zu 16-bit stencils the same as the build's (%zu refused)\n", same, refused);
 }
 
 // A packet outside the range gets none: refused once, its block with LLVM,

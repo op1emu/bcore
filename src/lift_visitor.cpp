@@ -288,6 +288,7 @@ static bool is_cycles(size_t offset) {
 
 Value* LiftVisitor::load_cpu_u32(size_t offset, const Twine& name) {
     accesses_cycles_ |= is_cycles(offset);
+    if (body_check_) note_body_load(offset, false);
     // CYCLES read (cycles[0]): reload cycles[1] (CYCLES2) from shadow (cycles[2]).
     // Bypass store_cpu_u32 to avoid the cycles[1]->cycles[2] redirect below.
     if (offset == offsetof(CpuState, cycles[0])) {
@@ -329,6 +330,10 @@ void LiftVisitor::store_cpu_u32(size_t offset, Value* val) {
     // only updates when CYCLES is read (see load_cpu_u32 above).
     if (offset == offsetof(CpuState, cycles[1]))
         offset = offsetof(CpuState, cycles[2]);
+    if (body_check_ && !in_parallel_) {
+        body_stored_.insert(offset);
+        if (offset < offsetof(CpuState, dpregs) + 32) body_dreg_stored_ = true;
+    }
     if (in_parallel_) {
         shadow_writes_[offset] = val;
     } else {
@@ -353,13 +358,26 @@ void LiftVisitor::on_parallel_end() {
     parallel_slot_ = 0;
 }
 
+void LiftVisitor::note_body_load(size_t offset, bool hole) {
+    if (in_parallel_ || merging_) return;
+    // A hole may be any data register: one read after any data register's
+    // store, and any data register read after a hole's, may be read after
+    // its own write.
+    if (hole ? body_dreg_stored_
+             : body_stored_.count(offset) || (offset < offsetof(CpuState, dpregs) + 32 && body_hole_stored_))
+        body_raw_ = true;
+}
+
 Value* LiftVisitor::reg_hole_ptr(uint32_t idx) {
     if (in_parallel_ || real_cpu_) reg_hole_violation_ = true;  // their shadows key on offsets
     return builder_.CreateGEP(builder_.getInt8Ty(), cpu_ptr_, stencil_regs_[idx], "reg_hole");
 }
 
 Value* LiftVisitor::load_dreg(uint32_t idx, const Twine& name) {
-    if (idx < 8 && stencil_regs_[idx]) return builder_.CreateLoad(builder_.getInt32Ty(), reg_hole_ptr(idx), name);
+    if (idx < 8 && stencil_regs_[idx]) {
+        if (body_check_) note_body_load(0, true);
+        return builder_.CreateLoad(builder_.getInt32Ty(), reg_hole_ptr(idx), name);
+    }
     return load_cpu_u32(offsetof(CpuState, dpregs) + idx * 4, name);
 }
 
@@ -370,6 +388,7 @@ Value* LiftVisitor::load_preg(uint32_t idx, const Twine& name) {
 
 void LiftVisitor::store_dreg(uint32_t idx, Value* val) {
     if (idx < 8 && stencil_regs_[idx]) {
+        if (body_check_ && !in_parallel_) body_dreg_stored_ = body_hole_stored_ = true;
         builder_.CreateStore(val, reg_hole_ptr(idx));
         // It may be any data register: none of them is known any more.
         auto* cache = reg_cache_here();
@@ -4962,7 +4981,14 @@ llvm::Value* LiftVisitor::emit_mac_common(
 }
 
 void LiftVisitor::store_dreg_lo(uint32_t dst, llvm::Value* val16) {
+    if (slot_mode_) {
+        slot_halves_.push_back({offsetof(CpuState, dpregs) + dst * 4, 1,
+                                builder_.CreateAnd(val16, builder_.getInt32(0xFFFF), "slot_half")});
+        return;
+    }
+    merging_ = true;
     auto* old = load_dreg(dst, "old_rd");
+    merging_ = false;
     // Preserve a complementary half written by another slot of this issue
     // group. Source operands must still read the pre-issue register value;
     // only the unwritten half of the destination uses the pending writeback.
@@ -4976,7 +5002,14 @@ void LiftVisitor::store_dreg_lo(uint32_t dst, llvm::Value* val16) {
 }
 
 void LiftVisitor::store_dreg_hi(uint32_t dst, llvm::Value* val16) {
+    if (slot_mode_) {
+        slot_halves_.push_back({offsetof(CpuState, dpregs) + dst * 4, 2,
+                                builder_.CreateAnd(val16, builder_.getInt32(0xFFFF), "slot_half")});
+        return;
+    }
+    merging_ = true;
     auto* old = load_dreg(dst, "old_rd");
+    merging_ = false;
     if (in_parallel_) {
         auto it = shadow_writes_.find(offsetof(CpuState, dpregs) + dst * 4);
         if (it != shadow_writes_.end()) old = it->second;
@@ -8811,4 +8844,43 @@ bool LiftVisitor::decode_unknown_32(uint32_t insn) {
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(exc), mem_ptr_});
     terminate("illegal");
     return true;
+}
+
+// ---- A parallel packet's slots on their own (copy-and-patch) ----
+
+void LiftVisitor::begin_slot(int slot, bool dis_algn) {
+    on_parallel_begin();
+    parallel_slot_ = slot;
+    dis_algn_expt_ = dis_algn;
+    slot_mode_ = true;
+    slot_conflict_ = false;
+    slot_halves_.clear();
+}
+
+std::vector<LiftVisitor::SlotWrite> LiftVisitor::end_slot() {
+    std::vector<SlotWrite> writes;
+    std::vector<Value*> values;
+    for (const auto& [offset, val] : shadow_writes_) {
+        writes.push_back({offset, 0});
+        values.push_back(val);
+    }
+    for (const auto& h : slot_halves_) {
+        for (const auto& w : writes)
+            if (w.offset == h.offset && (w.half == 0 || w.half == h.half)) slot_conflict_ = true;
+        writes.push_back({h.offset, h.half});
+        values.push_back(h.val);
+    }
+    constexpr size_t kScratch = sizeof(CpuState::slot_scratch[0]) / sizeof(CpuState::slot_scratch[0][0]);
+    if (writes.size() > kScratch) slot_conflict_ = true;
+    for (size_t j = 0; j < writes.size() && j < kScratch; ++j)
+        builder_.CreateStore(values[j],
+                             cpu_field_ptr(offsetof(CpuState, slot_scratch) +
+                                               sizeof(CpuState::slot_scratch[0]) * (parallel_slot_ - 1) + 4 * j,
+                                           builder_.getInt32Ty()));
+    shadow_writes_.clear();
+    slot_halves_.clear();
+    slot_mode_ = false;
+    in_parallel_ = false;
+    parallel_slot_ = 0;
+    return writes;
 }

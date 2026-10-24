@@ -1,6 +1,6 @@
 // The copy-and-patch stencils (cp_format.h) bcore-stencilgen built: its
 // code blob as bcore_cp::kCode, its big tables (kStencils, kRelocs,
-// kIndex16, kKeys32) from cp_tables.bin, the rest from cp_stencils.inc.
+// kIndex16, kKeys32, kSlots) from cp_tables.bin, the rest from cp_stencils.inc.
 
 #include <cstdint>
 
@@ -29,4 +29,5 @@ __asm__(CP_SECTION "\n"
         CP_TABLE("7kRelocs", CP_TABLES_BIN, CP_TABLE_RELOCS)
         CP_TABLE("8kIndex16", CP_TABLES_BIN, CP_TABLE_INDEX16)
         CP_TABLE("7kKeys32", CP_TABLES_BIN, CP_TABLE_KEYS32)
+        CP_TABLE("6kSlots", CP_TABLES_BIN, CP_TABLE_SLOTS)
         ".text\n");

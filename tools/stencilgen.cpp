@@ -134,6 +134,9 @@ bool is_parallel(uint16_t w) { return (w & 0x0800) && (w & 0xe800) != 0xe800; }
 
 // One encoding to make a stencil of.
 struct Item {
+    enum Kind { kPacket, kBodyPiece, kSlotPiece };
+    Kind kind = kPacket;
+    int slot = 0;          // a slot piece's: 1 or 2
     uint32_t insn = 0;
     int len = 2;
     int selected = -1;     // index in kWanted for a 32-bit pattern
@@ -146,6 +149,16 @@ struct Item {
     uint16_t flags = 0;
     uint8_t bytes = 0;
     Code code;
+    // A slot piece's variants, v = dis_algn * 2 + did_jump not known clear
+    // at its start (slot 1 starts with it known clear: v 1 and 3 none): its
+    // writes, flags, and its code, or the variant's whose IR it shares
+    // (same_as[v] < v).
+    static constexpr int kVariants = 4;
+    bool has[kVariants] = {};
+    std::vector<LiftVisitor::SlotWrite> writes[kVariants];
+    uint16_t slot_flags[kVariants] = {};
+    int same_as[kVariants] = {0, 1, 2, 3};
+    Code variant_code[kVariants];
 };
 
 struct SelectedInfo {
@@ -157,6 +170,9 @@ struct SelectedInfo {
     Formula regs[kRegHoles] = {};
     unsigned reg_count = 0;
     bool pairs = false;  // a hole's register's next is the hole + 4 (register pairs)
+    // Its slot 0 pieces lifted as a parallel packet's (writes at the end,
+    // registers keyed): it reads a field after writing it.
+    bool body_parallel = false;
 };
 
 // insn with register field k set to values[k].
@@ -220,6 +236,21 @@ public:
     BBTranslator::StencilLift lift(Module& mod, const Item& item, uint32_t pc, const char* name,
                                    const SelectedInfo* info = nullptr) {
         memory_.set(pc, item.insn, item.len);
+        return translator_.translate_stencil(mod, name, pc, holes_for(mod, item, info));
+    }
+    BBTranslator::StencilLift lift_body(Module& mod, const Item& item, uint32_t pc, const char* name,
+                                        const SelectedInfo* info, bool parallel) {
+        memory_.set(pc, item.insn, 4);
+        return translator_.translate_stencil_body(mod, name, pc, holes_for(mod, item, info), parallel);
+    }
+    BBTranslator::StencilLift lift_slot(Module& mod, uint16_t word, int slot, int variant, uint32_t pc,
+                                        const char* name) {
+        uint16_t words[4] = {0xc803, 0x1800, 0, 0};  // MNOP, then the slots
+        words[slot + 1] = word;
+        memory_.set_words(pc, words, 4);
+        return translator_.translate_slot_stencil(mod, name, pc, packet_holes(mod), slot, variant >> 1, variant & 1);
+    }
+    BBTranslator::StencilHoles holes_for(Module& mod, const Item& item, const SelectedInfo* info) {
         auto holes = packet_holes(mod);
         if (info) {
             auto* i64 = Type::getInt64Ty(mod.getContext());
@@ -235,12 +266,20 @@ public:
                                                              ConstantInt::get(i64, 4));
             }
         }
-        return translator_.translate_stencil(mod, name, pc, holes);
+        return holes;
     }
 
     // The checks of the file comment, then the stencil's IR into batch.
     void prepare(Module& batch, Item& item, const std::vector<Pattern>& patterns,
                  const std::vector<SelectedInfo>& selected, const char* name) {
+        if (item.kind == Item::kBodyPiece) {
+            prepare_body(batch, item, patterns, selected, name);
+            return;
+        }
+        if (item.kind == Item::kSlotPiece) {
+            prepare_slot(batch, item, name);
+            return;
+        }
         auto& ctx = batch.getContext();
         Module scratch("scratch", ctx);
         const SelectedInfo* regs =
@@ -293,6 +332,109 @@ public:
         item.bytes = uint8_t(lifted.bytes);
         item.flags = (lifted.terminated ? kTerminates : 0) | (lifted.cycles ? kCycles : 0) |
                      (item.len == 2 && item.insn == 0x0020 ? kIdle : 0);
+    }
+
+    // A parallel packet's slot 0 alone (a 32-bit key with the multi-issue
+    // bit): the same checks as a packet's, and no field read after its
+    // write unless the pattern's pieces are lifted as a parallel packet's.
+    // An encoding slot 0 does not take is the packet that raises the
+    // undefined instruction's exception, as the decoder makes it.
+    void prepare_body(Module& batch, Item& item, const std::vector<Pattern>& patterns,
+                      const std::vector<SelectedInfo>& selected, const char* name) {
+        auto& ctx = batch.getContext();
+        Module scratch("scratch", ctx);
+        const SelectedInfo& info = selected[item.selected];
+        const SelectedInfo* regs = info.reg_count ? &info : nullptr;
+        const bool parallel = info.body_parallel;
+        auto a = lift_body(scratch, item, kPcA, "s", regs, parallel);
+        const std::string text = ir_text(a.fn);
+        a.fn->eraseFromParent();
+        if (a.terminated) {
+            item.kind = Item::kPacket;
+            prepare(batch, item, patterns, selected, name);
+            return;
+        }
+        auto b = lift_body(scratch, item, kPcB, "s", regs, parallel);
+        const bool same = ir_text(b.fn) == text;
+        b.fn->eraseFromParent();
+        if (!same) {
+            item.error = "IR depends on the PC";
+            return;
+        }
+        if (a.reads_after_write) {
+            item.error = "slot 0 reads a field after writing it";
+            return;
+        }
+        if (regs) {
+            if (a.reg_violation) {
+                item.error = "a register hole reached another way";
+                return;
+            }
+            Item other = item;
+            other.insn = with_regs(item.insn, *regs, item.regs_b);
+            auto c = lift_body(scratch, other, kPcA, "s", regs, parallel);
+            const bool same_regs = ir_text(c.fn) == text && !c.reg_violation;
+            c.fn->eraseFromParent();
+            if (!same_regs) {
+                item.error = "IR depends on a register field's value";
+                return;
+            }
+        }
+        auto lifted = lift_body(batch, item, kPcA, name, regs, parallel);
+        if (verifyFunction(*lifted.fn, &errs())) {
+            item.error = "IR does not verify";
+            lifted.fn->eraseFromParent();
+            return;
+        }
+        item.bytes = 4;
+        item.flags = kBody | (lifted.dis_algn ? kSetsDisAlgn : 0) | (lifted.cycles ? kCycles : 0);
+    }
+
+    // A 16-bit word in slot 1 or 2, in each variant: legal there, the
+    // same IR at another PC, its writes fitting the scratch, no way out but
+    // the packet's exits.
+    void prepare_slot(Module& batch, Item& item, const char* name) {
+        auto& ctx = batch.getContext();
+        Module scratch("scratch", ctx);
+        std::string texts[Item::kVariants];
+        for (int v = 0; v < Item::kVariants; ++v) {
+            if (item.slot == 1 && (v & 1)) continue;
+            auto a = lift_slot(scratch, uint16_t(item.insn), item.slot, v, kPcA, "s");
+            texts[v] = ir_text(a.fn);
+            a.fn->eraseFromParent();
+            if (!a.legal) {
+                item.error = v ? "legal in a slot only without DISALGNEXCPT" : "not legal in the slot";
+                return;
+            }
+            auto b = lift_slot(scratch, uint16_t(item.insn), item.slot, v, kPcB, "s");
+            const bool same = ir_text(b.fn) == texts[v];
+            b.fn->eraseFromParent();
+            if (!same) item.error = "IR depends on the PC";
+            else if (a.slot_conflict) item.error = "the slot's writes do not fit the scratch";
+            else if (a.terminated) item.error = "the slot ends the packet";
+            if (!item.error.empty()) return;
+            item.has[v] = true;
+            item.writes[v] = a.writes;
+            item.slot_flags[v] = (a.checks_cec ? kSlotStore : 0) | (a.cycles ? kCycles : 0) |
+                                 (a.did_jump_clear ? 0 : kDjUnknown);
+            for (int u = 0; u < v; ++u)
+                if (item.has[u] && texts[u] == texts[v] && item.same_as[u] == u) {
+                    item.same_as[v] = u;
+                    break;
+                }
+        }
+        for (int v = 0; v < Item::kVariants; ++v) {
+            if (!item.has[v] || item.same_as[v] != v) continue;
+            const std::string n = std::string(name) + "_" + std::to_string(v);
+            auto lifted = lift_slot(batch, uint16_t(item.insn), item.slot, v, kPcA, n.c_str());
+            if (item.no_float) lifted.fn->addFnAttr(Attribute::NoImplicitFloat);
+            if (verifyFunction(*lifted.fn, &errs())) {
+                item.error = "IR does not verify";
+                lifted.fn->eraseFromParent();
+                return;
+            }
+        }
+        item.bytes = 8;
     }
 
     // Other values of the hole fields: the same IR, and the formula's values.
@@ -495,6 +637,38 @@ void infer_regs(Worker& worker, const std::vector<Pattern>& patterns, SelectedIn
     info = best;
 }
 
+// Whether a pattern's slot 0 pieces read a field after writing it (with
+// its register holes: a data register after another's store), on samples
+// of its keys: then they are lifted as a parallel packet's, which make
+// their writes at the end (a piece whose lift then reaches a register
+// hole, which the packet's shadow cannot key, has no stencil).
+void probe_body(Worker& worker, const std::vector<Pattern>& patterns, SelectedInfo& info) {
+    const Pattern& p = patterns[info.pattern];
+    constexpr uint32_t kM = 0x08000000u;
+    std::mt19937 rng(p.value ^ 0x5bd1e995u);
+    LLVMContext ctx;
+    Module mod("probe", ctx);
+    const SelectedInfo* regs = info.reg_count ? &info : nullptr;
+    for (int sample = 0; sample < 256; ++sample) {
+        uint32_t insn = p.value | kM | (uint32_t(rng()) & ~p.mask);
+        if (regs) {
+            unsigned a[kRegHoles], b[kRegHoles];
+            if (!pick_regs(insn, info, p.args, a, b)) continue;
+            insn = with_regs(insn, info, a);
+        }
+        if (first_match(patterns, insn) != info.pattern) continue;
+        Item item;
+        item.insn = insn;
+        auto l = worker.lift_body(mod, item, kPcA, "s", regs, false);
+        const bool raw = !l.terminated && l.reads_after_write;
+        l.fn->eraseFromParent();
+        if (raw) {
+            info.body_parallel = true;
+            return;
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -559,7 +733,10 @@ int main(int argc, char** argv) {
                               uint8_t(kFormulaUsed | (spec.sign ? kFormulaSign : 0) | (spec.pc ? kFormulaPc : 0))};
             holes |= mask;
         }
-        if (selected.size() >= first_auto) infer_regs(inferrer, patterns, info);
+        if (selected.size() >= first_auto) {
+            infer_regs(inferrer, patterns, info);
+            probe_body(inferrer, patterns, info);
+        }
         for (unsigned k = 0; k < info.reg_count; ++k) holes |= 7u << info.regs[k].lsb;
         info.key_mask = ~p.mask & ~holes;
         selected.push_back(info);
@@ -610,6 +787,9 @@ int main(int argc, char** argv) {
             item.selected = int(s);
             item.key = key;
             if (!item.error.empty()) {
+            } else if (is_parallel(uint16_t(insn >> 16)) && s >= first_auto &&
+                       first_match(patterns, insn) == info.pattern) {
+                item.kind = Item::kBodyPiece;  // slot 0 of a parallel packet
             } else if (is16(uint16_t(insn >> 16)) || is_parallel(uint16_t(insn >> 16)))
                 item.error = "not a 32-bit encoding";
             else if (first_match(patterns, insn) != info.pattern)
@@ -620,6 +800,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Slots 1 and 2 of a parallel packet: every 16-bit word.
+    const size_t first_slot = items.size();
+    for (int slot = 1; slot <= 2; ++slot)
+        for (uint32_t w = 0; w < 0x10000; ++w)
+            if (is16(uint16_t(w))) {
+                Item item;
+                item.kind = Item::kSlotPiece;
+                item.slot = slot;
+                item.insn = w;
+                items.push_back(item);
+            }
     // A 32-bit encoding no pattern takes: the undefined instruction, the
     // same IR for every such encoding (checked on samples).
     const size_t undef_item = items.size();
@@ -683,6 +874,16 @@ int main(int argc, char** argv) {
                     for (size_t j = start; j < end; ++j) {
                         Item& item = items[todo[j]];
                         if (!item.error.empty()) continue;
+                        if (item.kind == Item::kSlotPiece) {
+                            for (int v = 0; v < Item::kVariants && item.error.empty(); ++v) {
+                                if (!item.has[v] || item.same_as[v] != v) continue;
+                                auto it = code.find(names[j - start] + "_" + std::to_string(v));
+                                if (it == code.end()) item.error = "no code";
+                                else if (!it->second.error.empty()) item.error = it->second.error;
+                                else item.variant_code[v] = std::move(it->second);
+                            }
+                            continue;
+                        }
                         auto it = code.find(names[j - start]);
                         if (it == code.end()) item.error = "no code";
                         else if (!it->second.error.empty()) item.error = it->second.error;
@@ -713,7 +914,7 @@ int main(int argc, char** argv) {
     // The prologues and exits.
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
-    uint32_t fallthrough = 0;
+    uint32_t fallthrough = 0, parallel_tail[4] = {};
     std::string special_error;
     {
         Worker worker;
@@ -761,6 +962,21 @@ int main(int argc, char** argv) {
             call->setTailCallKind(CallInst::TCK_MustTail);
             b.CreateRetVoid();
         }
+        // A parallel packet's tail, without and with the CEC check: the same
+        // IR at another PC.
+        const char* tail_names[] = {"ptail", "ptail_cec", "ptail_dj", "ptail_dj_cec"};
+        for (int t = 0; t < 4; ++t) {
+            Module scratch("tail", ctx);
+            std::string texts[2];
+            for (int k = 0; k < 2; ++k) {
+                auto l = worker.translator().translate_parallel_tail(scratch, "t", k ? kPcB : kPcA,
+                                                                     packet_holes(scratch), t & 1, t >> 1);
+                texts[k] = ir_text(l.fn);
+                l.fn->eraseFromParent();
+            }
+            if (texts[0] != texts[1]) special_error += std::string(tail_names[t]) + ": IR depends on the PC\n";
+            worker.translator().translate_parallel_tail(mod, tail_names[t], kPcA, packet_holes(mod), t & 1, t >> 1);
+        }
         // The exits an arena shares are copied whole (CpTranslator::arena_for).
         for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
         std::map<std::string, Code> code;
@@ -778,11 +994,50 @@ int main(int argc, char** argv) {
         for (int e = 0; e < 5; ++e) exits[e] = add(names[e]);
         for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e]);
         fallthrough = add("fallthrough");
+        for (int t = 0; t < 4; ++t) parallel_tail[t] = add(tail_names[t]);
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
         return 1;
     }
+
+    // The slots' commits: one per slot and list of writes.
+    std::map<std::string, uint32_t> commit_of;  // slot and writes -> stencil
+    auto commit_key = [](int slot, const std::vector<LiftVisitor::SlotWrite>& writes) {
+        std::string k(1, char('0' + slot));
+        for (auto& w : writes) k += ":" + std::to_string(w.offset) + "." + std::to_string(w.half);
+        return k;
+    };
+    {
+        std::vector<std::pair<int, std::vector<LiftVisitor::SlotWrite>>> commits;
+        for (size_t i = first_slot; i < undef_item; ++i) {
+            const Item& item = items[i];
+            if (!item.error.empty()) continue;
+            for (int v = 0; v < Item::kVariants; ++v)
+                if (item.has[v] && !item.writes[v].empty() &&
+                    commit_of.emplace(commit_key(item.slot, item.writes[v]), 0).second)
+                    commits.push_back({item.slot, item.writes[v]});
+        }
+        Worker worker;
+        LLVMContext ctx;
+        Module mod("commits", ctx);
+        auto* cont = code_hole(mod, kContName);
+        for (size_t j = 0; j < commits.size(); ++j)
+            BBTranslator::emit_slot_commit(mod, ("commit_" + std::to_string(j)).c_str(), commits[j].first,
+                                           commits[j].second, cont);
+        std::map<std::string, Code> code;
+        worker.compile(mod, code);
+        for (size_t j = 0; j < commits.size(); ++j) {
+            auto it = code.find("commit_" + std::to_string(j));
+            if (it == code.end() || !it->second.error.empty()) {
+                fprintf(stderr, "stencilgen: a commit: %s\n", it == code.end() ? "no code" : it->second.error.c_str());
+                return 1;
+            }
+            commit_of[commit_key(commits[j].first, commits[j].second)] = blob.add(it->second, 0, 0);
+        }
+    }
+    std::vector<uint32_t> slots(8 * 0x10000 * 2, 0);  // SlotEntry kSlots[8][0x10000]
+    size_t made_slot[2] = {}, legal_slot[2] = {};
 
     std::vector<uint32_t> index16(0x10000, 0), keys32;
     std::vector<uint32_t> keys_base(selected.size(), 0);
@@ -799,11 +1054,32 @@ int main(int argc, char** argv) {
             undef32 = blob.add(item.code, item.flags, item.bytes);
             continue;
         }
+        if (item.kind == Item::kSlotPiece) {
+            if (item.error == "not legal in the slot") continue;
+            ++legal_slot[item.slot - 1];
+            if (!item.error.empty()) {
+                reasons["slot " + std::to_string(item.slot) + ": " + item.error]++;
+                continue;
+            }
+            ++made_slot[item.slot - 1];
+            for (int v = 0; v < Item::kVariants; ++v) {
+                if (!item.has[v]) continue;
+                const Code& code = item.variant_code[item.same_as[v]];
+                const bool nop = item.writes[v].empty() && tail_cont(code) && code.bytes.size() == 5 && code.cold.empty();
+                const uint32_t st = blob.add(code, uint16_t(item.slot_flags[v] | (nop ? kNop : 0)), 8);
+                const uint32_t cm = item.writes[v].empty() ? 0 : commit_of[commit_key(item.slot, item.writes[v])] + 1;
+                const size_t at = (size_t(v * 2 + item.slot - 1) * 0x10000 + item.insn) * 2;
+                slots[at] = st + 1;
+                slots[at + 1] = cm;
+            }
+            continue;
+        }
         const bool wide = i >= first32;
         if (wide && item.key == 0) keys_base[item.selected] = uint32_t(keys32.size());
         uint32_t entry = 0;
         if (item.error.empty()) entry = blob.add(item.code, item.flags, item.bytes) + 1;
-        else reasons[(wide ? wanted[item.selected].name + std::string(": ") : std::string("16-bit: ")) + item.error]++;
+        else reasons[(wide ? wanted[item.selected].name + std::string(item.kind == Item::kBodyPiece ? " slot 0: " : ": ")
+                           : std::string("16-bit: ")) + item.error]++;
         if (wide) {
             keys32.push_back(entry);
             if (item.error != "an earlier pattern takes it" && item.error != "not a 32-bit encoding") {
@@ -836,6 +1112,7 @@ int main(int argc, char** argv) {
         {"RELOCS", blob.relocs.data(), blob.relocs.size() * sizeof(bcore_cp::Reloc), 0},
         {"INDEX16", index16.data(), index16.size() * sizeof(uint32_t), 0},
         {"KEYS32", keys32.data(), keys32.size() * sizeof(uint32_t), 0},
+        {"SLOTS", slots.data(), slots.size() * sizeof(uint32_t), 0},
     };
     const std::string tables_bin = out_dir + "/cp_tables.bin";
     if (FILE* t = fopen(tables_bin.c_str(), "wb")) {
@@ -890,6 +1167,8 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kSelfExits[2] = {%u, %u};  // chain, count\n", self_exits[0], self_exits[1]);
     fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
     fprintf(f, "const uint32_t kUndef32 = %u;\n", undef32);
+    fprintf(f, "const uint32_t kParallelTail[4] = {%u, %u, %u, %u};  // [did_jump unknown * 2 + CEC check]\n",
+            parallel_tail[0], parallel_tail[1], parallel_tail[2], parallel_tail[3]);
     fprintf(f, "}  // namespace bcore_cp\n");
     fclose(f);
 
@@ -898,6 +1177,8 @@ int main(int argc, char** argv) {
     if (FILE* r = fopen(txt.c_str(), "w")) {
         fprintf(r, "16-bit: %zu of %zu encodings have stencils\n", made16, total16);
         fprintf(r, "32-bit: %zu of %zu keys have stencils\n", made32, total32);
+        fprintf(r, "slots: %zu of %zu slot 1 words, %zu of %zu slot 2 words have stencils; %zu commits\n", made_slot[0],
+                legal_slot[0], made_slot[1], legal_slot[1], commit_of.size());
         fprintf(r, "stencils: %zu, code %zu bytes, relocations %zu\n", blob.stencils.size(), blob.code.size(),
                 blob.relocs.size());
         fprintf(r, "without a stencil:\n");
