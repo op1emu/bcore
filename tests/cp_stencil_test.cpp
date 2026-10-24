@@ -13,6 +13,10 @@
 // instruction (with every loop count), CC both ways, pointers into RAM
 // (aligned or not), into memory with no page (the callbacks), an
 // interrupt pending.
+//
+// Arguments: a stride (every n-th instruction only, a quick check) and the
+// run-time stencils' opt (CpRuntimeSettings::opt, 0 by default; above 0
+// they are split, their cold parts placed apart as the build's are).
 #include "core.h"
 #include "bcore_profile.h"
 #include "../src/cec.h"
@@ -93,12 +97,17 @@ struct Side {
     CpuState cpu{};
     std::unique_ptr<TraceMemory> mem;
     std::unique_ptr<Core> core;
-    explicit Side(bool copy_patch) {
+    Side(bool copy_patch, int runtime_opt) {
         mem = std::make_unique<TraceMemory>(&cpu);
         core = std::make_unique<Core>(&cpu, mem.get());
         core->set_chaining(true, false);
         core->set_tiering(0x7fffffff);  // tier 0 throughout
         core->set_copy_patch(copy_patch);
+        if (copy_patch) {
+            CpRuntimeSettings settings;
+            settings.opt = runtime_opt;
+            core->set_copy_patch_runtime(settings);
+        }
         require(core->init(1), "init");
     }
 };
@@ -249,8 +258,8 @@ uint64_t hash_data(const TraceMemory& mem) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // An optional stride runs every n-th instruction only (a quick check).
     const unsigned stride = argc > 1 ? unsigned(atoi(argv[1])) : 1;
+    const int runtime_opt = argc > 2 ? atoi(argv[2]) : 0;
     auto all = instructions();
     const size_t built_stencils = all.size();
     {
@@ -263,14 +272,15 @@ int main(int argc, char** argv) {
         todo.push_back(all[i]);
         todo_built += i < built_stencils;
     }
-    printf("cp_stencil_test: %zu instructions\n", todo.size());
+    printf("cp_stencil_test: %zu instructions, run-time stencils at opt %d\n", todo.size(), runtime_opt);
 
     // A core holds at most TierTable::kCounters tier-0 blocks: a fresh pair
     // for each chunk.
     constexpr size_t kChunk = 20000;
     size_t compared = 0, made = 0, made_built = 0;
+    uint64_t cold_bytes = 0;
     for (size_t begin = 0; begin < todo.size(); begin += kChunk) {
-        Side cp(true), llvm(false);
+        Side cp(true, runtime_opt), llvm(false, runtime_opt);
         const size_t end = std::min(todo.size(), begin + kChunk);
         for (size_t i = begin; i < end; ++i) {
             const Instruction& in = todo[i];
@@ -305,6 +315,7 @@ int main(int argc, char** argv) {
             require(hash_data(*cp.mem) == hash_data(*llvm.mem), std::string("memory after ") + what);
             ++compared;
         }
+        cold_bytes += cp.core->cp_runtime_stats().cold_bytes;
     }
     printf("cp_stencil_test: %zu compared, %zu made of stencils; %zu of them with stencils built at run time, %zu "
            "made of stencils\n",
@@ -315,6 +326,10 @@ int main(int argc, char** argv) {
     // same): a few illegal encodings at most.
     require((made - made_built) * 100 >= (compared - todo_built) * 99, "the run time refused more than 1% of its packets");
 #endif
+    // Split or not as the opt says: the cold parts ran above (an exception,
+    // a memory callback, a loop bottom are in them).
+    printf("cp_stencil_test: run-time stencils' cold parts %llu bytes\n", (unsigned long long)cold_bytes);
+    require(runtime_opt > 0 ? cold_bytes > 0 : cold_bytes == 0, "run-time stencils split above opt 0 only");
     printf("PASS\n");
     return 0;
 }

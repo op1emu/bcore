@@ -715,6 +715,7 @@ CpRuntimeStats Core::cp_runtime_stats() const {
     out.compile_ns = s.compile_ns;
     out.extract_ns = s.extract_ns;
     out.code_bytes = s.code_bytes;
+    out.cold_bytes = s.cold_bytes;
     out.reasons = s.reasons;
 #endif
     return out;

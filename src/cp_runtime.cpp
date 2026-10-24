@@ -266,6 +266,7 @@ void RuntimeStencils::flush() {
         entries_[l.packet] = Entry{&r, false};
         stats_.built++;
         stats_.code_bytes += r.code.size() + r.cold.size();
+        stats_.cold_bytes += r.cold.size();
     }
 }
 
