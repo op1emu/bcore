@@ -14,7 +14,6 @@
 #include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Support/raw_ostream.h>
-#include <llvm/Transforms/Utils/FunctionComparator.h>
 
 #include "lift_visitor.h"
 
@@ -34,13 +33,6 @@ std::string ir_text(Function* fn) {
             while (i + 1 < s.size() && isdigit(static_cast<unsigned char>(s[i + 1]))) ++i;
     }
     return out;
-}
-
-bool same_ir(const Function& a, const Function& b) {
-    // Globals compare by their number in the state, the same for the same
-    // global: so only within one module.
-    GlobalNumberState numbers;
-    return a.getParent() == b.getParent() && FunctionComparator(&a, &b, &numbers).compare() == 0;
 }
 
 // ---- Holes ----

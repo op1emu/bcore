@@ -838,3 +838,57 @@ of 45 IR instructions cost 1.8 ms.
   execution instructions.
 - Together, boot to main display: execution -11.2% (8 pairs, 95% CI
   -12.7..-9.7%), compile unchanged.
+
+## Every stencil from the build: parallel packets as pieces
+
+The run-time stencils (8,602 packets on the boot to the main display,
+lifted whole and compiled at -O0) took 5 of the CPU thread's 5.3 s of
+compile time and made those packets' code slower. Two things put every
+packet in the build:
+
+- Register holes for every DSP pattern: a data register field is the
+  register's offset in CpuState, read and written through in program
+  order, never cached (two holes may be one register). stencilgen infers
+  per pattern which 3-bit fields can be holes by lifting with two other
+  assignments and comparing the IR. The prototype's failures on BYTEOP and
+  SAA were its own: the registers it chose for a hole could be another
+  field's register pair half (r + 1), which the lifter then reached by a
+  constant offset. Keeping the choice apart from those too covered them.
+- A parallel packet as pieces: slot 1, slot 2, slot 0, the commits, the
+  tail. Slot 0 is always a DSP instruction, and the DSP lifts call no
+  helper, touch no memory and never leave, so running it after the slots'
+  memory accesses is the same as long as the slots' register writes wait
+  (in CpuState::slot_scratch) until after it. A half register write waits
+  as its 16 bits and is merged at the commit, into the register as slot 0
+  and slot 1 left it: merging it in the slot would undo slot 0's other
+  half. Slot 0 is the lone instruction's lift where it reads no field after
+  writing one (seven patterns do: the accumulator ABS and SAT forms and
+  SEARCH; they are lifted as a parallel packet's, writes at the end).
+- The lifter's knowledge that did_jump is clear is part of what it emits:
+  it loses it where a memory access's fast and slow paths meet, and the
+  packet's tail lifted with it clear is not the tail lifted without. So a
+  slot after one that left it unknown, and the tail, have a variant each
+  way (kDjUnknown). Not knowing is always right, only slower.
+- A slot is 16 bits the decoder takes in it: most 16-bit ALU instructions
+  are legal in slot 1 here, so a slot writes up to 8 fields (the ASTAT
+  bits too), not the 2 a load writes.
+
+Constant pools: 112 16-bit encodings (same-register forms such as
+CC = R0 == R0) compiled to vector stores of a pool constant. Their code is
+compiled again with noimplicitfloat, which stops SLP and the backend's
+vector store merging, instead of the translator placing pools.
+
+Testing: cp_stencil_test's random parallel packets now take legal slot
+words a third of the time (about two thirds of 100,000 are composed).
+Swapping the commits, ignoring slot 0's DISALGNEXCPT or running slot 0
+after the commits each fail it. A load whose callback raises an exception
+must be tested in a supervisor handler: from user mode the exception
+switches SP, which a Memory that promises callbacks keep the registers
+breaks, and LLVM's tier 0 (which keeps them cached) and the stencils then
+differ, the build's lone stencils as much as the pieces.
+
+Result on the boot to the main display (6 pairs): the CPU thread's compile
+time 5.25 to 0.45 s, execution -9.7%, JIT CPU 9.8 to 4.9 s, work the same.
+The library: 90,666 stencils, 23.9 MB of code, stencilgen 99 s with 10
+jobs; its tables as text would have taken the compiler a gigabyte.
+

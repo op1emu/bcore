@@ -19,35 +19,6 @@ class Compiler;
 class CompileWorker;
 class BBTranslator;
 class CpTranslator;
-namespace bcore_cp { class RuntimeStencils; }
-
-// Stencils the copy-and-patch tier 0 builds at run time
-// (Core::set_copy_patch_runtime).
-struct CpRuntimeSettings {
-    // Packets the build left without a stencil (parallel ones, 32-bit
-    // instructions outside cp_patterns.def) get one at run time, built once
-    // per encoding for the process: on by default (with set_copy_patch).
-    bool enable = true;
-    // Their IR pipeline and backend: 0 compiles the fastest (the build's
-    // stencils are 2).
-    int opt = 0;
-    // Each new stencil compiled again on its own and compared (tests).
-    bool verify = false;
-    // Only packets whose hash (RuntimeStencils::key_hash) lies in
-    // [range_lo, range_hi] get one: to bisect a wrong stencil.
-    uint64_t range_lo = 0, range_hi = ~uint64_t(0);
-};
-struct CpRuntimeStats {
-    uint64_t hits = 0;     // packets found (with or without a stencil)
-    uint64_t built = 0;    // stencils built
-    uint64_t refused = 0;  // packets that cannot be stencils (reasons by count)
-    uint64_t batches = 0;  // modules compiled
-    uint64_t lift_ns = 0, compile_ns = 0, extract_ns = 0;
-    uint64_t code_bytes = 0;
-    uint64_t cold_bytes = 0;  // of code_bytes, the cold parts (split above opt 0)
-    std::map<std::string, uint64_t> reasons;
-};
-
 namespace bcore_profile { struct ProfileState; }
 
 class Core {
@@ -122,17 +93,13 @@ public:
     void set_light_tier1(bool light) { light_tier1_ = light; }
     // Tier 0 copies its blocks together from stencils built with the core
     // (cp_translator.h) where it can, microseconds where LLVM takes a
-    // millisecond: blocks of 16-bit instructions and the common 32-bit ones
-    // (cp_patterns.def), no parallel packet, with a page table (no fastmem,
-    // no raw memory) and no step limit. The rest it compiles with LLVM as
+    // millisecond: any block with a page table (no fastmem, no raw memory)
+    // and no step limit, but one with a packet the build has no stencil for
+    // (an illegal parallel packet; a parallel one where the Memory's
+    // callbacks may change registers), which it compiles with LLVM as
     // before. Exact either way. Off by default; on x86-64 only (elsewhere
     // this does nothing).
     void set_copy_patch(bool enable);
-    // Copy-and-patch blocks with packets the build has no stencil for: their
-    // stencils built at run time (cp_runtime.h), kept for the process (an
-    // engine Core::invalidate replaces keeps them). Exact as the build's.
-    void set_copy_patch_runtime(const CpRuntimeSettings& settings);
-    CpRuntimeStats cp_runtime_stats() const;
     // Promotions compiled on a thread of their own (off by default: on the
     // dispatching thread, after the run that asked). The dispatching thread
     // still lifts each one (reading the guest's code may call the host) and
@@ -250,8 +217,6 @@ private:
     bool light_tier1_ = false;
     bool copy_patch_ = false;
     std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
-    CpRuntimeSettings cp_runtime_settings_;
-    std::unique_ptr<bcore_cp::RuntimeStencils> cp_runtime_;  // for the process (set_copy_patch_runtime)
     bool unlimited_ = true;             // no step limit at init
     std::unique_ptr<Compiler> tier0_compiler_;
     // The tier-0 compilations of this engine, by counter (TierTable), until

@@ -64,7 +64,6 @@ struct Mode {
     bool copy_patch = false;
     bool dry = false;
     bool count = true;
-    bool runtime = true;  // stencils built at run time too (Core::set_copy_patch_runtime)
 };
 
 // background: -1 promotions on this thread; else on the worker, published
@@ -80,12 +79,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_count_chained(mode.count);
     core.set_tiering(threshold, size_ref);
     core.set_light_tier1(light);
-    if (threshold) {
-        CpRuntimeSettings runtime;
-        runtime.enable = mode.runtime;
-        core.set_copy_patch_runtime(runtime);
-        core.set_copy_patch(mode.copy_patch);
-    }
+    if (threshold) core.set_copy_patch(mode.copy_patch);
     if (background >= 0) core.set_tier_background(true, uint64_t(background));
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
@@ -172,9 +166,6 @@ static void test_throwing_stencils() {
         require(caught, "a memory callback's exception did not reach the host through stencils");
 #if BCORE_ENABLE_PROFILE && BCORE_COPY_PATCH_TEST
         require(core.stats().copy_patch_blocks > 0, "no block was made of stencils");
-#endif
-#if BCORE_COPY_PATCH_TEST
-        if (mode == 3) require(core.cp_runtime_stats().built == 0, "the parallel packet's stencil was built at run time");
 #endif
     }
 }
@@ -490,7 +481,6 @@ int main() {
         {"stencils", true, true},
         {"stencils dry", true, true, true},
         {"stencils uncounted", true, true, false, false},
-        {"stencils of the build only", true, true, false, true, false},
     };
     unsigned compared = 0;
     uint64_t promoted = 0, overflows = 0, background_promoted = 0, stencil_blocks = 0;

@@ -4,13 +4,13 @@
 // built (cp_format.h), copied in place and their holes filled in, in
 // microseconds where the LLVM tier 0 takes a millisecond or more.
 //
-// A block the translator takes is one whose packets all have stencils: the
-// build's (the 16-bit instructions and the 32-bit patterns of
-// cp_patterns.def), or, with set_runtime, one built for the packet at run
-// time (cp_runtime.h: a parallel packet, any other 32-bit instruction). For
-// any other it places nothing and Core compiles the block with LLVM. Its
-// code is, in order: the prologue (the tier counter, and CYCLES with host
-// cycles), each packet's stencil, for a block the packet cap cuts the
+// A block the translator takes is one whose packets all have stencils:
+// every 16-bit and 32-bit instruction, and a parallel packet as its pieces
+// (compose_parallel), but an illegal parallel packet (a slot the decoder
+// refuses, SEARCH in slot 0). For any other it places nothing and Core
+// compiles the block with LLVM. Its code is, in order: the prologue (the
+// tier counter, and CYCLES with host cycles), each packet's stencils (one,
+// or a parallel packet's pieces), for a block the packet cap cuts the
 // fall-through stencil, and, for a block that chains, its own exit
 // (Config::self_loop). Stencils are split (cp_format.h's Stencil): the
 // block is their hot parts, one after the other, and their cold parts lie
@@ -79,16 +79,9 @@ public:
         uint8_t* cold = nullptr;   // its cold code (in the arena's cold region), cold_size bytes
         size_t cold_size = 0;
         const char* why = nullptr; // why there is none
-        // Packets whose stencils were built at run time (set_runtime), and
-        // how many of them this translation built.
-        uint32_t runtime_packets = 0;
-        uint32_t built = 0;
     };
 
     explicit CpTranslator(JitEngine& jit) : jit_(jit) {}
-    // Stencils built at run time for packets the build left without one
-    // (null: none, such a block compiles with LLVM). Kept by the caller.
-    void set_runtime(bcore_cp::RuntimeStencils* runtime) { runtime_ = runtime; }
 
     // The block at pc, its instructions read through code, its starts
     // counted in TierTable::count[counter]. words() then holds every
@@ -167,7 +160,6 @@ private:
     uint64_t last_len_ = 0;   // the length of the packet the fall-through stencil follows
     int exit_piece_ = -1;     // the block's own exit (Config::self_loop): its piece, or -1
     JitEngine& jit_;
-    bcore_cp::RuntimeStencils* runtime_ = nullptr;
     std::function<void(const char*, const void*, size_t)> listener_;
     std::vector<std::unique_ptr<Arena>> arenas_;
     std::vector<Piece> pieces_;
