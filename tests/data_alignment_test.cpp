@@ -22,6 +22,7 @@ public:
     uintptr_t fast_base() const override {return reinterpret_cast<uintptr_t>(bytes.data());}
     bool is_fastmem() const override {return mode==2;}
     uint32_t rawmem_limit() const override {return mode==1 ? bytes.size() : 0;}
+    bool callbacks_preserve_registers() const override {return true;}  // they only count
     std::vector<uint8_t*> pages;
     uint8_t* const* page_table() const override {
         if(mode!=3) return nullptr;
@@ -117,8 +118,9 @@ int main() {
         // DISALGNEXCPT lasts for its packet only: a later load in the same block faults.
         for(bool cp:{false,true}) {
             if(cp && mode!=3) continue;  // copy-and-patch needs the page table
-            Ram mem(mode);CpuState cpu{};Core core(&cpu,&mem);require(core.init(opt),"init packet scope");
-            core.set_copy_patch(cp);
+            Ram mem(mode);CpuState cpu{};Core core(&cpu,&mem);
+            if(cp) {core.set_tiering(0x7fffffff);core.set_copy_patch(true);}  // tier 0 throughout
+            require(core.init(opt),"init packet scope");
             cec_init();evt_init();evt_write(EVT_BASE+12,0x300);cec_return_rti(&cpu);
             mem.write32(0x100,0xc000cc12);mem.write32(0x104,0x00009c00);  // DISALGNEXCPT || R0 = [I0++] || NOP
             mem.write16(0x108,0x9c01);mem.write16(0x10a,0x2000);           // R1 = [I0++]
@@ -127,6 +129,9 @@ int main() {
             require(cpu.dpregs[0]==0x12345678,"the packet's own load aligns down");
             require(mem.faults==1 && mem.fault_addr==0x205 && cpu.retx==0x108,"the next packet's load faults");
             require(cpu.dpregs[1]==7 && cpu.iregs[0]==0x205,"no commit of the faulting load");
+#if BCORE_COPY_PATCH_TEST && BCORE_ENABLE_PROFILE
+            if(cp) require(core.stats().copy_patch_blocks>0,"a copy-and-patch block");
+#endif
             ++count;
         }
     }
