@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
@@ -54,6 +55,13 @@ public:
     // and static relocations, which fold each hole into the instruction
     // that uses it, and no vectorizers (whose constants would be data).
     bool init(int opt_level, int codegen_level, bool split = true, bool stencil = false);
+    // Before init: a CPU and its features (SubtargetFeatures text, "+avx2,...")
+    // in place of the host's, for code that is compiled here and never run
+    // (tests/vectorize_count_test.cpp compiles for AVX-512 on any x86-64).
+    void set_target_cpu(std::string cpu, std::string features) {
+        cpu_ = std::move(cpu);
+        features_ = std::move(features);
+    }
     // The IR pipeline, in place; at opt_level 0 only a loop block's guest
     // memory lowered (guest_memory.h). Every module goes through it before
     // emit. light: a module without a loop block gets kLightPipeline instead
@@ -80,6 +88,7 @@ private:
     bool split_ = true;
     int steady_skip_ = 0;
     std::string post_pipeline_;
+    std::string cpu_, features_;
     std::unique_ptr<llvm::TargetMachine> machine_;
     // The IR pipeline. The analysis managers hold results for the module
     // being optimized only: optimize clears them before it returns.

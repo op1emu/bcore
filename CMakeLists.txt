@@ -310,6 +310,18 @@ if(BCORE_BUILD_FAULT_TESTS)
     # It also builds an LLJIT of its own over the arena's memory managers.
     target_include_directories(bcore-code-arena-test PRIVATE ${LLVM_INCLUDE_DIRS})
     add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
+    # count_module's vectorized loops, from fixed IR; and, on x86-64, a MAC
+    # loop block compiled (not run) for Zen 4's AVX-512 and for x86-64-v3.
+    add_executable(bcore-vectorize-count-test tests/vectorize_count_test.cpp)
+    target_link_libraries(bcore-vectorize-count-test PRIVATE bcore-lift)
+    target_include_directories(bcore-vectorize-count-test PRIVATE ${LLVM_INCLUDE_DIRS})
+    llvm_map_components_to_libnames(LLVM_VECTORIZE_TEST_LIBS irreader)
+    target_link_libraries(bcore-vectorize-count-test PRIVATE ${LLVM_VECTORIZE_TEST_LIBS})
+    add_test(NAME bcore-vectorize-count-test-rules COMMAND bcore-vectorize-count-test rules)
+    if(BCORE_COPY_PATCH_DEFAULT)
+        add_test(NAME bcore-vectorize-count-test-pipeline
+                 COMMAND bcore-vectorize-count-test pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
+    endif()
     if(BCORE_COPY_PATCH)
         add_executable(bcore-cp-stencil-test tests/cp_stencil_test.cpp)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
