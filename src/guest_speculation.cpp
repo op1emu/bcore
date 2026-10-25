@@ -482,7 +482,8 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
         // FIR filler), a few vector iterations, and the runtime unroll's
         // remainder loop cost more than it saved (3% of the FIR benchmark).
         MDNode* nounroll = MDNode::get(ctx, {MDString::get(ctx, "llvm.loop.unroll.disable")});
-        MDNode* id = MDNode::getDistinct(ctx, {nullptr, enable, interleave, nounroll});
+        MDNode* tag = MDNode::getDistinct(ctx, {MDString::get(ctx, kSpeculatedLoopMD)});
+        MDNode* id = MDNode::getDistinct(ctx, {nullptr, enable, interleave, nounroll, tag});
         id->replaceOperandWith(0, id);
         br->setMetadata(LLVMContext::MD_loop, id);
     }

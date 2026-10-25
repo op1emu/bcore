@@ -307,27 +307,14 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
     const uint64_t materialize_begin = bcore_profile::monotonic_ns();
 #endif
 #if BCORE_ENABLE_PROFILE
-    for (auto& f : *result.module) {
-        if (f.isDeclaration()) continue;
-        if (f.hasFnAttribute(BBTranslator::kLoopBlockAttr)) profile_->stats.loop_blocks++;
-        profile_->stats.loops_proven += attribute_count(f, kLoopsProvenAttr);
-        profile_->stats.loops_speculated += attribute_count(f, kLoopsSpeculatedAttr);
-        profile_->stats.loops_steady += attribute_count(f, kLoopsSteadyAttr);
-        profile_->stats.dag_circular += attribute_count(f, BBTranslator::kCircularAttr);
-        // A vectorized loop: its latch says so (as does its scalar
-        // remainder's) and does vector work.
-        for (auto& block : f) {
-            auto* loop = block.getTerminator() ? block.getTerminator()->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
-            if (!loop) continue;
-            bool vectorized = false, vector = false;
-            for (auto& op : loop->operands())
-                if (auto* node = llvm::dyn_cast<llvm::MDNode>(op.get()); node && node->getNumOperands() &&
-                    llvm::isa<llvm::MDString>(node->getOperand(0)) &&
-                    llvm::cast<llvm::MDString>(node->getOperand(0))->getString() == "llvm.loop.isvectorized")
-                    vectorized = true;
-            for (auto& inst : block) vector |= inst.getType()->isVectorTy();
-            if (vectorized && vector) profile_->stats.loops_vectorized++;
-        }
+    {
+        const ModuleCounts counts = count_module(*result.module);
+        profile_->stats.loop_blocks += counts.loop_blocks;
+        profile_->stats.loops_proven += counts.loops_proven;
+        profile_->stats.loops_speculated += counts.loops_speculated;
+        profile_->stats.loops_steady += counts.loops_steady;
+        profile_->stats.dag_circular += counts.dag_circular;
+        profile_->stats.loops_vectorized += counts.loops_vectorized;
     }
 #endif
     BbFunc fn = nullptr;

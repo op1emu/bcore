@@ -31,6 +31,12 @@
 // loop block's loop, GuestLoopVersioning, often has neither), every exit
 // counted or the stop test, and every accumulator's other uses dead once its
 // steps cannot clamp.
+// The copy's loop ID also holds a distinct !{!"bcore.speculated"}, which the
+// vectorizer keeps on every loop it makes of the copy: with 512-bit vectors a
+// vectorized epilogue follows the main vector loop, and the copy is still one
+// loop vectorized (count_module).
+constexpr const char* kSpeculatedLoopMD = "bcore.speculated";
+
 struct SatReductionSpeculation : llvm::PassInfoMixin<SatReductionSpeculation> {
     llvm::PreservedAnalyses run(llvm::Function& f, llvm::FunctionAnalysisManager& am);
 };
