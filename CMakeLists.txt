@@ -258,11 +258,15 @@ if(asm_files AND BFIN_TOOLCHAIN_FOUND)
     )
     set_target_properties(run-comparison-tests PROPERTIES FOLDER "Tests")
 
-    add_test(
-        NAME comparison_test
-        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_comparison_test.py
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    )
+    # bcore's own: a host that adds bcore as a subdirectory runs its ctest
+    # without it.
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        add_test(
+            NAME comparison_test
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_comparison_test.py
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+    endif()
 else()
     if(NOT BFIN_TOOLCHAIN_FOUND)
         message(STATUS "Skipping test assembly/link targets (bfin toolchain not found)")
@@ -307,7 +311,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     # In two shards (its argument): alone it was the longest test by far.
     foreach(shard 0 1)
         add_test(NAME bcore-loop-block-test-${shard} COMMAND bcore-loop-block-test ${shard} 2)
-        set_tests_properties(bcore-loop-block-test-${shard} PROPERTIES COST 150)
+        set_tests_properties(bcore-loop-block-test-${shard} PROPERTIES COST 150 LABELS slow)
     endforeach()
     add_executable(bcore-steady-skip-test tests/steady_skip_test.cpp)
     target_link_libraries(bcore-steady-skip-test PRIVATE bfin-core)
@@ -345,17 +349,19 @@ if(BCORE_BUILD_FAULT_TESTS)
         # and 100000 random parallel packets.
         foreach(offset 0 3 6 9)
             add_test(NAME bcore-cp-stencil-test-${offset} COMMAND bcore-cp-stencil-test 12 ${offset})
-            set_tests_properties(bcore-cp-stencil-test-${offset} PROPERTIES COST 200)
+            set_tests_properties(bcore-cp-stencil-test-${offset} PROPERTIES COST 200 LABELS slow)
         endforeach()
         add_test(NAME bcore-cp-stencil-test-parallel COMMAND bcore-cp-stencil-test 1 parallel 100000)
-        set_tests_properties(bcore-cp-stencil-test-parallel PROPERTIES COST 300)
+        set_tests_properties(bcore-cp-stencil-test-parallel PROPERTIES COST 300 LABELS slow)
         # A Memory whose callbacks change registers: every parallel packet
         # compiled with LLVM, the rest still stencils.
         add_test(NAME bcore-cp-stencil-test-clobber COMMAND bcore-cp-stencil-test 32 clobber 20000)
-        set_tests_properties(bcore-cp-stencil-test-clobber PROPERTIES COST 200)
+        set_tests_properties(bcore-cp-stencil-test-clobber PROPERTIES COST 200 LABELS slow)
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
-    set_tests_properties(bcore-tier-test PROPERTIES COST 100)
-    set_tests_properties(bcore-steady-skip-test PROPERTIES COST 50)
-    set_tests_properties(bcore-lazy-state-test PROPERTIES COST 36)
+    # A test that takes a minute or more is also labelled slow; CI runs every
+    # test in every configuration but one (ctest -LE slow there).
+    set_tests_properties(bcore-tier-test PROPERTIES COST 100 LABELS slow)
+    set_tests_properties(bcore-steady-skip-test PROPERTIES COST 50 LABELS slow)
+    set_tests_properties(bcore-lazy-state-test PROPERTIES COST 36 LABELS slow)
 endif()

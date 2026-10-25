@@ -66,54 +66,70 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 2: C++ tests, one build configuration each
-  # Each configuration builds its tests and runs them at once (ctest -j); the
-  # slow ones carry a COST in CMakeLists.txt so that they start first.
+  # Each configuration builds every test and runs them at once (ctest -j);
+  # the slow ones carry a COST in CMakeLists.txt so that they start first.
+  # Every test runs in every configuration but default, which leaves out
+  # those labelled slow; a new test needs no entry here. full and noprof
+  # take two runners each (ctest -I: every other test). No bfin toolchain
+  # here, so comparison_test is not registered.
   # ──────────────────────────────────────────────────────────────────────────
   unit-test:
-    name: unit-test (${{ matrix.config }})
+    name: unit-test (${{ matrix.config }} ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          # The configuration of the build job: every C++ test.
+          # The configuration of the build job.
           - config: full
+            shard: 1
+            shards: 2
             cmake-args: >-
               -DBCORE_BUILD_PROFILE_TESTS=ON
               -DBCORE_BUILD_FAULT_TESTS=ON
               -DBCORE_PERF_JIT_EVENTS=ON
-            targets: all
-            ctest-args: -E comparison_test
+          - config: full
+            shard: 2
+            shards: 2
+            cmake-args: >-
+              -DBCORE_BUILD_PROFILE_TESTS=ON
+              -DBCORE_BUILD_FAULT_TESTS=ON
+              -DBCORE_PERF_JIT_EVENTS=ON
           # The same tests with the instrumentation compiled out.
           - config: noprof
+            shard: 1
+            shards: 2
             cmake-args: >-
               -DBCORE_ENABLE_PROFILE=OFF
               -DBCORE_BUILD_PROFILE_TESTS=ON
               -DBCORE_BUILD_FAULT_TESTS=ON
-            targets: >-
-              bcore-profile-test bcore-chain-test bcore-hwloop-jump-test
-              bcore-code-arena-test bcore-lazy-state-test bcore-lb-guard-test
-              bcore-loop-block-test bcore-steady-skip-test bcore-tier-test
-              bcore-cp-stencil-test
-            ctest-args: >-
-              -R 'bcore-profile-test|bcore-chain-test|bcore-hwloop-jump-test|bcore-code-arena-test|bcore-lazy-state-test|bcore-lb-guard-test|bcore-loop-block-test|bcore-steady-skip-test|bcore-tier-test|bcore-cp-stencil-test'
+          - config: noprof
+            shard: 2
+            shards: 2
+            cmake-args: >-
+              -DBCORE_ENABLE_PROFILE=OFF
+              -DBCORE_BUILD_PROFILE_TESTS=ON
+              -DBCORE_BUILD_FAULT_TESTS=ON
           # The core without the copy-and-patch tier, as hosts other than
           # x86-64 build it.
           - config: nocp
+            shard: 1
+            shards: 1
             cmake-args: >-
               -DBCORE_COPY_PATCH=OFF
+              -DBCORE_BUILD_PROFILE_TESTS=ON
               -DBCORE_BUILD_FAULT_TESTS=ON
-            targets: emu disasm bcore-tier-test bcore-code-arena-test
-            ctest-args: -R 'bcore-tier-test|bcore-code-arena-test'
-          # Plain `cmake -B build`: BCORE_ENABLE_PROFILE=ON,
-          # BCORE_PERF_JIT_EVENTS=OFF. The full configuration forces
-          # PERF_JIT_EVENTS=ON and noprof forces PROFILE=OFF, so without this
-          # the defaults are never linked.
+          # BCORE_ENABLE_PROFILE and BCORE_PERF_JIT_EVENTS at their defaults
+          # (ON, OFF): full forces PERF_JIT_EVENTS=ON and noprof PROFILE=OFF,
+          # so without this the defaults are never linked.
           - config: default
-            cmake-args: -DBCORE_BUILD_PROFILE_TESTS=ON
-            targets: emu disasm bcore-profile-test
-            ctest-args: -R bcore-profile-test
+            shard: 1
+            shards: 1
+            cmake-args: >-
+              -DBCORE_BUILD_PROFILE_TESTS=ON
+              -DBCORE_BUILD_FAULT_TESTS=ON
+            ctest-args: -LE slow
     steps:
       - uses: actions/checkout@v4
 
@@ -132,44 +148,18 @@ jobs:
             ${{ matrix.cmake-args }}
 
       - name: Build
-        run: cmake --build build -j$(nproc) --target ${{ matrix.targets }}
+        run: cmake --build build -j$(nproc)
 
       - name: ccache statistics
         run: ccache -s
 
       - name: Test
-        run: ctest --test-dir build -j$(nproc) --output-on-failure ${{ matrix.ctest-args }}
+        run: |
+          ctest --test-dir build -j$(nproc) --output-on-failure \
+            -I ${{ matrix.shard }},,${{ matrix.shards }} ${{ matrix.ctest-args }}
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 3: Disassembler comparison test
-  # Runs run_comparison_test.py which compares build/disasm output against
-  # bfin-elf-objdump for every assembled object file.
-  # ──────────────────────────────────────────────────────────────────────────
-  disasm-test:
-    needs: build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: ./.github/actions/setup
-        with:
-          toolchain: "true"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: build/
-
-      - name: Fix binary permissions
-        run: chmod +x build/disasm build/emu
-
-      - name: Run disassembler comparison test
-        run: python3 tests/run_comparison_test.py --no-fail-fast
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Job 4: Emulator test suite, one suite per job
+  # Job 3: Emulator test suite, one suite per job
   # Every suite skips the tests in .github/emu-ignore.txt; a warning
   # (non-failing) is printed for any ignored test that unexpectedly passes,
   # prompting cleanup of the list.
@@ -243,16 +233,22 @@ jobs:
         run: ${{ matrix.run }}
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 5: Benchmark
-  # Runs bench.s.elf and reports wall-clock time in the job step summary.
-  # The benchmark must exit 0 (CHECKREG assertions pass) to succeed.
+  # Job 4: Disassembler comparison test and benchmark, a few seconds each
+  # run_comparison_test.py compares build/disasm output against
+  # bfin-elf-objdump for every assembled object file. bench.s.elf must exit
+  # 0 (CHECKREG assertions pass); its wall-clock time goes to the job
+  # summary.
   # ──────────────────────────────────────────────────────────────────────────
-  benchmark:
+  disasm-and-benchmark:
     needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          toolchain: "true"
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -263,11 +259,15 @@ jobs:
       - name: Fix binary permissions
         run: chmod +x build/disasm build/emu
 
+      - name: Run disassembler comparison test
+        run: python3 tests/run_comparison_test.py --no-fail-fast
+
       - name: Run benchmark
+        if: success() || failure()
         run: |
           START=$(date +%s%N)
-          ./build/emu build/test_linked/bench.s.elf
-          EXIT_CODE=$?
+          EXIT_CODE=0
+          ./build/emu build/test_linked/bench.s.elf || EXIT_CODE=$?
           END=$(date +%s%N)
           ELAPSED_MS=$(( (END - START) / 1000000 ))
 
