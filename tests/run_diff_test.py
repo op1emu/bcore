@@ -244,6 +244,9 @@ def compare(name: str, runner: Runner, base_emu: str, emu: str, base_flags: List
 
 
 def main() -> None:
+    # One line at a time even into a pipe (CI): a runner that is shut down
+    # mid-suite then shows the last result reported, not the last buffer.
+    sys.stdout.reconfigure(line_buffering=True)
     script_dir = Path(__file__).parent.resolve()
     build_dir = script_dir.parent / "build"
     parser = argparse.ArgumentParser(description="Blackfin emulator differential test: two runs of every ELF compared",

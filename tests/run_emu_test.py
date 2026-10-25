@@ -8,13 +8,14 @@ the result as pass (exit 0), fail (exit 1), timeout, or error (crash/signal).
 import argparse
 import fnmatch
 import os
-import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+
+from capped_run import OUTPUT_LIMIT, run_capped
 
 
 # ANSI colors (matches run_comparison_test.py style)
@@ -66,32 +67,6 @@ def get_project_paths() -> tuple[Path, Path]:
     return build_dir / "emu", build_dir / "test_linked"
 
 
-def run_one(elf_path: Path, timeout: float) -> EmuResult:
-    name = elf_path.name
-    t0 = time.monotonic()
-    try:
-        proc = subprocess.run(
-            [str(elf_path.parent.parent.parent / "build" / "emu"), str(elf_path)],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        duration = time.monotonic() - t0
-        rc = proc.returncode
-        if rc == 0:
-            status = "pass"
-        elif rc == 1:
-            status = "fail"
-        else:
-            status = "error"
-        return EmuResult(name, status, rc, proc.stdout, proc.stderr, duration)
-    except subprocess.TimeoutExpired as exc:
-        duration = time.monotonic() - t0
-        stdout = (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = (exc.stderr or b"").decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        return EmuResult(name, "timeout", -1, stdout, stderr, duration)
-
-
 def print_result(r: EmuResult, verbose: bool) -> None:
     tag_map = {
         "pass":    c(Colors.GREEN,   "[PASS]"),
@@ -113,6 +88,9 @@ def print_result(r: EmuResult, verbose: bool) -> None:
 
 
 def main() -> None:
+    # One line at a time even into a pipe (CI): a runner that is shut down
+    # mid-suite then shows the last result reported, not the last buffer.
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(
         description="Blackfin JIT emulator test runner",
     )
@@ -203,34 +181,24 @@ def main() -> None:
     summary = Summary(total=len(active_files), ignored=len(ignored_files))
     max_workers = args.jobs or min(max(len(active_files) + len(ignored_files), 1), os.cpu_count() or 4)
 
-    # Build a partial run_one with emu path baked in (avoids re-deriving inside worker)
     def _run(elf_path: Path) -> EmuResult:
         t0 = time.monotonic()
-        try:
-            proc = subprocess.run(
-                [str(emu), str(elf_path), "-O", str(args.opt_level)]
-                + (["--page-table"] if args.page_table else [])
-                + (["--chain"] if args.chain else [])
-                + (["--tier-threshold", str(args.tier_threshold)] if args.tier_threshold else [])
-                + (["--copy-patch"] if args.copy_patch else []),
-                capture_output=True,
-                text=True,
-                timeout=args.timeout,
-            )
-            duration = time.monotonic() - t0
-            rc = proc.returncode
-            if rc == 0:
-                status = "pass"
-            elif rc == 1:
-                status = "fail"
-            else:
-                status = "error"
-            return EmuResult(elf_path.name, status, rc, proc.stdout, proc.stderr, duration)
-        except subprocess.TimeoutExpired as exc:
-            duration = time.monotonic() - t0
-            stdout = (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = (exc.stderr or b"").decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            return EmuResult(elf_path.name, "timeout", -1, stdout, stderr, duration)
+        r = run_capped(
+            [str(emu), str(elf_path), "-O", str(args.opt_level)]
+            + (["--page-table"] if args.page_table else [])
+            + (["--chain"] if args.chain else [])
+            + (["--tier-threshold", str(args.tier_threshold)] if args.tier_threshold else [])
+            + (["--copy-patch"] if args.copy_patch else []),
+            timeout=args.timeout,
+        )
+        duration = time.monotonic() - t0
+        if r.timed_out:
+            return EmuResult(elf_path.name, "timeout", -1, r.stdout, r.stderr, duration)
+        if r.flooded:
+            return EmuResult(elf_path.name, "error", -1, r.stdout,
+                             r.stderr + f"\n[stopped: printed more than {OUTPUT_LIMIT >> 20} MiB]", duration)
+        status = {0: "pass", 1: "fail"}.get(r.returncode, "error")
+        return EmuResult(elf_path.name, status, r.returncode, r.stdout, r.stderr, duration)
 
     stopped_early = False
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

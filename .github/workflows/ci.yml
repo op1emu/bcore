@@ -220,6 +220,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: ./.github/actions/setup
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
