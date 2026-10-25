@@ -11,6 +11,7 @@
 #include "bcore_profile.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -362,10 +363,20 @@ static unsigned test_clobbering_callbacks() {
     return cases;
 }
 
-int main() {
-    test_l_zero();
-    const unsigned clobbering = test_clobbering_callbacks();
-    printf("clobbering callback cases passed (%u)\n", clobbering);
+// bcore-loop-block-test [SHARD SHARDS]: the cases of every program at the
+// optimization levels where (program + level) % SHARDS == SHARD, so that
+// ctest runs the shards at once (the fixed cases run in shard 0). Each shard
+// still has programs that raise and MAC loops that are speculated, so every
+// check below holds in each.
+int main(int argc, char** argv) {
+    const int shard = argc > 2 ? atoi(argv[1]) : 0;
+    const int shards = argc > 2 ? std::max(1, atoi(argv[2])) : 1;
+    const auto mine = [&](int program_no, int opt) { return (program_no + opt) % shards == shard; };
+    if (shard == 0) {
+        test_l_zero();
+        const unsigned clobbering = test_clobbering_callbacks();
+        printf("clobbering callback cases passed (%u)\n", clobbering);
+    }
     std::mt19937 rng(7);
     unsigned cases = 0, raised = 0, long_runs = 0;
     uint64_t loop_blocks = 0, proven = 0, speculated = 0, vectorized = 0, circular = 0, promoted = 0;
@@ -389,6 +400,7 @@ int main() {
                 for (bool chained : {false, true})
                     for (uint32_t budget : {0u, 1u, 7u, 64u, 1000u}) {
                         if (!chained && budget) continue;
+                        if (!mine(program_no, opt)) continue;
                         const Outcome want = run(p, opt, chained, budget, pages, false);
                         // Every other program with SteadyLoopSkip too, which
                         // must change nothing: a device read is a recorded
@@ -463,6 +475,7 @@ int main() {
         for (int opt : {1, 2})
             for (bool pages : {false, true})
                 for (uint32_t budget : {1u, 64u, 1000u, 100000u}) {
+                    if (!mine(program_no, opt)) continue;
                     const bool count = program_no % 2;
                     const Outcome want = run(p, opt, true, budget, pages, false, false, 0, 0, -1, count);
                     Outcome got = run(p, opt, true, budget, pages, true, false, 0, 0, -1, count);
