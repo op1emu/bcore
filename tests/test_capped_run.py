@@ -20,7 +20,7 @@ def gone(pid: int, within: float = 2.0) -> bool:
             with open(f"/proc/{pid}/stat") as stat:
                 if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
                     return True
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):  # gone before the open, or before the read
             return True
         time.sleep(0.05)
     return False
