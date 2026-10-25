@@ -42,6 +42,7 @@ jobs:
             -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR=$BCORE_STENCIL_CACHE_DIR \
             -DBCORE_BUILD_PROFILE_TESTS=ON \
             -DBCORE_BUILD_FAULT_TESTS=ON \
             -DBCORE_PERF_JIT_EVENTS=ON
@@ -127,6 +128,7 @@ jobs:
             -DLLVM_DIR=/usr/lib/llvm-15/lib/cmake/llvm \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR=$BCORE_STENCIL_CACHE_DIR \
             ${{ matrix.cmake-args }}
 
       - name: Build

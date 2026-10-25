@@ -108,12 +108,23 @@ if(BCORE_COPY_PATCH)
     endif()
     set_target_properties(bcore-stencilgen PROPERTIES FOLDER "Core")
     set(BCORE_CP_GEN ${CMAKE_CURRENT_BINARY_DIR}/cp_gen)
+    # A directory that keeps the stencils of the last bcore-stencilgen binary
+    # (cmake/StencilCache.cmake): a rebuild that links the same generator,
+    # as a CI job with ccache does, copies them instead of taking minutes.
+    set(BCORE_STENCIL_CACHE_DIR "" CACHE PATH "Reuse the stencils of an identical bcore-stencilgen")
+    if(BCORE_STENCIL_CACHE_DIR)
+        set(BCORE_STENCILGEN_COMMAND ${CMAKE_COMMAND} -DGEN=$<TARGET_FILE:bcore-stencilgen>
+            -DOUT=${BCORE_CP_GEN} -DCACHE=${BCORE_STENCIL_CACHE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/StencilCache.cmake)
+    else()
+        set(BCORE_STENCILGEN_COMMAND bcore-stencilgen ${BCORE_CP_GEN})
+    endif()
     add_custom_command(
         OUTPUT ${BCORE_CP_GEN}/cp_stencils.inc ${BCORE_CP_GEN}/cp_stencils.bin ${BCORE_CP_GEN}/cp_tables.bin
                ${BCORE_CP_GEN}/cp_stencils.txt
         COMMAND ${CMAKE_COMMAND} -E make_directory ${BCORE_CP_GEN}
-        COMMAND bcore-stencilgen ${BCORE_CP_GEN}
-        DEPENDS bcore-stencilgen
+        COMMAND ${BCORE_STENCILGEN_COMMAND}
+        DEPENDS bcore-stencilgen ${CMAKE_CURRENT_SOURCE_DIR}/cmake/StencilCache.cmake
         COMMENT "Building the copy-and-patch stencils"
         VERBATIM)
     set_source_files_properties(src/cp_stencils.cpp PROPERTIES
