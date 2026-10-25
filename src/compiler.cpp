@@ -65,6 +65,10 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) 
         llvm::errs() << "Failed to detect host: " << builder.takeError() << "\n";
         return false;
     }
+    if (!stencil && !cpu_.empty()) {
+        builder->setCPU(cpu_);
+        builder->getFeatures() = llvm::SubtargetFeatures(features_);
+    }
     if (stencil) {
         builder->setCPU("x86-64");
         builder->setCodeModel(llvm::CodeModel::Small);
