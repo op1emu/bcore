@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <set>
 
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
@@ -242,19 +243,27 @@ ModuleCounts count_module(const llvm::Module& mod) {
         counts.loops_steady += attribute_count(f, kLoopsSteadyAttr);
         counts.dag_circular += attribute_count(f, BBTranslator::kCircularAttr);
         // A vectorized loop: its latch says so (as does its scalar
-        // remainder's) and does vector work.
+        // remainder's) and does vector work. A speculative copy counts once,
+        // however many vector loops it became (kSpeculatedLoopMD).
+        std::set<const llvm::MDNode*> copies;
         for (const llvm::BasicBlock& block : f) {
             auto* loop = block.getTerminator() ? block.getTerminator()->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
             if (!loop) continue;
             bool vectorized = false, vector = false;
+            const llvm::MDNode* copy = nullptr;
             for (auto& op : loop->operands())
                 if (auto* node = llvm::dyn_cast<llvm::MDNode>(op.get()); node && node->getNumOperands() &&
-                    llvm::isa<llvm::MDString>(node->getOperand(0)) &&
-                    llvm::cast<llvm::MDString>(node->getOperand(0))->getString() == "llvm.loop.isvectorized")
-                    vectorized = true;
+                    llvm::isa<llvm::MDString>(node->getOperand(0))) {
+                    const llvm::StringRef name = llvm::cast<llvm::MDString>(node->getOperand(0))->getString();
+                    if (name == "llvm.loop.isvectorized") vectorized = true;
+                    if (name == kSpeculatedLoopMD) copy = node;
+                }
             for (auto& inst : block) vector |= inst.getType()->isVectorTy();
-            if (vectorized && vector) counts.loops_vectorized++;
+            if (!vectorized || !vector) continue;
+            if (copy) copies.insert(copy);
+            else counts.loops_vectorized++;
         }
+        counts.loops_vectorized += copies.size();
     }
     return counts;
 }
