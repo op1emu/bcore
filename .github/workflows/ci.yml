@@ -201,7 +201,7 @@ jobs:
           # the whole matrices take about 40 CPU-minutes.
           - suite: diff-tiers
             run: |
-              python3 -m unittest tests/test_run_diff.py
+              python3 -m unittest tests/test_run_diff.py tests/test_capped_run.py
               python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
                 -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
           # op1emu's tiering: size-scaled thresholds, and the light tier-1
