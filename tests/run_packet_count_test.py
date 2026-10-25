@@ -17,11 +17,12 @@ import argparse
 import fnmatch
 import os
 import re
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Tuple
+
+from capped_run import run_capped
 
 COUNT_RE = re.compile(r"^packets=(\d+) runs=(\d+)$", re.MULTILINE)
 
@@ -39,16 +40,16 @@ class TimedOut(Exception):
 def count(emu: Path, elf: Path, opt_level: int, step: bool,
           timeout: float) -> Optional[Tuple[int, int, int]]:
     """(exit code, packets, runs); None when the run printed no packet count
-    (a crash, or a failure before the summary). Raises TimedOut."""
+    (a crash, a failure before the summary, or output past OUTPUT_LIMIT).
+    Raises TimedOut."""
     cmd = [str(emu), "--count-packets", "-O", str(opt_level), str(elf)]
     if step:
         cmd[1:1] = ["--max-steps", "1"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        raise TimedOut from error
+    proc = run_capped(cmd, timeout)
+    if proc.timed_out:
+        raise TimedOut
     m = COUNT_RE.search(proc.stderr)
-    if not m:
+    if proc.flooded or not m:
         return None
     return proc.returncode, int(m.group(1)), int(m.group(2))
 
@@ -77,6 +78,9 @@ def check(emu: Path, elf: Path, opt_level: int, timeout: float) -> Tuple[str, st
 
 
 def main() -> None:
+    # One line at a time even into a pipe (CI): a runner that is shut down
+    # mid-suite then shows the last result reported, not the last buffer.
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("--filter", help="Glob pattern to filter test names")
     parser.add_argument("-j", "--jobs", type=int, default=0,
