@@ -76,6 +76,12 @@ Native code  ◄──► extern "C" helpers (mem_read/write, CEC, hwloop)
 wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 15
 ```
 
+**On macOS (Apple silicon):** `brew install llvm@15`, then
+`-DLLVM_DIR=$(brew --prefix llvm@15)/lib/cmake/llvm`. The copy-and-patch tier
+is x86-64 only (`BCORE_COPY_PATCH`), and the perf JIT listener Linux only
+(`BCORE_PERF_JIT_EVENTS`); the rest builds and runs on AArch64 and macOS too
+(CI runs the tests on macos-15).
+
 **Blackfin cross-toolchain** is searched in this order:
 1. CMake variable `BFIN_TOOLCHAIN_DIR`
 2. `$HOME/toolchains/bfin-elf/bin`
