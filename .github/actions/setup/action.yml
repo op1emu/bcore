@@ -9,7 +9,9 @@ inputs:
     description: Install LLVM 15 and ccache
     default: "false"
   ccache-key:
-    description: The ccache cache's key prefix, one per build configuration (with llvm)
+    description: >
+      The ccache cache's key prefix, one per build configuration (with llvm);
+      none for a job that compiles nothing it keeps
     default: ""
   toolchain:
     description: Install the Blackfin toolchain and add it to PATH
@@ -61,7 +63,7 @@ runs:
     # (cmake/StencilCache.cmake): the same generator relinked from them
     # copies its stencils instead of building them for minutes.
     - name: Cache ccache
-      if: inputs.llvm == 'true'
+      if: inputs.llvm == 'true' && inputs.ccache-key != ''
       uses: actions/cache@v4
       with:
         path: |
