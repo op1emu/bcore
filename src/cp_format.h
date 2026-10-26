@@ -62,6 +62,10 @@ enum RelocKind : uint8_t {
     kMovw2Nc,
     kMovw3,
     kBranch26,  // R_AARCH64_JUMP26/CALL26, a B or BL: (value + addend - place) / 4
+    // A conditional branch between a stencil's hot and cold code, through a
+    // B the translator places beside it (cp_translator.cpp's trampolines):
+    kCondBr19,  // R_AARCH64_CONDBR19, a B.cond, CBZ or CBNZ: the same in 19 bits (+-1 MiB)
+    kTestBr14,  // R_AARCH64_TSTBR14, a TBZ or TBNZ: in 14 bits (+-32 KiB)
 };
 
 struct Reloc {

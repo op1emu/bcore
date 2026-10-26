@@ -47,6 +47,15 @@ inline bool patch_reloc(uint8_t* at, const Reloc& r, uint64_t value) {
         store32(place, (load32(place) & 0xfc000000u) | (uint32_t(v >> 2) & 0x03ffffffu));
         return true;
     }
+    case kCondBr19:
+    case kTestBr14: {
+        const unsigned bits = r.kind == kCondBr19 ? 19 : 14;  // the word's bits [5, 5 + bits)
+        const int64_t v = int64_t(value) + r.addend - int64_t(reinterpret_cast<uintptr_t>(place));
+        if ((v & 3) || v < -(int64_t(1) << (bits + 1)) || v >= (int64_t(1) << (bits + 1))) return false;
+        const uint32_t mask = ((uint32_t(1) << bits) - 1) << 5;
+        store32(place, (load32(place) & ~mask) | ((uint32_t(v >> 2) << 5) & mask));
+        return true;
+    }
     case kAbs32:
     case kAbs32S: {
         const int64_t v = int64_t(value) + r.addend;

@@ -336,6 +336,8 @@ int a64_kind(uint32_t type) {
     case ELF::R_AARCH64_MOVW_UABS_G3: return kMovw3;
     case ELF::R_AARCH64_JUMP26:
     case ELF::R_AARCH64_CALL26: return kBranch26;
+    case ELF::R_AARCH64_CONDBR19: return kCondBr19;
+    case ELF::R_AARCH64_TSTBR14: return kTestBr14;
     }
     return -1;
 }
@@ -466,13 +468,14 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
             }
             const int kind = a64 ? a64_kind(rel.getType()) : x86_kind(rel.getType());
             const bool code_hole = hole >= int(kHoleCont);
-            const bool branch = kind == kPcRel32 || kind == kBranch26;
+            const bool conditional = kind == kCondBr19 || kind == kTestBr14;
+            const bool branch = kind == kPcRel32 || kind == kBranch26 || conditional;
             char why[160] = {};
             if (hole < 0)
                 snprintf(why, sizeof why, "relocation against '%s'", name.c_str());
             else if (kind < 0)
                 snprintf(why, sizeof why, "relocation type %u against %s", unsigned(rel.getType()), name.c_str());
-            else if (code_hole != branch)
+            else if (code_hole != branch || (conditional && hole != kHoleHot && hole != kHoleCold))
                 snprintf(why, sizeof why, "relocation kind %d against %s", kind, name.c_str());
             else if (hole == kHolePc && !a64 && kind != kAbs32)
                 snprintf(why, sizeof why, "the PC as a sign-extended or 64-bit value");

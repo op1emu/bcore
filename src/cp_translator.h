@@ -76,7 +76,7 @@ public:
         uint32_t fallthrough_pc = 0;
         uint32_t packets = 0;
         uint32_t threshold = 0;    // its tier counter's: tier_threshold of its packets
-        size_t size = 0;           // its code's bytes, at fn
+        size_t size = 0;           // its code's bytes, at fn (with its trampolines)
         uint8_t* cold = nullptr;   // its cold code (in the arena's cold region), cold_size bytes
         size_t cold_size = 0;
         const char* why = nullptr; // why there is none
@@ -120,6 +120,10 @@ private:
         const bcore_cp::Reloc* cold_relocs = nullptr;
         size_t cold_at = 0;  // offset in the block's cold code
         uint32_t packet = 0; // the packet's index in the block, from 1 (a parallel packet's pieces share it)
+        // Its trampolines (conditional branches to the other part): how many
+        // in each part, and their offsets in the block's code and cold code.
+        size_t jumps = 0, cold_jumps = 0;
+        size_t jumps_at = 0, cold_jumps_at = 0;
     };
     // A set of helper jumps and exit stencils in an arena's hot region,
     // placed where the first block that has none within reach (kReach in

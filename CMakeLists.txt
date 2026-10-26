@@ -385,6 +385,7 @@ if(BCORE_BUILD_FAULT_TESTS)
         # Every 24th at a high PC (L1 instruction SRAM, op1emu's).
         add_test(NAME bcore-cp-stencil-test-high COMMAND bcore-cp-stencil-test 24 5 high)
         set_tests_properties(bcore-cp-stencil-test-high PROPERTIES COST 100 LABELS slow)
+        add_test(NAME bcore-cp-stencil-test-long COMMAND bcore-cp-stencil-test long)
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
     # A test that takes a minute or more is also labelled slow; CI runs every
