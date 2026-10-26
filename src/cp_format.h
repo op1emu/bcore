@@ -45,12 +45,23 @@ inline constexpr const char* kHelpers[] = {
 };
 inline constexpr unsigned kHelperCount = sizeof(kHelpers) / sizeof(kHelpers[0]);
 
-// How a relocation fills its value in: the x86-64 relocation it came from.
+// How a relocation fills its value in: the relocation it came from.
 enum RelocKind : uint8_t {
+    // x86-64
     kAbs32,    // R_X86_64_32: value + addend, zero-extended from 32 bits
     kAbs32S,   // R_X86_64_32S: value + addend, sign-extended from 32 bits
     kPcRel32,  // R_X86_64_PC32/PLT32: value + addend - the place's address
     kAbs64,    // R_X86_64_64: value + addend
+    // AArch64: a MOVZ's or MOVK's 16-bit immediate, bits [16 k, 16 k + 16)
+    // of value + addend (R_AARCH64_MOVW_UABS_Gk), checked that none above
+    // them is set, or not (_NC)
+    kMovw0,
+    kMovw0Nc,
+    kMovw1,
+    kMovw1Nc,
+    kMovw2Nc,
+    kMovw3,
+    kBranch26,  // R_AARCH64_JUMP26/CALL26, a B or BL: (value + addend - place) / 4
 };
 
 struct Reloc {
@@ -64,8 +75,8 @@ enum StencilFlags : uint16_t {
     kTerminates = 1,  // no path goes on to the next packet
     kCycles = 2,      // reads or writes CYCLES: the block's prologue sets them (host cycles)
     kIdle = 4,        // IDLE, compiled as idle_waits off has it (Core::set_idle_waits)
-    kTailCont = 8,    // the code ends in a jmp rel32 to the next packet, which may be dropped
-    // The code ends in a jmp rel32 to the block's exit, which may be dropped
+    kTailCont = 8,    // the code ends in a jump to the next packet (jmp rel32, B), which may be dropped
+    // The code ends in a jump to the block's exit, which may be dropped
     // where the exit follows (kSelfExits).
     kTailExit = 16,
     // A parallel packet's pieces (kSlots, kKeys32 with the multi-issue bit):

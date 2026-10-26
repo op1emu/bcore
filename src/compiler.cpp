@@ -41,7 +41,8 @@ static void split_by_counts() {
 Compiler::Compiler() = default;
 Compiler::~Compiler() = default;
 
-bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) {
+bool Compiler::init(int opt_level, int codegen_level, bool split, const char* stencil_triple) {
+    const bool stencil = stencil_triple != nullptr;
     opt_level_ = opt_level;
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
@@ -58,7 +59,7 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) 
 
     auto builder = stencil
         ? llvm::Expected<llvm::orc::JITTargetMachineBuilder>(
-              llvm::orc::JITTargetMachineBuilder(llvm::Triple("x86_64-unknown-linux-gnu")))
+              llvm::orc::JITTargetMachineBuilder(llvm::Triple(stencil_triple)))
         : llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!builder) {
         llvm::errs() << "Failed to detect host: " << builder.takeError() << "\n";
@@ -75,7 +76,12 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) 
     if (!triple.isX86()) split = false;
     split_ = split;
     if (stencil) {
-        builder->setCPU("x86-64");
+        if (triple.isX86()) {
+            builder->setCPU("x86-64");
+        } else {
+            builder->setCPU("generic");
+            builder->getFeatures() = llvm::SubtargetFeatures("+reserve-x18,-outline-atomics");
+        }
         builder->setCodeModel(llvm::CodeModel::Small);
         builder->setRelocationModel(llvm::Reloc::Static);
     } else if (triple.isOSDarwin()) {

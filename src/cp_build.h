@@ -25,6 +25,7 @@ class Function;
 class Module;
 class Type;
 }  // namespace llvm
+class Compiler;
 
 namespace bcore_cp {
 
@@ -86,6 +87,21 @@ private:
     uint8_t* dummy_ = nullptr;
 };
 
+// The targets stencils are compiled for (Compiler::init's stencil_triple):
+// the generic CPU of each architecture. AArch64's are ELF code for Linux and
+// macOS alike: the bytes the translator copies hold nothing of the object
+// format, X18 stays unused (Apple keeps it) and narrow helper parameters are
+// extended by the caller (helper_abi.h), as Apple's ABI asks.
+inline constexpr const char* kStencilTripleX86 = "x86_64-unknown-linux-gnu";
+inline constexpr const char* kStencilTripleA64 = "aarch64-unknown-linux-gnu";
+// This host's.
+inline constexpr const char* kStencilTripleHost =
+#if defined(__aarch64__)
+    kStencilTripleA64;
+#else
+    kStencilTripleX86;
+#endif
+
 // The PC a stencil is lifted at, and another to lift it at again: the two
 // lifts must be the same IR (the PC holes aside), or the stencil depends on
 // its PC.
@@ -114,6 +130,16 @@ BBTranslator::StencilHoles packet_holes(llvm::Module& mod);
 // (rel32), which the translator points at its trampolines.
 void make_local(llvm::Module& mod);
 
+// AArch64 has no instruction with a 32-bit immediate a value hole could
+// fill: the backend would take a hole's address PC-relatively (ADRP + ADD),
+// which reaches no value 4 GiB away. After the IR pipeline, every use of a
+// value hole in fn becomes a MOVZ (+ MOVK) of the value (R_AARCH64_MOVW_UABS_G*,
+// kMovw*) just before the instruction, or the one made before it where that
+// dominates the use, as wide as the hole's range and the use's type need:
+// one instruction under 2^16, two for a 32-bit value. False with `error`
+// set for a use it cannot rewrite.
+bool materialize_holes(llvm::Function& fn, std::string& error);
+
 // ---- Compiled code ----
 
 struct Code {
@@ -124,16 +150,26 @@ struct Code {
     std::string error;  // why the code cannot be a stencil
 };
 
+// mod's stencils, lifted here, compiled by `compiler` (in a stencil mode,
+// Compiler::init) into the code of each: the helpers called in the
+// target's convention, the IR pipeline, on AArch64 the value holes made
+// (materialize_holes), the backend, extract(). A function whose code cannot
+// be a stencil has its error set.
+std::map<std::string, Code> compile_stencils(::Compiler& compiler, llvm::Module& mod);
+
 // The hole a relocation's symbol names, or -1.
 int hole_of(llvm::StringRef name);
 // The code of each function of an object, by name: its section's or its
 // part of .text, and its cold part (the splitter's .text.split.<name>,
 // which Compiler's stencil mode makes).
 std::map<std::string, Code> extract(const llvm::MemoryBuffer& buffer);
-// The code ends in a jmp rel32 to the next packet, which the translator
-// drops where the next packet follows (kTailCont).
+// The length of the jump the code ends in to `hole` (a jmp rel32, 5; a B,
+// 4), 0 if it ends in none.
+size_t tail_jump(const Code& code, Hole hole);
+// The code ends in a jump to the next packet, which the translator drops
+// where the next packet follows (kTailCont).
 bool tail_cont(const Code& code);
-// The code ends in a jmp rel32 to the block's exit (kTailExit).
+// The code ends in a jump to the block's exit (kTailExit).
 bool tail_exit(const Code& code);
 // The flags the code itself sets: kTailCont, kTailExit.
 uint16_t code_flags(const Code& code);

@@ -104,6 +104,18 @@ if(BCORE_COPY_PATCH)
     add_executable(bcore-stencilgen tools/stencilgen.cpp)
     target_include_directories(bcore-stencilgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
     target_link_libraries(bcore-stencilgen PRIVATE bcore-lift)
+    # Each architecture's stencils it can make (--target), with the assembler
+    # parser AArch64's hole materialization needs.
+    foreach(arch X86 AArch64)
+        if(arch IN_LIST LLVM_TARGETS_TO_BUILD)
+            string(TOLOWER ${arch} lower)
+            llvm_map_components_to_libnames(BCORE_GEN_${arch}_LIBS
+                ${lower}codegen ${lower}asmparser ${lower}desc ${lower}info)
+            target_link_libraries(bcore-stencilgen PRIVATE ${BCORE_GEN_${arch}_LIBS})
+            string(TOUPPER ${arch} upper)
+            target_compile_definitions(bcore-stencilgen PRIVATE BCORE_STENCILGEN_${upper}=1)
+        endif()
+    endforeach()
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(bcore-stencilgen PRIVATE -Wall -Wextra -Wno-unused-parameter)
     endif()
