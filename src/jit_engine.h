@@ -111,6 +111,10 @@ private:
     std::function<bool(uint32_t)> chain_filter_;
     void publishChain(uint32_t pc, BbFunc fn);
     bool defineEnter();
+    // For each of the n helpers names[i] (helper_abi.h): what generated
+    // code calls for it, in the helpers' convention, which calls targets[i],
+    // a C function of the helper's signature, in out[i].
+    bool makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out);
     EnterFunc enter_ = nullptr;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
 };

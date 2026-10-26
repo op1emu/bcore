@@ -1,16 +1,21 @@
 #include "jit_engine.h"
 #include "block_abi.h"
+#include "helper_abi.h"
 
 #include <cstddef>
 #include <cstdio>
+#include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/Mangling.h>
 #include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
@@ -76,30 +81,45 @@ bool JitEngine::init() {
     auto& jd = jit_->getMainJITDylib();
     llvm::orc::MangleAndInterner mangle(es, jit_->getDataLayout());
 
+    // Each helper as generated code calls it, in the helpers' convention
+    // (helper_abi.h).
+    const std::pair<const char*, void*> helpers[] = {
+        {"mem_read8", reinterpret_cast<void*>(&mem_read8)},
+        {"mem_read16", reinterpret_cast<void*>(&mem_read16)},
+        {"mem_read32", reinterpret_cast<void*>(&mem_read32)},
+        {"mem_write8", reinterpret_cast<void*>(&mem_write8)},
+        {"mem_write16", reinterpret_cast<void*>(&mem_write16)},
+        {"mem_write32", reinterpret_cast<void*>(&mem_write32)},
+        {"bfin_syscall", reinterpret_cast<void*>(&bfin_syscall)},
+        {"bfin_putchar", reinterpret_cast<void*>(&bfin_putchar)},
+        {"cec_data_alignment", reinterpret_cast<void*>(&cec_data_alignment)},
+        {"cec_exception", reinterpret_cast<void*>(&cec_exception)},
+        {"cec_raise", reinterpret_cast<void*>(&cec_raise)},
+        {"cec_return_rti", reinterpret_cast<void*>(&cec_return_rti)},
+        {"cec_return_rtx", reinterpret_cast<void*>(&cec_return_rtx)},
+        {"cec_return_rtn", reinterpret_cast<void*>(&cec_return_rtn)},
+        {"cec_return_rte", reinterpret_cast<void*>(&cec_return_rte)},
+        {"cec_cli", reinterpret_cast<void*>(&cec_cli)},
+        {"cec_sti", reinterpret_cast<void*>(&cec_sti)},
+        {"cec_push_reti", reinterpret_cast<void*>(&cec_push_reti)},
+        {"cec_pop_reti", reinterpret_cast<void*>(&cec_pop_reti)},
+        {"cec_check_sup", reinterpret_cast<void*>(&cec_check_sup)},
+        {"cec_is_user_mode", reinterpret_cast<void*>(&cec_is_user_mode)},
+        {"cec_check_pending", reinterpret_cast<void*>(&cec_check_pending)},
+        {"bfin_hwloop_step", reinterpret_cast<void*>(&bfin_hwloop_step)},
+    };
+    static_assert(sizeof(helpers) / sizeof(helpers[0]) == sizeof(bcore_abi::kHelpers) / sizeof(bcore_abi::kHelpers[0]),
+                  "a function for every helper");
+    std::vector<const char*> names;
+    std::vector<void*> targets;
+    for (const auto& [name, fn] : helpers) {
+        names.push_back(name);
+        targets.push_back(fn);
+    }
+    std::vector<void*> trampolines(names.size());
+    if (!makeTrampolines(names.size(), names.data(), targets.data(), trampolines.data())) return false;
     llvm::orc::SymbolMap symbols;
-    symbols[mangle("mem_read8")]           = sym_from_ptr(reinterpret_cast<void*>(&mem_read8));
-    symbols[mangle("mem_read16")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read16));
-    symbols[mangle("mem_read32")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_read32));
-    symbols[mangle("mem_write8")]          = sym_from_ptr(reinterpret_cast<void*>(&mem_write8));
-    symbols[mangle("mem_write16")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write16));
-    symbols[mangle("mem_write32")]         = sym_from_ptr(reinterpret_cast<void*>(&mem_write32));
-    symbols[mangle("bfin_syscall")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_syscall));
-    symbols[mangle("bfin_putchar")]        = sym_from_ptr(reinterpret_cast<void*>(&bfin_putchar));
-    symbols[mangle("cec_data_alignment")]  = sym_from_ptr(reinterpret_cast<void*>(&cec_data_alignment));
-    symbols[mangle("cec_exception")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_exception));
-    symbols[mangle("cec_raise")]           = sym_from_ptr(reinterpret_cast<void*>(&cec_raise));
-    symbols[mangle("cec_return_rti")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rti));
-    symbols[mangle("cec_return_rtx")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rtx));
-    symbols[mangle("cec_return_rtn")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rtn));
-    symbols[mangle("cec_return_rte")]      = sym_from_ptr(reinterpret_cast<void*>(&cec_return_rte));
-    symbols[mangle("cec_cli")]             = sym_from_ptr(reinterpret_cast<void*>(&cec_cli));
-    symbols[mangle("cec_sti")]             = sym_from_ptr(reinterpret_cast<void*>(&cec_sti));
-    symbols[mangle("cec_push_reti")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_push_reti));
-    symbols[mangle("cec_pop_reti")]        = sym_from_ptr(reinterpret_cast<void*>(&cec_pop_reti));
-    symbols[mangle("cec_check_sup")]       = sym_from_ptr(reinterpret_cast<void*>(&cec_check_sup));
-    symbols[mangle("cec_is_user_mode")]    = sym_from_ptr(reinterpret_cast<void*>(&cec_is_user_mode));
-    symbols[mangle("cec_check_pending")]   = sym_from_ptr(reinterpret_cast<void*>(&cec_check_pending));
-    symbols[mangle("bfin_hwloop_step")]    = sym_from_ptr(reinterpret_cast<void*>(&bfin_hwloop_step));
+    for (size_t i = 0; i < names.size(); ++i) symbols[mangle(names[i])] = sym_from_ptr(trampolines[i]);
     // Not called by the lifter. With an IR pipeline, LoopIdiomRecognize can turn
     // a guest fill/copy loop into llvm.memset/memcpy/memmove, and the backend
     // lowers a non-constant length to the libc call; resolve it here like every
@@ -114,6 +134,57 @@ bool JitEngine::init() {
     }
 
     return defineEnter();
+}
+
+// One module of functions bcore_trampoline.<name> in the helpers'
+// convention (helper_abi.h): R name(args) { return target(args); }, the
+// target a C function at a constant address, called through a register (so
+// that no code model or reach matters). Not nounwind: a host's exception
+// unwinds through a trampoline as through the block that called it. Where
+// the helpers' convention is C's (x86-64), the targets themselves.
+bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out) {
+    if (bcore_abi::kHelperCC == llvm::CallingConv::C) {
+        std::copy(targets, targets + n, out);
+        return true;
+    }
+    auto ctx = std::make_unique<llvm::LLVMContext>();
+    const std::string prefix = "bcore_trampoline.";
+    auto mod = std::make_unique<llvm::Module>(prefix, *ctx);
+    mod->setDataLayout(jit_->getDataLayout());
+    mod->setTargetTriple(jit_->getTargetTriple().str());
+    for (size_t i = 0; i < n; ++i) {
+        const bcore_abi::Helper* h = bcore_abi::find_helper(names[i]);
+        if (!h) {
+            llvm::errs() << "No trampoline for " << names[i] << ": not a helper\n";
+            return false;
+        }
+        auto* ft = bcore_abi::helper_type(*ctx, *h);
+        auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage, prefix + names[i], mod.get());
+        fn->setCallingConv(bcore_abi::kHelperCC);
+        fn->setUWTableKind(llvm::UWTableKind::Async);
+        llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
+        std::vector<llvm::Value*> args;
+        for (auto& arg : fn->args()) args.push_back(&arg);
+        auto* target = llvm::ConstantExpr::getIntToPtr(
+            b.getInt64(reinterpret_cast<uintptr_t>(targets[i])), llvm::PointerType::getUnqual(*ctx));
+        auto* call = b.CreateCall(ft, target, args);
+        call->setTailCallKind(llvm::CallInst::TCK_NoTail);
+        if (ft->getReturnType()->isVoidTy()) b.CreateRetVoid();
+        else b.CreateRet(call);
+    }
+    if (auto err = jit_->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx)))) {
+        llvm::errs() << "Failed to add the trampolines: " << err << "\n";
+        return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        auto sym = jit_->lookup(prefix + names[i]);
+        if (!sym) {
+            llvm::errs() << "Failed to lookup the trampoline of " << names[i] << ": " << sym.takeError() << "\n";
+            return false;
+        }
+        out[i] = reinterpret_cast<void*>(sym->getValue());
+    }
+    return true;
 }
 
 // void bcore_enter(fn, cpu, mem) { fn(cpu, mem); } with fn in the blocks'
