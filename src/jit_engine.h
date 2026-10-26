@@ -18,13 +18,12 @@
 namespace llvm { class JITEventListener; }
 
 // A JIT'd block: void bb_0x<pc>(CpuState*, Memory*) in the blocks' calling
-// convention (block_abi.h), which saves no register for its caller, so a
-// block that runs the next one itself (a musttail call, see
-// CpuState::chain_table) restores nothing first. C++ cannot call one
-// directly: JitEngine::enter() does.
+// convention (block_abi.h), in which a block that runs the next one itself
+// (a musttail call, see CpuState::chain_table) is always a tail call. C++
+// cannot call one directly: JitEngine::enter() does.
 using BbFunc = void (*)(CpuState*, Memory*);
-// The C-ABI function enter() calls: it calls the block, saving the
-// registers the C calling convention keeps for its caller once per entry.
+// The C-ABI function enter() calls: it calls the block, with its arguments
+// in the registers the blocks' convention takes them in.
 using EnterFunc = void (*)(BbFunc, CpuState*, Memory*);
 
 struct BBInfo {

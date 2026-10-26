@@ -10,7 +10,7 @@ source_filename = "bb_module"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
 
-define ghccc void @bb_0x00000104(ptr %cpu, ptr %mem) #0 {
+define swifttailcc void @bb_0x00000104(ptr swiftself %cpu, ptr swiftasync %mem) #0 {
 entry:
   %0 = getelementptr i8, ptr %cpu, i64 336
   %chain_table = load ptr, ptr %0, align 8
@@ -474,7 +474,7 @@ declare ptr @bcore.guest.ptr(ptr, i32) #2
 ; Function Attrs: argmemonly nocallback nofree nounwind willreturn
 declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #3
 
-attributes #0 = { "bcore-loop-block" }
+attributes #0 = { "bcore-loop-block" "no_callee_saved_registers" }
 attributes #1 = { nocallback nofree nosync nounwind readnone speculatable willreturn }
 attributes #2 = { nounwind readnone willreturn }
 attributes #3 = { argmemonly nocallback nofree nounwind willreturn }
