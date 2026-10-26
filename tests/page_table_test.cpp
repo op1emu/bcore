@@ -176,11 +176,19 @@ int main() {
         test_reset_between_runs(opt);
     }
     int count = 0;
-    for (int opt : {0, 2}) for (bool table : {false, true}) for (uint32_t page : {0u, 0x1000u})
+    // Each block at tier 0 made of stencils too (with the table, which the
+    // stencils need): their helper calls extend a narrow value as LLVM's do.
+    for (int opt : {0, 2}) for (bool table : {false, true}) for (bool stencils : {false, true})
+    for (uint32_t page : {0u, 0x1000u})
     for (const Case& c : kCases) {
+        if (stencils && !table) continue;
         TwoPages mem(table);
         CpuState cpu{};
         Core core(&cpu, &mem);
+        if (stencils) {
+            core.set_tiering(0x7fffffff);
+            core.set_copy_patch(true);
+        }
         require(core.init(opt), "init");
         cec_init(); evt_init();
         mem.write16(0x100, c.op); mem.write16(0x102, 0x2000);  // op; JUMP.S 0
@@ -194,7 +202,8 @@ int main() {
         const bool inline_access = table && page == 0;
         if (inline_access) require(cpu.page_table == mem.pages.data(), "CpuState::page_table set");
         if (mem.data_calls != (inline_access ? 0 : 1)) {
-            fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d: %d calls\n", c.name, addr, table, opt, mem.data_calls);
+            fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d%s: %d calls\n", c.name, addr, table, opt,
+                    stencils ? " stencils" : "", mem.data_calls);
             return 1;
         }
         require(cpu.dpregs[8] == addr + c.width, "post-increment");
@@ -204,8 +213,8 @@ int main() {
             const uint32_t mask = c.width == 4 ? ~0u : (1u << (8 * c.width)) - 1;
             require(stored == ((0x8382f1f0 & ~mask) | (0x11223344 & mask)), "store");
             if (!inline_access && mem.written != (0x11223344 & mask)) {
-                fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d: the callback got 0x%08x\n", c.name, addr, table, opt,
-                        mem.written);
+                fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d%s: the callback got 0x%08x\n", c.name, addr, table,
+                        opt, stencils ? " stencils" : "", mem.written);
                 return 1;
             }
         } else {
@@ -214,8 +223,11 @@ int main() {
             require(cpu.dpregs[0] == want, "loaded value");
             require(stored == 0x8382f1f0, "load leaves memory alone");
         }
+#if BCORE_ENABLE_PROFILE && BCORE_COPY_PATCH_TEST
+        if (stencils) require(core.stats().copy_patch_blocks == 1, "the block not made of stencils");
+#endif
         ++count;
     }
-    printf("PASS: %d page-table cases (mapped/unmapped page, table on/off, O0/O2), "
+    printf("PASS: %d page-table cases (mapped/unmapped page, table on/off, stencils, O0/O2), "
            "interrupt at a loop bottom, callback register write, reset between runs\n", count);
 }

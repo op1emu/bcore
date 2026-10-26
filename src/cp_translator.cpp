@@ -1,11 +1,16 @@
 #include "cp_translator.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <string>
 
+#include <llvm/Support/Memory.h>
+
 #include "cec.h"
 #include "code_arena.h"
+#include "cp_patch.h"
+#include "helper_abi.h"
 #include "host_bridge.h"
 #include "syscall_emu.h"
 #include "tier_table.h"
@@ -67,41 +72,46 @@ uint32_t gather(uint32_t v, uint32_t mask) {
     return out;
 }
 
-// A 64-bit value hole (the others are 32-bit values, of which a 32-bit
-// field holds the low half, whichever way it extends them).
-bool wide(uint8_t hole) { return hole == kHoleCountOffset; }
+// A jump to a helper: an absolute jump, 16 bytes. The other host
+// specifics: the jump a stencil's hot part may end in (kTailCont,
+// kTailExit), and how far a stencil's call or jump reaches (an arena's
+// helper jumps and exits lie within that of every block that uses them).
+constexpr size_t kTrampoline = 16;
+#if defined(__aarch64__)
+constexpr size_t kTailJump = 4;  // B
+constexpr size_t kReach = size_t(120) << 20;  // B/BL's 128 MiB, less a block's largest
+#else
+constexpr size_t kTailJump = 5;  // jmp rel32
+constexpr size_t kReach = SIZE_MAX;  // rel32's 2 GiB: the whole arena
+#endif
 
-bool patch(uint8_t* at, const Reloc& r, uint64_t value) {
-    uint8_t* place = at + r.offset;
-    switch (r.kind) {
-    case kAbs32:
-    case kAbs32S: {
-        const int64_t v = int64_t(value) + r.addend;
-        if (wide(r.hole) && (r.kind == kAbs32 ? (v < 0 || v > int64_t(UINT32_MAX)) : (v < INT32_MIN || v > INT32_MAX)))
-            return false;
-        const uint32_t field = uint32_t(v);
-        memcpy(place, &field, 4);
-        return true;
-    }
-    case kPcRel32: {
-        const int64_t v = int64_t(value) + r.addend - int64_t(reinterpret_cast<uintptr_t>(place));
-        if (v < INT32_MIN || v > INT32_MAX) return false;
-        const int32_t field = int32_t(v);
-        memcpy(place, &field, 4);
-        return true;
-    }
-    case kAbs64: {
-        const uint64_t field = value + uint64_t(int64_t(r.addend));
-        memcpy(place, &field, 8);
-        return true;
-    }
-    }
-    return false;
+void write_trampoline(uint8_t* at, const void* target) {
+#if defined(__aarch64__)
+    store32(at, 0x58000050);      // ldr x16, #8
+    store32(at + 4, 0xd61f0200);  // br x16
+    memcpy(at + 8, &target, 8);
+#else
+    const uint8_t jmp[6] = {0xff, 0x25, 0, 0, 0, 0};  // jmp *0(%rip)
+    memcpy(at, jmp, sizeof jmp);
+    memcpy(at + 6, &target, 8);
+    memset(at + 14, 0xcc, kTrampoline - 14);
+#endif
 }
 
-constexpr size_t kTrampoline = 16;  // jmp *0(%rip); .quad target; padding
+// Code nothing points at: what it would run traps (int3, BRK #0).
+void fill_trap(uint8_t* at, size_t size) {
+#if defined(__aarch64__)
+    for (size_t i = 0; i + 4 <= size; i += 4) store32(at + i, 0xd4200000);
+#else
+    memset(at, 0xcc, size);
+#endif
+}
 
 }  // namespace
+
+CpTranslator::CpTranslator(JitEngine& jit) : jit_(jit), reach_(kReach) {}
+
+void CpTranslator::set_reach(size_t bytes) { reach_ = bytes ? std::min(bytes, kReach) : kReach; }
 
 CpTranslator::Piece CpTranslator::piece(const Stencil& s, uint32_t pc, uint32_t insn, int selected) {
     return {&s, kCode + s.code, kRelocs + s.relocs, pc, insn, selected, 0, 0, kCode + s.cold, kRelocs + s.cold_relocs, 0};
@@ -215,38 +225,82 @@ bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, co
     return true;
 }
 
+// Where a stencil's call of each helper goes: the helper (wrapped,
+// kHelperFns) where the helpers' convention is C's, else a trampoline in
+// it to the C function (JitEngine::makeTrampolines); memset, memcpy and
+// memmove are called in C's.
+bool CpTranslator::helper_targets() {
+    if (helpers_ == Helpers::kReady) return true;
+    if (helpers_ == Helpers::kFailed) return false;
+    helpers_ = Helpers::kFailed;  // once: a failed module's names stay defined
+    std::vector<const char*> names;
+    std::vector<void*> targets;
+    std::vector<unsigned> which;
+    for (unsigned i = 0; i < kHelperCount; ++i) {
+        helper_targets_[i] = kHelperFns[i];
+        if (bcore_abi::kHelperCC == llvm::CallingConv::C || !bcore_abi::find_helper(kHelpers[i])) continue;
+        names.push_back(kHelpers[i]);
+        targets.push_back(kHelperFns[i]);
+        which.push_back(i);
+    }
+    std::vector<void*> out(names.size());
+    if (!names.empty() &&
+        !jit_.makeTrampolines(names.size(), names.data(), targets.data(), out.data(), "bcore_cp_trampoline."))
+        return false;
+    for (size_t k = 0; k < which.size(); ++k) helper_targets_[which[k]] = out[k];
+    helpers_ = Helpers::kReady;
+    return true;
+}
+
+size_t CpTranslator::support_size() {
+    size_t size = kHelperCount * kTrampoline;
+    for (uint32_t e : kExits) size += kStencils[e].size + 16;
+    return size;
+}
+
 CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
-    size_t support = kHelperCount * kTrampoline;
-    for (uint32_t e : kExits) support += kStencils[e].size + 16;
-    auto arena = jit_.codeArena(size + support);
+    // Room for the block and for a set of jumps and exits beside it.
+    auto arena = jit_.codeArena(size + support_size());
     if (!arena) return nullptr;
     for (auto& a : arenas_)
         if (a->arena == arena) return a.get();
     auto a = std::make_unique<Arena>();
     a->arena = arena;
-    for (unsigned i = 0; i < kHelperCount; ++i) {
-        uint8_t* at = arena->allocate(CodeArena::Region::Hot, kTrampoline, kTrampoline);
-        if (!at) return nullptr;
-        const uint8_t jmp[6] = {0xff, 0x25, 0, 0, 0, 0};  // jmp *0(%rip)
-        memcpy(at, jmp, sizeof jmp);
-        memcpy(at + 6, &kHelperFns[i], 8);
-        memset(at + 14, 0xcc, kTrampoline - 14);
-        a->helpers[i] = at;
-        if (listener_) listener_(("bcore_cp_jump_" + std::string(kHelpers[i])).c_str(), at, kTrampoline);
-    }
-    for (int e = 0; e < 5; ++e) {
-        const Stencil& s = kStencils[kExits[e]];
-        uint8_t* at = arena->allocate(CodeArena::Region::Hot, s.size, 16);
-        if (!at || s.reloc_count || s.cold_size) return nullptr;  // the exits' code fills in nothing, in one piece
-        memcpy(at, kCode + s.code, s.size);
-        a->exits[e] = at;
-        if (listener_) listener_("bcore_cp_exit", at, s.size);
-    }
     arenas_.push_back(std::move(a));
     return arenas_.back().get();
 }
 
-bool CpTranslator::place(Arena& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next,
+// The arena's helper jumps and exits within reach of code placed next in
+// its hot region: its last set, or a new set there.
+const CpTranslator::Support* CpTranslator::support_for(Arena& a) {
+    uint8_t* next = a.arena->allocate(CodeArena::Region::Hot, 0, 16);
+    if (!next) return nullptr;
+    if (!a.sets.empty() && size_t(next - a.sets.back().start) < reach_) return &a.sets.back();
+    Support set;
+    for (unsigned i = 0; i < kHelperCount; ++i) {
+        uint8_t* at = a.arena->allocate(CodeArena::Region::Hot, kTrampoline, kTrampoline);
+        if (!at) return nullptr;
+        if (i == 0) set.start = at;
+        write_trampoline(at, helper_targets_[i]);
+        set.helpers[i] = at;
+        if (listener_) listener_(("bcore_cp_jump_" + std::string(kHelpers[i])).c_str(), at, kTrampoline);
+    }
+    for (int e = 0; e < 5; ++e) {
+        const Stencil& s = kStencils[kExits[e]];
+        uint8_t* at = a.arena->allocate(CodeArena::Region::Hot, s.size, 16);
+        if (!at || s.reloc_count || s.cold_size) return nullptr;  // the exits' code fills in nothing, in one piece
+        memcpy(at, kCode + s.code, s.size);
+        set.exits[e] = at;
+        if (listener_) listener_("bcore_cp_exit", at, s.size);
+    }
+    uint8_t* end = a.arena->allocate(CodeArena::Region::Hot, 0, 1);
+    llvm::sys::Memory::InvalidateInstructionCache(set.start, size_t(end - set.start));
+    a.sets.push_back(set);
+    ++support_sets_;
+    return &a.sets.back();
+}
+
+bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next,
                          uint32_t packet, uint64_t field0, uint32_t counter, const Config& config) {
     const Stencil& s = *piece.stencil;
     uint8_t* hot_at = code + piece.at;
@@ -279,7 +333,7 @@ bool CpTranslator::place(Arena& arena, uint8_t* code, uint8_t* cold, const Piece
             } else {
                 return false;
             }
-            if (!patch(at, r, value)) return false;
+            if (!patch_reloc(at, r, value)) return false;
         }
         return true;
     };
@@ -361,11 +415,26 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         const bool to_exit = exit_piece_ >= 0 && int(i) + 1 == exit_piece_;
         const bool drop = to_exit ? (p.stencil->flags & kTailExit) != 0
                                   : (p.stencil->flags & kTailCont) && i + 1 < pieces_.size();
-        p.size = p.stencil->size - (drop ? 5 : 0);
+        p.size = p.stencil->size - (drop ? kTailJump : 0);
         total += p.size;
     }
+    // The helpers' trampolines first: their code takes room in the arena
+    // (once per translator).
+    if (!helper_targets()) {
+        out.why = "no helper trampolines";
+        return out;
+    }
+    // A set of helper jumps and exits reaches the block's hot code only: on
+    // AArch64, where the cold region lies beyond B/BL's reach of it, no
+    // stencil has cold code (Compiler::init splits nothing there).
+    if (cold_total && kReach != SIZE_MAX) {
+        out.why = "cold code out of reach";
+        return out;
+    }
+    JitWriteScope write;  // what follows writes code only
     Arena* arena = arena_for(total + cold_total + 16);
-    uint8_t* at = arena ? arena->arena->allocate(CodeArena::Region::Hot, total, 16) : nullptr;
+    const Support* support = arena ? support_for(*arena) : nullptr;
+    uint8_t* at = support ? arena->arena->allocate(CodeArena::Region::Hot, total, 16) : nullptr;
     uint8_t* cold = at && cold_total ? arena->arena->allocate(CodeArena::Region::Cold, cold_total, 16) : nullptr;
     if (!at || (cold_total && !cold)) {
         out.why = "no room";
@@ -374,14 +443,16 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     const uint64_t last_len = last_len_;
     for (size_t i = 0; i < pieces_.size(); ++i) {
         const Piece* next = i + 1 < pieces_.size() ? &pieces_[i + 1] : nullptr;
-        if (!place(*arena, at, cold, pieces_[i], next, pieces_[i].packet, last_len, counter, config)) {
-            // Filled with int3: the code is never run (nothing points at it).
-            memset(at, 0xcc, total);
-            if (cold) memset(cold, 0xcc, cold_total);
+        if (!place(*support, at, cold, pieces_[i], next, pieces_[i].packet, last_len, counter, config)) {
+            // The code is never run (nothing points at it).
+            fill_trap(at, total);
+            if (cold) fill_trap(cold, cold_total);
             out.why = "relocation";
             return out;
         }
     }
+    llvm::sys::Memory::InvalidateInstructionCache(at, total);
+    if (cold) llvm::sys::Memory::InvalidateInstructionCache(cold, cold_total);
     out.fn = reinterpret_cast<BbFunc>(at);
     out.size = total;
     out.cold = cold;

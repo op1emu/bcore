@@ -307,6 +307,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     add_test(NAME bcore-data-alignment-test COMMAND bcore-data-alignment-test)
     add_executable(bcore-page-table-test tests/page_table_test.cpp)
     target_link_libraries(bcore-page-table-test PRIVATE bfin-core)
+    target_compile_definitions(bcore-page-table-test PRIVATE BCORE_COPY_PATCH_TEST=$<BOOL:${BCORE_COPY_PATCH}>)
     add_test(NAME bcore-page-table-test COMMAND bcore-page-table-test)
     add_executable(bcore-chain-test tests/chain_test.cpp)
     target_link_libraries(bcore-chain-test PRIVATE bfin-core)
@@ -354,6 +355,17 @@ if(BCORE_BUILD_FAULT_TESTS)
         add_test(NAME bcore-vectorize-count-test-pipeline
                  COMMAND bcore-vectorize-count-test pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
     endif()
+    # AArch64 stencils compiled (not run) on any host whose LLVM has the
+    # target: their relocations, their holes' widths, how they are filled in.
+    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
+        add_executable(bcore-cp-a64-test tests/cp_a64_test.cpp)
+        target_link_libraries(bcore-cp-a64-test PRIVATE bcore-lift)
+        target_include_directories(bcore-cp-a64-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
+        llvm_map_components_to_libnames(LLVM_A64_TEST_LIBS
+            aarch64codegen aarch64asmparser aarch64desc aarch64info)
+        target_link_libraries(bcore-cp-a64-test PRIVATE ${LLVM_A64_TEST_LIBS})
+        add_test(NAME bcore-cp-a64-test COMMAND bcore-cp-a64-test)
+    endif()
     if(BCORE_COPY_PATCH)
         add_executable(bcore-cp-stencil-test tests/cp_stencil_test.cpp)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
@@ -370,6 +382,9 @@ if(BCORE_BUILD_FAULT_TESTS)
         # compiled with LLVM, the rest still stencils.
         add_test(NAME bcore-cp-stencil-test-clobber COMMAND bcore-cp-stencil-test 32 clobber 20000)
         set_tests_properties(bcore-cp-stencil-test-clobber PROPERTIES COST 200 LABELS slow)
+        # Every 24th at a high PC (L1 instruction SRAM, op1emu's).
+        add_test(NAME bcore-cp-stencil-test-high COMMAND bcore-cp-stencil-test 24 5 high)
+        set_tests_properties(bcore-cp-stencil-test-high PROPERTIES COST 100 LABELS slow)
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
     # A test that takes a minute or more is also labelled slow; CI runs every

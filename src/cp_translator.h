@@ -33,7 +33,10 @@
 // host's code are called through wrappers that catch whatever the host
 // throws (host_bridge.h).
 //
-// x86-64 only (BCORE_COPY_PATCH); single-threaded, like JitEngine.
+// On x86-64 and AArch64 (BCORE_COPY_PATCH); single-threaded, like
+// JitEngine. On Apple silicon it writes code in a JitWriteScope; on AArch64
+// it invalidates the instruction cache over what it placed before the block
+// is published.
 
 #include <cstdint>
 #include <exception>
@@ -79,7 +82,7 @@ public:
         const char* why = nullptr; // why there is none
     };
 
-    explicit CpTranslator(JitEngine& jit) : jit_(jit) {}
+    explicit CpTranslator(JitEngine& jit);
 
     // The block at pc, its instructions read through code, its starts
     // counted in TierTable::count[counter]. words() then holds every
@@ -97,6 +100,11 @@ public:
     void set_code_listener(std::function<void(const char*, const void*, size_t)> listener) {
         listener_ = std::move(listener);
     }
+    // The sets of helper jumps and exits placed so far (Support).
+    unsigned support_sets() const { return support_sets_; }
+    // How far from a block they may lie (Core::set_copy_patch_reach); 0 for
+    // the host's reach.
+    void set_reach(size_t bytes);
 
 private:
     struct Piece {
@@ -113,12 +121,18 @@ private:
         size_t cold_at = 0;  // offset in the block's cold code
         uint32_t packet = 0; // the packet's index in the block, from 1 (a parallel packet's pieces share it)
     };
-    // An arena's helper jumps and exit stencils, placed when the arena is
-    // first used.
-    struct Arena {
-        std::shared_ptr<CodeArena> arena;
+    // A set of helper jumps and exit stencils in an arena's hot region,
+    // placed where the first block that has none within reach (kReach in
+    // cp_translator.cpp: all of it on x86-64; B/BL's 128 MiB on AArch64)
+    // goes.
+    struct Support {
+        uint8_t* start = nullptr;
         uint8_t* helpers[bcore_cp::kHelperCount] = {};
         uint8_t* exits[5] = {};
+    };
+    struct Arena {
+        std::shared_ptr<CodeArena> arena;
+        std::vector<Support> sets;
     };
     bool scan(uint32_t pc, Memory& code, const Config& config, Block& out);
     // A parallel packet at pc whose slot 0 (insn) has a body stencil, as
@@ -130,7 +144,10 @@ private:
     bool compose_parallel(uint32_t pc, uint32_t insn, int selected, const bcore_cp::Stencil& body, Memory& code,
                           const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why);
     Arena* arena_for(size_t size);
-    bool place(Arena& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next, uint32_t packet,
+    const Support* support_for(Arena& arena);
+    static size_t support_size();
+    bool helper_targets();
+    bool place(const Support& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next, uint32_t packet,
                uint64_t field0, uint32_t counter, const Config& config);
     // A value hole's value in a piece (packet: its index in the block;
     // field0: the length of the packet the fall-through stencil follows).
@@ -146,6 +163,10 @@ private:
     JitEngine& jit_;
     std::function<void(const char*, const void*, size_t)> listener_;
     std::vector<std::unique_ptr<Arena>> arenas_;
+    void* helper_targets_[bcore_cp::kHelperCount] = {};
+    enum class Helpers { kUnmade, kReady, kFailed } helpers_ = Helpers::kUnmade;  // helper_targets
+    unsigned support_sets_ = 0;
+    size_t reach_;  // set_reach
     std::vector<Piece> pieces_;
     bcore_tier::CodeLog words_;
 };

@@ -97,9 +97,16 @@ public:
     // and no step limit, but one with a packet the build has no stencil for
     // (an illegal parallel packet; a parallel one where the Memory's
     // callbacks may change registers), which it compiles with LLVM as
-    // before. Exact either way. Off by default; on x86-64 only (elsewhere
-    // this does nothing).
+    // before. Exact either way. Off by default; on x86-64 and AArch64 only
+    // (elsewhere this does nothing).
     void set_copy_patch(bool enable);
+    // For tests: how far from a block (bytes) its arena's helper jumps and
+    // exits may lie, 0 for as far as the host's calls reach (all of an arena
+    // on x86-64; under 128 MiB on AArch64). A short distance makes a set for
+    // every few blocks, as a full arena on AArch64 does; the number made so
+    // far, for this engine (copy_patch_support_sets).
+    void set_copy_patch_reach(size_t bytes);
+    unsigned copy_patch_support_sets() const;
     // Promotions compiled on a thread of their own (off by default: on the
     // dispatching thread, after the run that asked). The dispatching thread
     // still lifts each one (reading the guest's code may call the host) and
@@ -216,6 +223,7 @@ private:
     uint32_t tier_size_ref_ = 0;
     bool light_tier1_ = false;
     bool copy_patch_ = false;
+    size_t copy_patch_reach_ = 0;  // set_copy_patch_reach
     std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
     bool unlimited_ = true;             // no step limit at init
     std::unique_ptr<Compiler> tier0_compiler_;

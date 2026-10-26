@@ -646,12 +646,28 @@ void Core::set_copy_patch(bool enable) {
     // keeps it, and the blocks already made of them run on.
     if (enable && jit_ && !cp_) {
         cp_ = std::make_unique<CpTranslator>(*jit_);
+        if (copy_patch_reach_) cp_->set_reach(copy_patch_reach_);
 #if BCORE_ENABLE_PROFILE
         cp_->set_code_listener([this](const char* name, const void* code, size_t size) {
             profile_->recordCodeLoad(name, code, size);
         });
 #endif
     }
+#endif
+}
+
+void Core::set_copy_patch_reach(size_t bytes) {
+    copy_patch_reach_ = bytes;
+#if BCORE_COPY_PATCH
+    if (cp_) cp_->set_reach(bytes);
+#endif
+}
+
+unsigned Core::copy_patch_support_sets() const {
+#if BCORE_COPY_PATCH
+    return cp_ ? cp_->support_sets() : 0;
+#else
+    return 0;
 #endif
 }
 
