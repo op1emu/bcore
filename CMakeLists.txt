@@ -50,6 +50,7 @@ add_library(bcore-lift STATIC
     src/lift_visitor.cpp
     src/code_arena.cpp
     src/jit_engine.cpp
+    src/host_bridge.cpp
     src/compiler.cpp
     src/compile_worker.cpp
     src/bb_translator.cpp

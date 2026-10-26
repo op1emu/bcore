@@ -77,8 +77,12 @@ static void require_packed(const Core& core, int opt) {
     require(pages.size() < by_pc.size() / 4, "blocks share pages");
     require(hi - lo < (uintptr_t(1) << 20), "blocks lie together");
     // A jump's rarely taken loop-bottom path is cold in every one of them;
-    // the backend splits from CodeGenOpt::Less up.
+    // the backend splits from CodeGenOpt::Less up, on x86-64 (Compiler::init).
+#if defined(__x86_64__)
     if (opt > 0 && core.profileHasBlockSizes()) require(cold.size() == size_t(kBlocks), "the splitter made cold parts");
+#else
+    require(cold.empty(), "no cold parts but on x86-64");
+#endif
     for (uintptr_t c : cold) require(c - lo >= (uintptr_t(256) << 20), "cold parts lie apart");
 }
 
@@ -162,10 +166,14 @@ static void jit_exhaust() {
         llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
         for (int k = 0; k < 300; ++k) b.CreateStore(b.getInt32(k), fn->getArg(0), /*isVolatile=*/true);
         b.CreateRet(b.getInt32(i));
-        require(!(*jit)->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx))), "add module");
-        auto sym = (*jit)->lookup(name);
-        require(bool(sym), "lookup");
-        auto* f = reinterpret_cast<int32_t (*)(volatile int32_t*)>(sym->getValue());
+        int32_t (*f)(volatile int32_t*) = nullptr;
+        {
+            JitWriteScope write;  // the lookup links it; nothing runs within
+            require(!(*jit)->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx))), "add module");
+            auto sym = (*jit)->lookup(name);
+            require(bool(sym), "lookup");
+            f = reinterpret_cast<int32_t (*)(volatile int32_t*)>(sym->getValue());
+        }
         require(f(&sink) == i && sink == 299, "a function placed anywhere runs");
     }
     require(pool->arenas() == 2, "two arenas, then managers of their own");
@@ -193,12 +201,18 @@ static void placed_code_lives() {
     second.reset();
     third.reset();
     const size_t page = size_t(sysconf(_SC_PAGESIZE));
+#if defined(__APPLE__)
+    char resident;  // macOS's mincore takes char, Linux's unsigned char
+#else
     unsigned char resident;
+#endif
     void* at = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(code) & ~(page - 1));
     require(mincore(at, page, &resident) == 0, "the second arena's code is still mapped");
 }
 
 int main() {
+    // Everything below needs one: without it every object gets pages of its own.
+    require(CodeArena::create() != nullptr, "an arena maps");
     for (int opt = 0; opt <= 2; ++opt) test(opt);
     placed_code_lives();
     exhaust("hot code fills an arena", 20 << 10, 0, 1 << 10);

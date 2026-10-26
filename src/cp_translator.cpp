@@ -6,6 +6,7 @@
 
 #include "cec.h"
 #include "code_arena.h"
+#include "host_bridge.h"
 #include "syscall_emu.h"
 #include "tier_table.h"
 
@@ -13,58 +14,16 @@ using namespace bcore_cp;
 
 namespace {
 
-// ---- The exception bridge (cp_translator.h) ----
-
-thread_local CpuState* t_cpu = nullptr;
-thread_local std::exception_ptr t_caught;
-
-// In a catch block: keep the exception and stop the run.
-void caught() noexcept {
-    if (!t_caught) t_caught = std::current_exception();
-    if (t_cpu) {
-        t_cpu->did_jump = true;
-        t_cpu->chain_budget = 0;
-    }
-}
-
-uint8_t cp_mem_read8(Memory* mem, uint32_t addr) noexcept {
-    try { return mem_read8(mem, addr); } catch (...) { caught(); return 0; }
-}
-uint16_t cp_mem_read16(Memory* mem, uint32_t addr) noexcept {
-    try { return mem_read16(mem, addr); } catch (...) { caught(); return 0; }
-}
-uint32_t cp_mem_read32(Memory* mem, uint32_t addr) noexcept {
-    try { return mem_read32(mem, addr); } catch (...) { caught(); return 0; }
-}
-void cp_mem_write8(Memory* mem, uint32_t addr, uint8_t value) noexcept {
-    try { mem_write8(mem, addr, value); } catch (...) { caught(); }
-}
-void cp_mem_write16(Memory* mem, uint32_t addr, uint16_t value) noexcept {
-    try { mem_write16(mem, addr, value); } catch (...) { caught(); }
-}
-void cp_mem_write32(Memory* mem, uint32_t addr, uint32_t value) noexcept {
-    try { mem_write32(mem, addr, value); } catch (...) { caught(); }
-}
-void cp_cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc, uint32_t addr, uint32_t flags) noexcept {
-    try { cec_data_alignment(cpu, mem, pc, addr, flags); } catch (...) { caught(); }
-}
-void cp_cec_exception(CpuState* cpu, uint32_t excp, Memory* mem) noexcept {
-    try { cec_exception(cpu, excp, mem); } catch (...) { caught(); }
-}
-void cp_bfin_syscall(CpuState* cpu, Memory* mem) noexcept {
-    try { bfin_syscall(cpu, mem); } catch (...) { caught(); }
-}
-
 // What a stencil's helper call reaches, in the order of kHelpers.
 void* const kHelperFns[] = {
-    reinterpret_cast<void*>(&cp_mem_read8),
-    reinterpret_cast<void*>(&cp_mem_read16),
-    reinterpret_cast<void*>(&cp_mem_read32),
-    reinterpret_cast<void*>(&cp_mem_write8),
-    reinterpret_cast<void*>(&cp_mem_write16),
-    reinterpret_cast<void*>(&cp_mem_write32),
-    reinterpret_cast<void*>(&cp_cec_data_alignment),
-    reinterpret_cast<void*>(&cp_cec_exception),
+    reinterpret_cast<void*>(&bcore_bridge::mem_read8),
+    reinterpret_cast<void*>(&bcore_bridge::mem_read16),
+    reinterpret_cast<void*>(&bcore_bridge::mem_read32),
+    reinterpret_cast<void*>(&bcore_bridge::mem_write8),
+    reinterpret_cast<void*>(&bcore_bridge::mem_write16),
+    reinterpret_cast<void*>(&bcore_bridge::mem_write32),
+    reinterpret_cast<void*>(&bcore_bridge::cec_data_alignment),
+    reinterpret_cast<void*>(&bcore_bridge::cec_exception),
     reinterpret_cast<void*>(&cec_raise),
     reinterpret_cast<void*>(&cec_return_rti),
     reinterpret_cast<void*>(&cec_return_rtx),
@@ -79,7 +38,7 @@ void* const kHelperFns[] = {
     reinterpret_cast<void*>(&cec_check_pending),
     reinterpret_cast<void*>(&bfin_hwloop_step),
     reinterpret_cast<void*>(&bfin_putchar),
-    reinterpret_cast<void*>(&cp_bfin_syscall),
+    reinterpret_cast<void*>(&bcore_bridge::bfin_syscall),
     reinterpret_cast<void*>(&::memset),
     reinterpret_cast<void*>(&::memcpy),
     reinterpret_cast<void*>(&::memmove),
@@ -143,17 +102,6 @@ bool patch(uint8_t* at, const Reloc& r, uint64_t value) {
 constexpr size_t kTrampoline = 16;  // jmp *0(%rip); .quad target; padding
 
 }  // namespace
-
-CpTranslator::RunScope::RunScope(CpuState* cpu) : previous_(t_cpu) { t_cpu = cpu; }
-
-CpTranslator::RunScope::~RunScope() { t_cpu = previous_; }
-
-void CpTranslator::RunScope::rethrow() {
-    if (!t_caught) return;
-    std::exception_ptr e = t_caught;
-    t_caught = nullptr;
-    std::rethrow_exception(e);
-}
 
 CpTranslator::Piece CpTranslator::piece(const Stencil& s, uint32_t pc, uint32_t insn, int selected) {
     return {&s, kCode + s.code, kRelocs + s.relocs, pc, insn, selected, 0, 0, kCode + s.cold, kRelocs + s.cold_relocs, 0};

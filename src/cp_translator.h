@@ -30,10 +30,8 @@
 // every packet and needs no entry guard.
 //
 // Stencil code has no unwind information. The helpers that may reach the
-// host's code (memory callbacks, exceptions that read guest memory) are
-// called through wrappers that catch whatever the host throws: the wrapper
-// sets did_jump and a chain budget of 0, so that the block leaves at once,
-// and Core::run throws it again once the block has returned (RunScope).
+// host's code are called through wrappers that catch whatever the host
+// throws (host_bridge.h).
 //
 // x86-64 only (BCORE_COPY_PATCH); single-threaded, like JitEngine.
 
@@ -99,20 +97,6 @@ public:
     void set_code_listener(std::function<void(const char*, const void*, size_t)> listener) {
         listener_ = std::move(listener);
     }
-
-    // Set while a thread runs blocks: the CpuState a wrapper stops when it
-    // catches an exception. rethrow() throws what was caught, if anything.
-    class RunScope {
-    public:
-        explicit RunScope(CpuState* cpu);
-        ~RunScope();
-        RunScope(const RunScope&) = delete;
-        RunScope& operator=(const RunScope&) = delete;
-        void rethrow();
-
-    private:
-        CpuState* previous_;
-    };
 
 private:
     struct Piece {

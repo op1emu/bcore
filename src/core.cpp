@@ -18,6 +18,8 @@
 #include "profile_state.h"
 // Also without BCORE_COPY_PATCH: Core holds the (then unused) translator.
 #include "cp_translator.h"
+#include "helper_abi.h"
+#include "host_bridge.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
@@ -399,13 +401,12 @@ bool Core::run(uint32_t pc) {
     cpu_->pc = pc;
     cpu_->packets = 0;
     jit_->set_executing(pc);
-#if BCORE_COPY_PATCH
-    // A host exception a copy-and-patch block's helper caught, thrown here
-    // (cp_translator.h).
-    CpTranslator::RunScope scope(cpu_);
+#if BCORE_COPY_PATCH || BCORE_HELPERS_CATCH
+    // A host exception a helper caught, thrown here (host_bridge.h).
+    bcore_bridge::RunScope scope(cpu_);
 #endif
     jit_->enter(fn, cpu_, mem_);
-#if BCORE_COPY_PATCH
+#if BCORE_COPY_PATCH || BCORE_HELPERS_CATCH
     scope.rethrow();
 #endif
     jit_->clear_executing();
@@ -433,7 +434,7 @@ bool Core::run(uint32_t pc) {
             return false;
         jit_->set_executing(at);
         jit_->enter(careful, cpu_, mem_);
-#if BCORE_COPY_PATCH
+#if BCORE_COPY_PATCH || BCORE_HELPERS_CATCH
         scope.rethrow();
 #endif
         jit_->clear_executing();

@@ -43,7 +43,6 @@ Compiler::~Compiler() = default;
 
 bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) {
     opt_level_ = opt_level;
-    split_ = split;
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
@@ -69,11 +68,27 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, bool stencil) 
         builder->setCPU(cpu_);
         builder->getFeatures() = llvm::SubtargetFeatures(features_);
     }
+    const llvm::Triple& triple = builder->getTargetTriple();
+    // Only on x86-64 does the splitter's hot code reach the cold region: on
+    // AArch64 a conditional branch reaches 1 MiB (the cold region lies
+    // hundreds away), and on Mach-O LLVM's splitter fails outright.
+    if (!triple.isX86()) split = false;
+    split_ = split;
     if (stencil) {
         builder->setCPU("x86-64");
         builder->setCodeModel(llvm::CodeModel::Small);
         builder->setRelocationModel(llvm::Reloc::Static);
+    } else if (triple.isOSDarwin()) {
+        // RuntimeDyld's Mach-O AArch64 linking makes no stub for a branch
+        // out of reach (the helpers lie beyond 128 MiB): the large model
+        // calls them through the GOT. No host exception crosses generated
+        // code there (helper_abi.h's kHelpersCatch).
+        builder->setCodeModel(llvm::CodeModel::Large);
+        builder->setRelocationModel(llvm::Reloc::PIC_);
     }
+    // No Swift async frame record (block_abi.h: the Memory is `swiftasync`
+    // only to be passed in a register C keeps; nothing reads it from a frame).
+    builder->getOptions().SwiftAsyncFramePointer = llvm::SwiftAsyncFramePointerMode::Never;
     builder->setCodeGenOptLevel(cg_level);
     // The machine function splitter moves a block's cold basic blocks into a
     // section of their own (.text.split.*), which the arena keeps apart from

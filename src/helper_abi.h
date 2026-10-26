@@ -22,6 +22,12 @@
 //
 // memset, memcpy and memmove are not among the helpers: the backend calls
 // those for an intrinsic, in the C convention.
+//
+// On macOS a host's exception cannot unwind through generated code:
+// RuntimeDyld registers no usable unwind information for Mach-O AArch64
+// objects (a test's exception through a block ended in std::terminate).
+// There the helpers that reach host code catch it (host_bridge.h,
+// kHelpersCatch); BCORE_HELPERS_CATCH=1 does the same on any host.
 
 #include <cstring>
 #include <vector>
@@ -70,6 +76,15 @@ inline llvm::Type* helper_letter_type(llvm::LLVMContext& ctx, char c) {
     }
     llvm::report_fatal_error("bad helper signature letter");
 }
+
+#ifndef BCORE_HELPERS_CATCH
+#if defined(__APPLE__)
+#define BCORE_HELPERS_CATCH 1
+#else
+#define BCORE_HELPERS_CATCH 0
+#endif
+#endif
+inline constexpr bool kHelpersCatch = BCORE_HELPERS_CATCH;
 
 // The convention a helper is called in (see above).
 inline constexpr llvm::CallingConv::ID kHelperCC =
