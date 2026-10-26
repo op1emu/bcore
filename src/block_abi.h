@@ -7,8 +7,22 @@
 // arguments' attributes, which a musttail call needs the same on both
 // sides, are decided here alone.
 //
-// GHC's convention: the callee keeps no register for its caller, so a block
-// that runs the next one itself restores nothing first.
+// Swift's tail-calling convention, swifttailcc, on every host LLVM 15 has
+// it for (x86-64 and AArch64): a musttail call between two such functions
+// is always a tail call, the CpuState is `swiftself` (R13, X20) and the
+// Memory `swiftasync` (R14, X22), registers the C convention keeps, so they
+// stay where they are across a block's helper calls. GHC's convention,
+// which bcore used before and which keeps no register for the caller,
+// works on x86-64 only: on AArch64 LLVM gives a GHC function no prologue,
+// saves no return address and makes no tail call of one (a musttail call
+// is a fatal error).
+//
+// swifttailcc keeps the C convention's callee-saved registers, which a block
+// that uses them would save and restore before its tail call: on x86-64,
+// "no_callee_saved_registers" on every block and every call of one says it
+// keeps none, as GHC's convention did, and the one C-ABI caller,
+// bcore_enter, saves them all once per entry. LLVM's AArch64 backend knows
+// no such attribute: there a block keeps them.
 
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -18,9 +32,10 @@
 
 namespace bcore_abi {
 
-inline constexpr llvm::CallingConv::ID kBlockCC = llvm::CallingConv::GHC;
+inline constexpr llvm::CallingConv::ID kBlockCC = llvm::CallingConv::SwiftTail;
 inline constexpr unsigned kCpuArg = 0;
 inline constexpr unsigned kMemArg = 1;
+inline constexpr const char* kNoCalleeSaved = "no_callee_saved_registers";
 
 // void (CpuState*, Memory*), in kCpuArg and kMemArg.
 inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {
@@ -33,6 +48,9 @@ inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {
 inline llvm::Function* make_block(llvm::Module& mod, const llvm::Twine& name) {
     auto* fn = llvm::Function::Create(block_type(mod.getContext()), llvm::Function::ExternalLinkage, name, mod);
     fn->setCallingConv(kBlockCC);
+    fn->addParamAttr(kCpuArg, llvm::Attribute::SwiftSelf);
+    fn->addParamAttr(kMemArg, llvm::Attribute::SwiftAsync);
+    fn->addFnAttr(kNoCalleeSaved);
     return fn;
 }
 
@@ -47,6 +65,9 @@ inline llvm::CallInst* call_block(llvm::IRBuilder<>& b, llvm::Value* callee, llv
     args[kMemArg] = mem;
     llvm::CallInst* call = b.CreateCall(block_type(b.getContext()), callee, args);
     call->setCallingConv(kBlockCC);
+    call->addParamAttr(kCpuArg, llvm::Attribute::SwiftSelf);
+    call->addParamAttr(kMemArg, llvm::Attribute::SwiftAsync);
+    call->addFnAttr(llvm::Attribute::get(b.getContext(), kNoCalleeSaved));
     return call;
 }
 
