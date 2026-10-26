@@ -102,7 +102,10 @@ static void test(int opt) {
     require_packed(core, opt);
 }
 
-static constexpr size_t kHalf = size_t(256) << 10;  // hot 192 KiB, cold 64 KiB, data 256 KiB
+// Split: hot 192 KiB, cold 64 KiB; Shared: 256 KiB of either. Data 256 KiB.
+static constexpr size_t kHalf = size_t(256) << 10;
+using Layout = CodeArena::Layout;
+static const char* name(Layout layout) { return layout == Layout::Split ? "split" : "shared"; }
 
 static uintptr_t addr(const void* p) { return reinterpret_cast<uintptr_t>(p); }
 
@@ -110,8 +113,8 @@ static uintptr_t addr(const void* p) { return reinterpret_cast<uintptr_t>(p); }
 // section is given, an object's sections lie in one arena, a new arena is
 // mapped when one is full, and past the pool's limit an object gets its own
 // manager. hot/cold/data are the bytes each object asks for in that region.
-static void exhaust(const char* what, uintptr_t hot, uintptr_t cold, uintptr_t data) {
-    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2);
+static void exhaust(Layout layout, const char* what, uintptr_t hot, uintptr_t cold, uintptr_t data) {
+    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2, layout);
     std::vector<std::unique_ptr<ArenaMemoryManager>> objects;
     size_t own = 0;
     for (int i = 0; i < 64; ++i) {
@@ -132,20 +135,47 @@ static void exhaust(const char* what, uintptr_t hot, uintptr_t cold, uintptr_t d
 }
 
 // An object larger than an empty arena never takes one.
-static void too_large() {
-    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2);
+static void too_large(Layout layout) {
+    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2, layout);
     ArenaMemoryManager mm(pool);
-    mm.reserveAllocationSpace(kHalf, 16, 0, 1, 0, 1);
-    require(mm.allocateCodeSection(kHalf, 16, 1, ".text") && !mm.inArena() && pool->arenas() == 0,
+    const uintptr_t code = CodeArena::largestCode(kHalf, layout);
+    mm.reserveAllocationSpace(code, 16, 0, 1, 0, 1);
+    require(mm.allocateCodeSection(code, 16, 1, ".text") && !mm.inArena() && pool->arenas() == 0,
             "an object larger than an arena gets its own manager");
+}
+
+// Shared: hot code goes up from the start, cold code down from the end, each
+// aligned, until they meet; any object whose code fits between them fits,
+// split however it is.
+static void shared_layout() {
+    auto arena = CodeArena::create(kHalf, Layout::Shared);
+    require(arena && arena->codeSpan() == kHalf, "a shared arena maps");
+    uint8_t* hot = arena->allocate(CodeArena::Region::Hot, 100, 16);
+    uint8_t* cold = arena->allocate(CodeArena::Region::Cold, 100, 16);
+    require(hot && cold && addr(cold) % 16 == 0 && addr(cold) + 100 <= addr(hot) + kHalf &&
+                addr(hot) + kHalf - addr(cold) < 116, "cold code at the end");
+    uint8_t* below = arena->allocate(CodeArena::Region::Cold, 30, 64);
+    require(below && addr(below) % 64 == 0 && addr(below) + 30 <= addr(cold), "cold code goes down");
+    const uintptr_t gap = addr(below) - (addr(hot) + 100);
+    require(arena->fits(gap - 4096, 0) && !arena->fits(gap - 4095, 0), "fits what lies between");
+    require(arena->allocate(CodeArena::Region::Hot, gap + 1, 1) == nullptr &&
+                arena->allocate(CodeArena::Region::Cold, gap + 1, 1) == nullptr, "neither passes the other");
+    uint8_t* last = arena->allocate(CodeArena::Region::Hot, gap - 8, 1);
+    require(last == hot + 100, "hot code up to the cold code");
+    require(arena->allocate(CodeArena::Region::Cold, 8, 1) == hot + 100 + gap - 8, "cold code down to the hot code");
+    require(arena->allocate(CodeArena::Region::Hot, 1, 1) == nullptr &&
+                arena->allocate(CodeArena::Region::Cold, 1, 1) == nullptr && !arena->fits(0, 0), "full");
+#if !defined(__x86_64__)
+    require(CodeArena::kDefaultHalf <= CodeArena::kBranchReach, "an arena's code within B/BL's reach");
+#endif
 }
 
 // The same through LLJIT: functions of ~3 KB each, compiled into arenas of
 // 192 KiB of hot code until two are full and past them, all still run.
-static void jit_exhaust() {
+static void jit_exhaust(Layout layout) {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
-    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2);
+    auto pool = std::make_shared<CodeArenaPool>(kHalf, 2, layout);
     auto jit = llvm::orc::LLJITBuilder()
         .setObjectLinkingLayerCreator([pool](llvm::orc::ExecutionSession& es, const llvm::Triple&)
                                           -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
@@ -188,7 +218,7 @@ static void placed_code_lives() {
     require(jit.init(), "JitEngine init");
     // Fill the hot region (address space only: nothing is touched), so the
     // next request maps another arena.
-    const size_t rest = CodeArena::kDefaultHalf / 4 * 3 - (64 << 10);
+    const size_t rest = CodeArena::hotSize(CodeArena::kDefaultHalf, CodeArena::kDefaultLayout) - (64 << 10);
     auto first = jit.codeArena(64);  // the engine's own code (bcore_enter) holds this one
     require(first && first->allocate(CodeArena::Region::Hot, rest, 16) != nullptr, "most of the first arena");
     auto second = jit.codeArena(128 << 10);
@@ -215,11 +245,16 @@ int main() {
     require(CodeArena::create() != nullptr, "an arena maps");
     for (int opt = 0; opt <= 2; ++opt) test(opt);
     placed_code_lives();
-    exhaust("hot code fills an arena", 20 << 10, 0, 1 << 10);
-    exhaust("cold code fills an arena", 1 << 10, 20 << 10, 1 << 10);
-    exhaust("data fills an arena", 1 << 10, 0, 40 << 10);
-    too_large();
-    jit_exhaust();
+    shared_layout();
+    for (Layout layout : {Layout::Split, Layout::Shared}) {
+        exhaust(layout, "hot code fills an arena", 20 << 10, 0, 1 << 10);
+        exhaust(layout, "cold code fills an arena", 1 << 10, 20 << 10, 1 << 10);
+        exhaust(layout, "hot and cold code fill an arena", 10 << 10, 10 << 10, 1 << 10);
+        exhaust(layout, "data fills an arena", 1 << 10, 0, 40 << 10);
+        too_large(layout);
+        jit_exhaust(layout);
+        printf("%s layout passed\n", name(layout));
+    }
     printf("code arena test passed\n");
     return 0;
 }
