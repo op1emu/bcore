@@ -50,7 +50,7 @@ jobs:
             -DBCORE_PERF_JIT_EVENTS=ON
 
       - name: Build
-        run: cmake --build build -j$(nproc) --target emu disasm link-tests
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN) --target emu disasm link-tests
 
       - name: ccache statistics
         run: ccache -s
@@ -65,6 +65,14 @@ jobs:
             build/test_linked/
             build/test_objects/
             build/test_config.py
+
+      # The test programs alone, for a runner that builds its own emu
+      # (macos: no Blackfin toolchain there).
+      - name: Upload test programs
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-elfs
+          path: build/test_linked/
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 2: C++ tests, one build configuration each
@@ -150,14 +158,14 @@ jobs:
             ${{ matrix.cmake-args }}
 
       - name: Build
-        run: cmake --build build -j$(nproc)
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
 
       - name: ccache statistics
         run: ccache -s
 
       - name: Test
         run: |
-          ctest --test-dir build -j$(nproc) --output-on-failure \
+          ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure \
             -I ${{ matrix.shard }},,${{ matrix.shards }} ${{ matrix.ctest-args }}
 
   # ──────────────────────────────────────────────────────────────────────────
@@ -203,17 +211,17 @@ jobs:
             run: |
               python3 -m unittest tests/test_run_diff.py tests/test_capped_run.py
               python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
-                -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
           # op1emu's tiering: size-scaled thresholds, and the light tier-1
           # pipeline over copy-and-patch tier 0.
           - suite: diff-tiers-ref-light
             run: |
               python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
-                -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
           - suite: diff-copy-patch
             run: |
               python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
-                -j $(nproc) -t 60 --ignore-list .github/emu-ignore.txt
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
           # CpuState::packets against single-stepping (--max-steps 1), where
           # every run enters one packet. Long tests time out single-stepped
           # and are reported as skipped.
@@ -237,7 +245,72 @@ jobs:
         run: ${{ matrix.run }}
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 4: Disassembler comparison test and benchmark, a few seconds each
+  # Job 4: macOS on Apple silicon (AArch64, Mach-O, MAP_JIT)
+  # Builds the core without the copy-and-patch tier (x86-64 only) and runs
+  # the C++ tests, then the emulator suites on the build job's test programs.
+  # One runner for all of it, in turn.
+  # ──────────────────────────────────────────────────────────────────────────
+  macos:
+    name: macos (arm64)
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          llvm: "true"
+          ccache-key: macos-arm64
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR="$BCORE_LLVM_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+
+      - name: ccache statistics
+        run: ccache -s
+
+      - name: C++ tests
+        run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
+
+      - name: Download test programs
+        uses: actions/download-artifact@v4
+        with:
+          name: test-elfs
+          path: build/test_linked/
+
+      - name: O0
+        if: success() || failure()
+        run: python3 tests/run_emu_test.py --no-fail-fast --ignore-list .github/emu-ignore.txt
+      - name: O1
+        if: success() || failure()
+        run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --ignore-list .github/emu-ignore.txt
+      - name: O1-page-table
+        if: success() || failure()
+        run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --ignore-list .github/emu-ignore.txt
+      - name: O1-page-table-chain
+        if: success() || failure()
+        run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
+      - name: diff-tiers
+        if: success() || failure()
+        run: |
+          python3 -m unittest tests/test_run_diff.py tests/test_capped_run.py
+          python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
+            -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
+      - name: packet-count
+        if: success() || failure()
+        run: python3 tests/run_packet_count_test.py -t 60 --ignore-list .github/emu-ignore.txt
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 5: Disassembler comparison test and benchmark, a few seconds each
   # run_comparison_test.py compares build/disasm output against
   # bfin-elf-objdump for every assembled object file. bench.s.elf must exit
   # 0 (CHECKREG assertions pass); its wall-clock time goes to the job
