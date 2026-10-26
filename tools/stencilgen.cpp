@@ -1,7 +1,7 @@
 // bcore-stencilgen: the stencils of the copy-and-patch tier 0 (cp_format.h),
 // built from the lifter at build time.
 //
-//   bcore-stencilgen OUT_DIR [--jobs N]
+//   bcore-stencilgen OUT_DIR [--jobs N] [--target x86_64|aarch64]
 //
 // writes OUT_DIR/cp_stencils.bin (the code), cp_tables.bin (the big tables)
 // and cp_stencils.inc (the rest of the tables, which cp_stencils.cpp includes) and cp_stencils.txt (a report: counts, sizes
@@ -11,8 +11,9 @@
 // stencil, and every value of the key fields of each pattern in
 // cp_patterns.def and of each DSP pattern (whose data register fields are
 // register holes, infer_regs). Each is the packet
-// BBTranslator::translate_stencil lifts, compiled at O2 for generic x86-64
-// (Compiler::init's stencil mode). A parallel packet is made of pieces:
+// BBTranslator::translate_stencil lifts, compiled at O2 for the generic CPU
+// of this host's architecture or --target's (Compiler::init's stencil mode;
+// a stencil set for another host can only be looked at). A parallel packet is made of pieces:
 // each 16-bit word in slot 1 and in slot 2 (its writes to the slot
 // scratch, in a variant for each entry state), each DSP key with the
 // multi-issue bit as slot 0 (the body), a commit for each set of slot
@@ -31,9 +32,10 @@
 //   - a slot piece's writes fit the scratch, and it does not end the
 //     packet;
 //   - every relocation of the compiled code is one the translator fills
-//     in: a value hole as an absolute 32-bit field, the next packet, the
-//     exit or a helper as a 32-bit PC-relative one. An encoding whose code
-//     has any other gets no stencil (its blocks compile with LLVM).
+//     in: a value hole as an absolute 32-bit field (x86-64) or MOVZ/MOVK
+//     immediates (AArch64, materialize_holes), the next packet, the exit or
+//     a helper as a 32-bit PC-relative field or a B/BL. An encoding whose
+//     code has any other gets no stencil (its blocks compile with LLVM).
 
 #include <algorithm>
 #include <cstddef>
@@ -55,6 +57,7 @@
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/ADT/Triple.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -233,12 +236,42 @@ bool pick_regs(uint32_t insn, const SelectedInfo& info, const std::vector<std::p
     return true;
 }
 
+// The target the stencils are compiled for (--target): this host's by default.
+const char* g_triple = kStencilTripleHost;
+
+// Its LLVM target, with the assembler parser the AArch64 holes' inline
+// assembly needs (materialize_holes); false if this build has none.
+bool init_target(const char* triple) {
+    if (Triple(triple).isAArch64()) {
+#if BCORE_STENCILGEN_AARCH64
+        LLVMInitializeAArch64TargetInfo();
+        LLVMInitializeAArch64Target();
+        LLVMInitializeAArch64TargetMC();
+        LLVMInitializeAArch64AsmPrinter();
+        LLVMInitializeAArch64AsmParser();
+        return true;
+#else
+        return false;
+#endif
+    }
+#if BCORE_STENCILGEN_X86
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmPrinter();
+    LLVMInitializeX86AsmParser();
+    return true;
+#else
+    return false;
+#endif
+}
+
 // A worker: a context, a translator, a compiler.
 class Worker {
 public:
-    Worker() : translator_(&memory_) {
+    explicit Worker(const char* triple = g_triple) : translator_(&memory_) {
         translator_.set_lazy_state(true);
-        compiler_.init(2, 2, /*split=*/true, /*stencil=*/true);
+        compiler_.init(2, 2, /*split=*/true, triple);
     }
 
     // Lifts item at pc into mod as `name`; false with item.error set if the
@@ -527,14 +560,7 @@ public:
         while (out.size() < count) out.push_back(spread(rng()));
     }
 
-    void compile(Module& mod, std::map<std::string, Code>& out) {
-        mod.setDataLayout(compiler_.dataLayout());
-        mod.setTargetTriple(compiler_.targetTriple());
-        make_local(mod);
-        compiler_.optimize(mod);
-        auto object = compiler_.emit(mod);
-        if (object) out = extract(*object);
-    }
+    void compile(Module& mod, std::map<std::string, Code>& out) { out = compile_stencils(compiler_, mod); }
 
     BBTranslator& translator() { return translator_; }
 
@@ -712,7 +738,7 @@ void probe_body(Worker& worker, const std::vector<Pattern>& patterns, SelectedIn
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s OUT_DIR [--jobs N]\n", argv[0]);
+        fprintf(stderr, "usage: %s OUT_DIR [--jobs N] [--target x86_64|aarch64]\n", argv[0]);
         return 2;
     }
     const std::string out_dir = argv[1];
@@ -721,10 +747,20 @@ int main(int argc, char** argv) {
     for (int i = 2; i + 1 < argc; ++i) {
         if (!strcmp(argv[i], "--jobs")) jobs = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--dump")) dump = strtol(argv[++i], nullptr, 0);
+        else if (!strcmp(argv[i], "--target")) {
+            const char* arch = argv[++i];
+            g_triple = !strcmp(arch, "aarch64") ? kStencilTripleA64 : !strcmp(arch, "x86_64") ? kStencilTripleX86 : nullptr;
+            if (!g_triple) {
+                fprintf(stderr, "stencilgen: no target %s\n", arch);
+                return 2;
+            }
+        }
     }
 
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
+    if (!init_target(g_triple)) {
+        fprintf(stderr, "stencilgen: this build has no %s target\n", g_triple);
+        return 2;
+    }
     const std::vector<Pattern> patterns = patterns32();
     if (dump >= 0) {
         Worker worker;
@@ -1105,7 +1141,8 @@ int main(int argc, char** argv) {
             for (int v = 0; v < Item::kVariants; ++v) {
                 if (!item.has[v]) continue;
                 const Code& code = item.variant_code[item.same_as[v]];
-                const bool nop = item.writes[v].empty() && tail_cont(code) && code.bytes.size() == 5 && code.cold.empty();
+                const bool nop = item.writes[v].empty() && tail_cont(code) &&
+                                 code.bytes.size() == tail_jump(code, kHoleCont) && code.cold.empty();
                 const uint32_t st = blob.add(code, uint16_t(item.slot_flags[v] | (nop ? kNop : 0)), 8);
                 const uint32_t cm = item.writes[v].empty() ? 0 : commit_of[commit_key(item.slot, item.writes[v])] + 1;
                 const size_t at = (size_t(v * 2 + item.slot - 1) * 0x10000 + item.insn) * 2;
@@ -1178,6 +1215,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     fprintf(f, "// Generated by bcore-stencilgen (tools/stencilgen.cpp). Do not edit.\n");
+    fprintf(f, "#define CP_STENCILS_AARCH64 %d  // the architecture the code is for\n",
+            Triple(g_triple).isAArch64() ? 1 : 0);
     for (const Table& table : tables)
         fprintf(f, "#define CP_TABLE_%s %zu, %zu\n", table.name, table.at, table.size);
     fprintf(f, "namespace bcore_cp {\n");

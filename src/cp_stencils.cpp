@@ -7,6 +7,10 @@
 #include "cp_format.h"
 #include "cp_stencils.inc"
 
+#if CP_STENCILS_AARCH64 != defined(__aarch64__)
+#error "the stencils were made for another architecture (bcore-stencilgen --target)"
+#endif
+
 #if defined(__APPLE__)
 #define CP_SYMBOL(name) "__ZN8bcore_cp" name "E"
 #define CP_SECTION ".section __TEXT,__const"

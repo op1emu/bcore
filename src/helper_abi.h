@@ -39,9 +39,11 @@
 #include <vector>
 
 #include <llvm/ADT/StringRef.h>
+#include <llvm/ADT/Triple.h>
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 
@@ -100,6 +102,12 @@ inline constexpr llvm::CallingConv::ID kHelperCC =
     llvm::CallingConv::PreserveMost;
 #endif
 
+// The convention a helper is called in on triple's architecture: kHelperCC
+// where that is this host's.
+inline llvm::CallingConv::ID helper_cc(const llvm::Triple& triple) {
+    return triple.isX86() ? llvm::CallingConv::C : llvm::CallingConv::PreserveMost;
+}
+
 inline llvm::FunctionType* helper_type(llvm::LLVMContext& ctx, const Helper& h) {
     std::vector<llvm::Type*> params;
     for (const char* c = h.sig + 1; *c; ++c) params.push_back(helper_letter_type(ctx, *c));
@@ -133,6 +141,19 @@ inline llvm::Function* declare_helper(llvm::Module& mod, const char* name, llvm:
 inline void mark_helper_call(llvm::CallInst& call, llvm::Function& fn) {
     call.setCallingConv(fn.getCallingConv());
     if (const Helper* h = find_helper(fn.getName())) extend_narrow_params(*h, call);
+}
+
+// Every helper's declaration in mod and every call of one in convention
+// cc: a module lifted here (in kHelperCC) and compiled for another
+// architecture (tools/stencilgen.cpp --target).
+inline void set_helper_cc(llvm::Module& mod, llvm::CallingConv::ID cc) {
+    for (llvm::Function& fn : mod) {
+        if (!fn.isDeclaration() || !find_helper(fn.getName())) continue;
+        fn.setCallingConv(cc);
+        for (llvm::User* user : fn.users())
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(user))
+                if (call->getCalledFunction() == &fn) call->setCallingConv(cc);
+    }
 }
 
 // The same with the helper's own type.

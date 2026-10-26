@@ -50,11 +50,15 @@ public:
     // opt_level: the IR pipeline, 0=None, 1=O1, 2=O2, 3=O3.
     // codegen_level: the backend on the same scale; <0 follows opt_level.
     // split: the machine function splitter moves cold paths apart (init()).
-    // stencil: for the copy-and-patch tier's stencils (tools/stencilgen.cpp)
-    // rather than for this host: generic x86-64 with the small code model
-    // and static relocations, which fold each hole into the instruction
-    // that uses it, and no vectorizers (whose constants would be data).
-    bool init(int opt_level, int codegen_level, bool split = true, bool stencil = false);
+    // stencil_triple: for the copy-and-patch tier's stencils
+    // (tools/stencilgen.cpp, cp_build.h's kStencilTriple*) rather than for
+    // this host: the generic CPU of that triple's architecture, whose target
+    // the caller has initialized, with the small code model and static
+    // relocations, which on x86-64 fold each hole into the instruction that
+    // uses it, and no vectorizers (whose constants would be data). On AArch64
+    // X18 is kept for the platform (Apple's ABI) and atomics are not called
+    // out of line, and the splitter stays off.
+    bool init(int opt_level, int codegen_level, bool split = true, const char* stencil_triple = nullptr);
     // Before init: a CPU and its features (SubtargetFeatures text, "+avx2,...")
     // in place of the host's, for code that is compiled here and never run
     // (tests/vectorize_count_test.cpp compiles for AVX-512 on any x86-64).
