@@ -164,6 +164,7 @@ bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const*
         auto* ft = bcore_abi::helper_type(*ctx, *h);
         auto* fn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage, prefix + names[i], mod.get());
         fn->setCallingConv(bcore_abi::kHelperCC);
+        bcore_abi::extend_narrow_params(*h, *fn);
         fn->setUWTableKind(llvm::UWTableKind::Async);
         llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
         std::vector<llvm::Value*> args;
@@ -171,6 +172,7 @@ bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const*
         auto* target = llvm::ConstantExpr::getIntToPtr(
             b.getInt64(reinterpret_cast<uintptr_t>(targets[i])), llvm::PointerType::getUnqual(*ctx));
         auto* call = b.CreateCall(ft, target, args);
+        bcore_abi::extend_narrow_params(*h, *call);  // C's prototype's, as the declaration's
         call->setTailCallKind(llvm::CallInst::TCK_NoTail);
         if (ft->getReturnType()->isVoidTy()) b.CreateRetVoid();
         else b.CreateRet(call);

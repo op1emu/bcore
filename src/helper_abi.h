@@ -20,6 +20,12 @@
 // selects no call in another convention). LLVM 15's x86 preserve_most
 // also restores RAX over the value a function returns.
 //
+// A parameter narrower than 32 bits (mem_write8's and mem_write16's value)
+// is zeroext on every declaration and call: the caller extends it, as
+// Apple's arm64 ABI requires and clang's code on x86-64 relies on (a store
+// of R0 = 0x12345678's byte gave the callback 0x12345678). A narrow return
+// value has no attribute: the caller narrows it itself.
+//
 // memset, memcpy and memmove are not among the helpers: the backend calls
 // those for an intrinsic, in the C convention.
 //
@@ -100,6 +106,15 @@ inline llvm::FunctionType* helper_type(llvm::LLVMContext& ctx, const Helper& h) 
     return llvm::FunctionType::get(helper_letter_type(ctx, h.sig[0]), params, false);
 }
 
+// zeroext on fn's (a function's or a call's) parameters narrower than 32
+// bits, as `h` has them (see above).
+template <typename F>
+inline void extend_narrow_params(const Helper& h, F& fn) {
+    for (unsigned i = 0; h.sig[i + 1]; ++i)
+        if (h.sig[i + 1] == 'b' || h.sig[i + 1] == 'c' || h.sig[i + 1] == 's')
+            fn.addParamAttr(i, llvm::Attribute::ZExt);
+}
+
 // The declaration of the helper `name` in mod, of type ft, in the helpers'
 // convention: what generated code calls. ft must be the helper's own type.
 inline llvm::Function* declare_helper(llvm::Module& mod, const char* name, llvm::FunctionType* ft) {
@@ -109,7 +124,15 @@ inline llvm::Function* declare_helper(llvm::Module& mod, const char* name, llvm:
         llvm::report_fatal_error(llvm::Twine("a call of ") + name + " with another signature than its own");
     auto* fn = llvm::cast<llvm::Function>(mod.getOrInsertFunction(name, ft).getCallee());
     fn->setCallingConv(kHelperCC);
+    extend_narrow_params(*h, *fn);
     return fn;
+}
+
+// A call of fn, a helper's declaration (declare_helper), with its
+// convention and its parameters' attributes.
+inline void mark_helper_call(llvm::CallInst& call, llvm::Function& fn) {
+    call.setCallingConv(fn.getCallingConv());
+    if (const Helper* h = find_helper(fn.getName())) extend_narrow_params(*h, call);
 }
 
 // The same with the helper's own type.
