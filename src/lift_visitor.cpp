@@ -2,6 +2,7 @@
 #include "cec.h"
 #include "mem.h"
 #include "guest_memory.h"
+#include "helper_abi.h"
 
 #include <cstdio>
 #include <cstddef>
@@ -998,11 +999,11 @@ static bool rarely_called(const std::string& name) {
 
 Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
                                 ArrayRef<Value*> args) {
-    auto* fn = module_->getOrInsertFunction(name, ft).getCallee();
-    if (rarely_called(name))
-        if (auto* f = dyn_cast<Function>(fn)) f->addFnAttr(Attribute::Cold);
+    auto* fn = bcore_abi::declare_helper(*module_, name, ft);
+    if (rarely_called(name)) fn->addFnAttr(Attribute::Cold);
     if (!real_cpu_) {
         auto* call = builder_.CreateCall(ft, fn, args);
+        call->setCallingConv(fn->getCallingConv());
         reg_cache_after_call(name);
         return call;
     }
@@ -1013,6 +1014,7 @@ Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
         if (arg == cpu_ptr_) arg = real_cpu_;
     emit_loop_sync(kSyncOut);
     auto* call = builder_.CreateCall(ft, fn, real_args);
+    call->setCallingConv(fn->getCallingConv());
     const std::string callee = name;
     const bool memory = callee.rfind("mem_read", 0) == 0 || callee.rfind("mem_write", 0) == 0;
     // cec_check_pending changes the guest state only where it takes an

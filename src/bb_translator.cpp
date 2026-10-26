@@ -1,5 +1,6 @@
 #include "bb_translator.h"
 #include "block_abi.h"
+#include "helper_abi.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -33,19 +34,9 @@ BBTranslator::BBTranslator(Memory* mem,
 
 // The external functions the lifter uses.
 void BBTranslator::declare_externs(Module& mod) {
-    auto& ctx = mod.getContext();
-    auto* i8ptr = Type::getInt8PtrTy(ctx);
-    auto* void_ty = Type::getVoidTy(ctx);
-    auto* i32_ty = Type::getInt32Ty(ctx);
-    auto* i8_ty = Type::getInt8Ty(ctx);
-    auto* i16_ty = Type::getInt16Ty(ctx);
-    mod.getOrInsertFunction("bfin_syscall", FunctionType::get(void_ty, {i8ptr, i8ptr}, false));
-    mod.getOrInsertFunction("mem_read8", FunctionType::get(i8_ty, {i8ptr, i32_ty}, false));
-    mod.getOrInsertFunction("mem_read16", FunctionType::get(i16_ty, {i8ptr, i32_ty}, false));
-    mod.getOrInsertFunction("mem_read32", FunctionType::get(i32_ty, {i8ptr, i32_ty}, false));
-    mod.getOrInsertFunction("mem_write8", FunctionType::get(void_ty, {i8ptr, i32_ty, i8_ty}, false));
-    mod.getOrInsertFunction("mem_write16", FunctionType::get(void_ty, {i8ptr, i32_ty, i16_ty}, false));
-    mod.getOrInsertFunction("mem_write32", FunctionType::get(void_ty, {i8ptr, i32_ty, i32_ty}, false));
+    for (const char* name : {"bfin_syscall", "mem_read8", "mem_read16", "mem_read32", "mem_write8", "mem_write16",
+                             "mem_write32"})
+        bcore_abi::declare_helper(mod, name);
 }
 
 // A block that may run itself again in a native loop is lifted a second
