@@ -46,6 +46,9 @@ The C++ implementation uses a sophisticated template-based pattern matching syst
 - `src/memory.cpp`: Flat memory model (little-endian), extern "C" read/write wrappers for JIT
 - `src/lift_visitor.h/cpp`: LiftVisitor — plugs into decoder, emits LLVM IR per instruction (~24 implemented, rest are stubs)
 - `src/compiler.h/cpp`: `Compiler` — module to object file: the IR pipeline and the backend, with the TargetMachine, pass builder, analysis managers and legacy codegen pass manager built once (per tier: Core keeps one for tier 0), and `kLightPipeline` for promotions (Core::set_light_tier1)
+- `src/block_abi.h`: the blocks' and stencils' calling convention (`swifttailcc`, CpuState `swiftself`, Memory `swiftasync`, and on x86-64 `no_callee_saved_registers`) and the musttail call by which one runs the next
+- `src/host_bridge.h/cpp`: the helpers that reach host code, wrapped to catch a host exception where none may unwind through generated code (stencils; macOS), and `RunScope`, which Core::run throws it again with
+- `src/helper_abi.h`: the extern "C" helpers' signatures and the convention generated code calls them in (C on x86-64; preserve_most through JitEngine's trampolines on AArch64)
 - `src/jit_engine.h/cpp`: LLJIT wrapper that loads the Compiler's object files (`addObject`), with explicit `absoluteSymbols` registration for all extern "C" helpers, and the chain table with the tier table after it (`include/tier_table.h`, also `tier_threshold`: a tier-0 block's threshold scaled by its size, Core::set_tiering's size_ref)
 - `src/compile_worker.h/cpp`: `CompileWorker` — a thread with a Compiler of its own that runs the IR pipeline and backend of promotions (Core::set_tier_background); the dispatching thread lifts, loads and publishes
 - `src/tier_memory.h`: `RecordingMemory`/`ReplayMemory` (namespace `bcore_tier`): a tier-0 compilation logs the instructions it reads, its promotion reads only those
@@ -205,6 +208,8 @@ destructor, so a default-handled signal truncates the jitdump.
 ## Important Notes
 
 - Build with CMake: `cmake -B build && cmake --build build`
-- Requires LLVM 15 (set `LLVM_DIR` in CMakeLists.txt if not at default path)
+- Requires LLVM 15 (set `LLVM_DIR` in CMakeLists.txt if not at default path); builds on x86-64 Linux and on macOS (Apple silicon; copy-and-patch on x86-64 only)
+- Blocks and stencils are made and called only through `src/block_abi.h` (`make_block`, `call_block`, `tail_call_block`); never call one from C++, only through `JitEngine::enter`. A helper is declared only through `bcore_abi::declare_helper` (`src/helper_abi.h`), and a new helper goes into its `kHelpers` table as well as JitEngine's
+- On Apple silicon the code arena is `MAP_JIT`: anything that writes code into it (linking, copying) does so inside a `JitWriteScope`, and nothing runs code inside one
 - Requires `bfin-elf-gcc` and `bfin-elf-ld` at `$HOME/toolchains/bfin-elf/bin/` for test assembly/linking
 - JIT extern "C" symbols are registered explicitly via `absoluteSymbols` in `jit_engine.cpp` — do NOT rely on `-rdynamic` / `DynamicLibrarySearchGenerator`

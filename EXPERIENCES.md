@@ -501,6 +501,8 @@ the boot to op1emu's main display.
 - Blocks are `ghccc`: the GHC convention saves no register for its caller,
   and `musttail` between two `ghccc` functions of the same type works in
   LLVM 15 (one `push`/`pop` stays, for stack alignment before helper calls).
+  (Since then `swifttailcc` with `no_callee_saved_registers`, which does
+  the same on x86-64 and runs on AArch64: see "Other hosts".)
   The host enters through one JIT-compiled C-ABI trampoline
   (`JitEngine::enter`), which saves the callee-saved registers once per run.
 - Each return gets its own exit, with the values its path stored found by
@@ -921,3 +923,55 @@ call). On the boot to the main display (6 pairs) execution -22.0%, host
 instructions -12.0%, compile +1.7%; in the synthesizer phase (4 pairs)
 execution -20.3%. Work the same at every mark.
 
+## Other hosts: AArch64 and macOS on LLVM 15
+
+- GHC's convention cannot carry blocks on AArch64, in any LLVM up to 23:
+  a musttail call of a GHC function there is a fatal error, a plain tail
+  call becomes `bl; ret`, and a GHC function gets no prologue at all, so
+  its return address is lost at its first helper call and its spills land
+  in the caller's frame (llvm#70577). `preserve_none`, the convention made
+  for this, is LLVM 19's. On LLVM 15 the blocks are `swifttailcc`: every
+  musttail call is a tail call on both, and the CpuState (`swiftself`,
+  R13/X20) and the Memory (`swiftasync`, R14/X22) are in registers C keeps.
+- swifttailcc keeps C's callee-saved registers. On x86-64 that alone made
+  the boot's execution 2.8% slower (op1emu ab, 6 pairs, CI +2.0..+3.6):
+  the hottest block pushed rbp, r15, r12 and rbx at its entry and popped
+  them at each of its three exits, about one instruction per run over the
+  boot's 348 M runs. LLVM 15's x86 backend has the function attribute
+  `no_callee_saved_registers`: on every block and on every call of one,
+  a block saves none and bcore_enter, the C caller, saves them all once per
+  entry, as with GHC's convention. With it: execution +0.44% against
+  GHC's (CI -0.12..+1.00, inconclusive), host instructions -0.07%, the
+  stencils the same bytes but for registers' names; synthesizer phase
+  -0.81% (inconclusive). AArch64's backend has no such attribute.
+- Helpers through preserve_most trampolines (a block keeps every register
+  but R11 or X16-X18 across a call; the trampoline saves what C may
+  change): on x86-64, with blocks that keep no callee-saved register, they
+  cost host instructions (+2.4%) and compile time (+4.6%: FastISel selects
+  no call in another convention) and gained nothing, so x86-64 calls the C
+  functions directly. On AArch64 a block keeps its values across a C call
+  in callee-saved registers it must save: there the helpers are
+  preserve_most (seven real blocks under llc-15: 6688 -> 6277
+  instructions, 164 -> 55 saves and restores).
+- LLVM 15's x86 preserve_most keeps RAX, so a preserve_most function
+  restores RAX over the value it returns: every reading helper read
+  garbage. ctest found it (13 of 21 tests); the emulator suites, whose
+  programs take no slow memory path, passed.
+- FastISel selects no `swifttailcc` return either: tier 0 still merges a
+  block's returns into one (merge_returns).
+- macOS on Apple silicon: the code arena is MAP_JIT and written only inside
+  a JitWriteScope (mapped as one MAP_JIT range, its data half replaced in
+  place: MAP_JIT takes no MAP_FIXED, and a data half asked for by a hint
+  alone was not kept, so every object had pages of its own); no function
+  splitting off x86-64 (an AArch64 conditional branch reaches 1 MiB); the
+  large code model on Darwin, because RuntimeDyld's Mach-O AArch64 linking
+  makes no stub for a helper call out of reach; no Swift async frame
+  record (SwiftAsyncFramePointer never: nothing reads the Memory from a
+  frame).
+- On macOS a host's exception does not unwind through generated code:
+  RuntimeDyld registers no usable unwind information for Mach-O AArch64
+  objects (tier_test's exception through a block ended in std::terminate,
+  with DWARF unwind information emitted). The helpers that reach
+  host code catch it there, as the copy-and-patch tier's always did
+  (host_bridge.h): the block stops, Core::run throws it again.
+  BCORE_HELPERS_CATCH=1 does the same on x86-64, where ctest passes with it.
