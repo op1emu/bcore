@@ -71,9 +71,12 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     }
     const llvm::Triple& triple = builder->getTargetTriple();
     // Only on x86-64 does the splitter's hot code reach the cold region: on
-    // AArch64 a conditional branch reaches 1 MiB (the cold region lies
-    // hundreds away), and on Mach-O LLVM's splitter fails outright.
-    if (!triple.isX86()) split = false;
+    // AArch64 a conditional branch reaches 1 MiB (the cold region lies far
+    // away) and LLVM 15 does not relax one to another section, and on Mach-O
+    // LLVM's splitter fails outright. The stencils are split there too: the
+    // copy-and-patch translator takes their conditional branches to the cold
+    // code through B trampolines of its own (cp_translator.cpp).
+    if (!triple.isX86() && !stencil) split = false;
     split_ = split;
     if (stencil) {
         if (triple.isX86()) {

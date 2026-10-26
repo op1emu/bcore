@@ -125,12 +125,19 @@ if(BCORE_COPY_PATCH)
     # (cmake/StencilCache.cmake): a rebuild that links the same generator,
     # as a CI job with ccache does, copies them instead of taking minutes.
     set(BCORE_STENCIL_CACHE_DIR "" CACHE PATH "Reuse the stencils of an identical bcore-stencilgen")
+    # Off: stencils without the splitter's cold parts, a baseline to measure
+    # the split against.
+    option(BCORE_STENCIL_SPLIT "Split the stencils' cold paths apart" ON)
+    set(BCORE_STENCILGEN_ARGS "")
+    if(NOT BCORE_STENCIL_SPLIT)
+        list(APPEND BCORE_STENCILGEN_ARGS --no-split)
+    endif()
     if(BCORE_STENCIL_CACHE_DIR)
         set(BCORE_STENCILGEN_COMMAND ${CMAKE_COMMAND} -DGEN=$<TARGET_FILE:bcore-stencilgen>
-            -DOUT=${BCORE_CP_GEN} -DCACHE=${BCORE_STENCIL_CACHE_DIR}
+            -DOUT=${BCORE_CP_GEN} -DCACHE=${BCORE_STENCIL_CACHE_DIR} "-DARGS=${BCORE_STENCILGEN_ARGS}"
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/StencilCache.cmake)
     else()
-        set(BCORE_STENCILGEN_COMMAND bcore-stencilgen ${BCORE_CP_GEN})
+        set(BCORE_STENCILGEN_COMMAND bcore-stencilgen ${BCORE_CP_GEN} ${BCORE_STENCILGEN_ARGS})
     endif()
     add_custom_command(
         OUTPUT ${BCORE_CP_GEN}/cp_stencils.inc ${BCORE_CP_GEN}/cp_stencils.bin ${BCORE_CP_GEN}/cp_tables.bin

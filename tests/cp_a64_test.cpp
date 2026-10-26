@@ -92,20 +92,38 @@ static void check_narrow_store(Compiler& compiler, uint16_t word, const char* he
     require(called, "a call of the helper");
 }
 
+static bool is_branch(uint8_t kind) { return kind == kBranch26 || kind == kCondBr19 || kind == kTestBr14; }
+
 // Every relocation one the translator fills in on AArch64; each 32-bit PC
-// hole two halves, each 16-bit packet hole one.
+// hole two halves, each 16-bit packet hole one. A conditional branch only
+// between the stencil's hot and cold code (the translator's trampolines).
 static void check_relocs(const Code& c, const char* what) {
     char msg[160];
     snprintf(msg, sizeof msg, "%s: %s", what, c.error.c_str());
     require(c.error.empty(), msg);
-    require(c.bytes.size() % 4 == 0, "whole instructions");
-    unsigned pc_hi = 0, pc_lo = 0, packets = 0;
-    for (const bcore_cp::Reloc& r : c.relocs) {
+    require(c.bytes.size() % 4 == 0 && c.cold.size() % 4 == 0, "whole instructions");
+    unsigned pc_hi = 0, pc_lo = 0, packets = 0, conditional = 0;
+    std::vector<std::pair<const bcore_cp::Reloc*, uint32_t>> all;
+    for (const bcore_cp::Reloc& r : c.relocs) all.push_back({&r, insn_at(c, r.offset)});
+    for (const bcore_cp::Reloc& r : c.cold_relocs) {
+        uint32_t insn;
+        memcpy(&insn, c.cold.data() + r.offset, 4);
+        all.push_back({&r, insn});
+    }
+    for (const auto& [rp, insn] : all) {
+        const bcore_cp::Reloc& r = *rp;
         const bool code_hole = r.hole >= kHoleCont;
-        require(code_hole ? r.kind == kBranch26 : is_movw(r.kind), "a code hole as a branch, a value hole as MOVW");
-        const uint32_t insn = insn_at(c, r.offset);
+        require(code_hole ? is_branch(r.kind) : is_movw(r.kind), "a code hole as a branch, a value hole as MOVW");
+        if (r.kind == kCondBr19 || r.kind == kTestBr14) {
+            require(r.hole == kHoleHot || r.hole == kHoleCold, "a conditional branch to the other part only");
+            ++conditional;
+        }
         if (r.kind == kBranch26) {
             require((insn & 0x7c000000u) == 0x14000000u, "a B or BL");
+        } else if (r.kind == kCondBr19) {
+            require((insn & 0xff000010u) == 0x54000000u || (insn & 0x7e000000u) == 0x34000000u, "a B.cond, CBZ or CBNZ");
+        } else if (r.kind == kTestBr14) {
+            require((insn & 0x7e000000u) == 0x36000000u, "a TBZ or TBNZ");
         } else {
             // MOVZ (opc 10) or MOVK (opc 11), 32- or 64-bit, hw = the part.
             require((insn & 0x1f800000u) == 0x12800000u && (insn >> 29 & 3) >= 2, "a MOVZ or MOVK");
@@ -120,13 +138,23 @@ static void check_relocs(const Code& c, const char* what) {
         }
     }
     require(pc_hi == pc_lo, "each PC in two halves");
-    printf("%s: %zu bytes, %zu relocations, %u PCs, %u packet indexes\n", what, c.bytes.size(), c.relocs.size(),
-           pc_hi, packets);
+    printf("%s: %zu bytes (cold %zu), %zu relocations (cold %zu, conditional %u), %u PCs, %u packet indexes\n", what,
+           c.bytes.size(), c.cold.size(), c.relocs.size(), c.cold_relocs.size(), conditional, pc_hi, packets);
 }
 
-static void check_patch(const Code& c, uint32_t pc) {
-    std::vector<uint8_t> code = c.bytes;
-    for (const bcore_cp::Reloc& r : c.relocs) {
+// The hot part branches to the cold one: conditionally (through the
+// translator's trampolines), or with a B.
+static bool branches_to_cold(const Code& c) {
+    for (const bcore_cp::Reloc& r : c.relocs)
+        if (r.hole == kHoleCold) return true;
+    return false;
+}
+
+// Each part: its code and relocations.
+static void check_patch(const std::vector<uint8_t>& bytes, const std::vector<bcore_cp::Reloc>& relocs, uint32_t pc) {
+    const Code c{bytes};
+    std::vector<uint8_t> code = bytes;
+    for (const bcore_cp::Reloc& r : relocs) {
         if (r.hole == kHolePc) require(patch_reloc(code.data(), r, pc), "a PC fits");
         if (r.hole == kHolePacket) {
             require(!patch_reloc(code.data(), r, 0x10000), "a packet index over 16 bits is refused");
@@ -135,7 +163,7 @@ static void check_patch(const Code& c, uint32_t pc) {
     }
     // The halves at each MOVZ/MOVK pair give the value (+ addend) back; the
     // rest of each instruction as it was.
-    for (const bcore_cp::Reloc& r : c.relocs) {
+    for (const bcore_cp::Reloc& r : relocs) {
         if (!is_movw(r.kind)) continue;
         const uint32_t was = insn_at(c, r.offset), now = insn_at(Code{code}, r.offset);
         require((was & ~(0xffffu << 5)) == (now & ~(0xffffu << 5)), "only the immediate changes");
@@ -146,6 +174,11 @@ static void check_patch(const Code& c, uint32_t pc) {
         }
         if (r.hole == kHolePacket) require(imm == 256, "the packet's index");
     }
+}
+
+static void check_patch(const Code& c, uint32_t pc) {
+    check_patch(c.bytes, c.relocs, pc);
+    check_patch(c.cold, c.cold_relocs, pc);
 }
 
 static void check_branch() {
@@ -163,6 +196,31 @@ static void check_branch() {
     require(patch_reloc(code, b, at - (uintptr_t(1) << 27)), "the furthest branch back");
     require(!patch_reloc(code, b, at - (uintptr_t(1) << 27) - 4), "further back is out of reach");
     require(!patch_reloc(code, b, at + 2), "a target not on an instruction");
+}
+
+// A conditional branch's 19- or 14-bit offset: to its trampoline, within
+// +-1 MiB or +-32 KiB, the condition and the register as they were.
+static void check_conditional() {
+    alignas(4) uint8_t code[12] = {};
+    store32(code, 0x54000000 | 0x1);      // B.NE
+    store32(code + 4, 0xb4000000 | 0x3);  // CBZ X3
+    store32(code + 8, 0x37180000 | 0x5);  // TBNZ W5, #3
+    const bcore_cp::Reloc bcc{0, kHoleCold, kCondBr19, 0}, cbz{4, kHoleCold, kCondBr19, 0},
+        tbz{8, kHoleHot, kTestBr14, 0};
+    const uintptr_t at = reinterpret_cast<uintptr_t>(code);
+    require(patch_reloc(code, bcc, at + 0x40), "B.cond forward");
+    require(load32(code) == (0x54000001u | (0x10u << 5)), "B.cond's offset, its condition kept");
+    require(patch_reloc(code, cbz, at + 4 - 8), "CBZ back");
+    require(load32(code + 4) == (0xb4000003u | (0x7fffeu << 5)), "CBZ's offset back, its register kept");
+    require(patch_reloc(code, bcc, at + (uintptr_t(1) << 20) - 4) && !patch_reloc(code, bcc, at + (uintptr_t(1) << 20)),
+            "B.cond reaches 1 MiB forward, less an instruction");
+    require(patch_reloc(code, bcc, at - (uintptr_t(1) << 20)) && !patch_reloc(code, bcc, at - (uintptr_t(1) << 20) - 4),
+            "and 1 MiB back");
+    require(patch_reloc(code, tbz, at + 8 + 0x7ffc), "TBZ 32 KiB forward, less an instruction");
+    require(load32(code + 8) == (0x37180005u | (0x1fffu << 5)), "TBZ's offset, its bit and register kept");
+    require(!patch_reloc(code, tbz, at + 8 + 0x8000), "TBZ: 32 KiB forward is out of reach");
+    require(patch_reloc(code, tbz, at + 8 - 0x8000) && !patch_reloc(code, tbz, at + 8 - 0x8004), "TBZ: 32 KiB back");
+    require(!patch_reloc(code, tbz, at + 8 + 2), "a target not on an instruction");
 }
 
 // How wide a value hole's MOVZ/MOVK is: its range's and its type's.
@@ -212,6 +270,7 @@ int main() {
     LLVMInitializeAArch64AsmParser();
     Compiler compiler;
     require(compiler.init(2, 2, /*split=*/true, kStencilTripleA64), "an AArch64 stencil compiler");
+    require(compiler.split(), "the splitter on for AArch64 stencils");
 
     // R0 += 2: the flags, the loop bottoms' compares with the PC, the
     // hardware loop's step on a rare path; it goes on to the next packet.
@@ -222,22 +281,30 @@ int main() {
     // The PC + 2 its hardware loop step is given wraps (an i32's two
     // unchecked halves): 0xfffffffe + 2 is 0.
     bool wraps = false;
-    for (const bcore_cp::Reloc& r : add.relocs) wraps |= r.hole == kHolePc && r.addend == 2;
+    for (const auto* relocs : {&add.relocs, &add.cold_relocs})
+        for (const bcore_cp::Reloc& r : *relocs) wraps |= r.hole == kHolePc && r.addend == 2;
     require(wraps, "a PC + 2");
+    require(!add.cold.empty(), "the hardware loop's step in the cold part");
     check_patch(add, 0xfffffffe);
     check_patch(add, 0xffa01234);  // L1 instruction SRAM, op1emu's code
     // R0 = [P0]: a load, the slow path a BL to mem_read32's helper jump.
     const Code load = stencil16(compiler, 0x9100);
     check_relocs(load, "R0 = [P0]");
+    // Which is cold, beside the hot part's fast path.
+    require(!load.cold.empty() && branches_to_cold(load), "the load's slow path in its cold part");
     bool calls = false;
-    for (const bcore_cp::Reloc& r : load.relocs)
-        calls |= r.hole == kHoleHelper + 2 && (insn_at(load, r.offset) & 0xfc000000u) == 0x94000000u;
-    require(calls, "a BL to mem_read32");
+    for (const bcore_cp::Reloc& r : load.cold_relocs) {
+        uint32_t insn;
+        memcpy(&insn, load.cold.data() + r.offset, 4);
+        calls |= r.hole == kHoleHelper + 2 && (insn & 0xfc000000u) == 0x94000000u;
+    }
+    require(calls, "a BL to mem_read32 in the cold part");
     check_patch(load, 0x89abcdef);
     check_patch(load, 0xfffffffe);
     check_narrow_store(compiler, 0x9a00, "mem_write8");   // B[P0++] = R0
     check_narrow_store(compiler, 0x9600, "mem_write16");  // W[P0++] = R0
     check_branch();
+    check_conditional();
     check_widths(compiler);
     printf("cp a64 test passed\n");
     return 0;

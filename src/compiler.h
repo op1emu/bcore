@@ -57,7 +57,8 @@ public:
     // relocations, which on x86-64 fold each hole into the instruction that
     // uses it, and no vectorizers (whose constants would be data). On AArch64
     // X18 is kept for the platform (Apple's ABI) and atomics are not called
-    // out of line, and the splitter stays off.
+    // out of line. The splitter is on for stencils of any architecture, and
+    // off on hosts other than x86-64.
     bool init(int opt_level, int codegen_level, bool split = true, const char* stencil_triple = nullptr);
     // Before init: a CPU and its features (SubtargetFeatures text, "+avx2,...")
     // in place of the host's, for code that is compiled here and never run
@@ -83,6 +84,8 @@ public:
     // SteadyLoopSkip on loop blocks (steady_skip.h): 0 off, 1 dry, 2 on.
     void set_steady_skip(int mode) { steady_skip_ = mode; }
 
+    // Whether the splitter is on (init's split, as the target allows).
+    bool split() const { return split_; }
     // What modules must carry for this compiler (BBTranslator::setModuleTarget).
     std::string dataLayout() const;
     std::string targetTriple() const;
