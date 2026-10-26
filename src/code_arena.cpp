@@ -14,6 +14,9 @@ constexpr size_t kAlign = size_t(2) << 20;
 constexpr uintptr_t kSlack = 4096;
 }
 
+static_assert(CodeArena::kDefaultLayout == CodeArena::Layout::Split || CodeArena::kDefaultHalf <= CodeArena::kBranchReach,
+              "a shared arena's code lies within B/BL's reach");
+
 #if defined(__APPLE__) && defined(__aarch64__)
 // No page there is writable and executable at once but in a MAP_JIT mapping,
 // which a thread sees as one or the other (JitWriteScope). Both halves are
@@ -21,7 +24,7 @@ constexpr uintptr_t kSlack = 4096;
 // the data half after it alone was not kept: every object then had pages
 // of its own), the data half then replaced in place by a plain mapping,
 // which this thread writes at any time.
-std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
+std::shared_ptr<CodeArena> CodeArena::create(size_t half, Layout layout) {
     void* raw = mmap(nullptr, 2 * half, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
     if (raw == MAP_FAILED) return nullptr;
     auto* base = static_cast<uint8_t*>(raw);
@@ -30,7 +33,7 @@ std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
         munmap(raw, 2 * half);
         return nullptr;
     }
-    return std::shared_ptr<CodeArena>(new CodeArena(base, 2 * half, half));
+    return std::shared_ptr<CodeArena>(new CodeArena(base, 2 * half, half, layout));
 }
 
 namespace {
@@ -45,7 +48,7 @@ JitWriteScope::~JitWriteScope() {
     if (--write_depth == 0) pthread_jit_write_protect_np(1);
 }
 #else
-std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
+std::shared_ptr<CodeArena> CodeArena::create(size_t half, Layout layout) {
     const size_t size = 2 * half;
     void* raw = mmap(nullptr, size + kAlign, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (raw == MAP_FAILED) return nullptr;
@@ -59,40 +62,56 @@ std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
         munmap(base, size);
         return nullptr;
     }
-    return std::shared_ptr<CodeArena>(new CodeArena(base, size, half));
+    return std::shared_ptr<CodeArena>(new CodeArena(base, size, half, layout));
 }
 
 JitWriteScope::JitWriteScope() = default;
 JitWriteScope::~JitWriteScope() = default;
 #endif
 
-CodeArena::CodeArena(uint8_t* base, size_t size, size_t half)
-    : base_(base), size_(size),
-      hot_{base, base + half / 4 * 3}, cold_{base + half / 4 * 3, base + half},
+CodeArena::CodeArena(uint8_t* base, size_t size, size_t half, Layout layout)
+    : base_(base), size_(size), code_size_(half), layout_(layout),
+      hot_{base, base + hotSize(half, layout)},
+      cold_{layout == Layout::Split ? base + half / 4 * 3 : base + half, layout == Layout::Split ? base + half : base},
       data_{base + half, base + size} {}
 
 CodeArena::~CodeArena() { munmap(base_, size_); }
 
 bool CodeArena::fits(uintptr_t code, uintptr_t data) const {
-    return code + kSlack <= hot_.left() && code + kSlack <= cold_.left() && data + kSlack <= data_.left();
+    if (data + kSlack > data_.left()) return false;
+    if (layout_ == Layout::Shared) return code + kSlack <= uintptr_t(cold_.next - hot_.next);
+    return code + kSlack <= hot_.left() && code + kSlack <= cold_.left();
 }
 
 uint8_t* CodeArena::allocate(Region region, uintptr_t size, unsigned alignment) {
-    Range& range = region == Region::Hot ? hot_ : region == Region::Cold ? cold_ : data_;
     const uintptr_t align = alignment ? alignment : 1;
+    if (layout_ == Layout::Shared && region == Region::Cold) {
+        // Down from the cold code placed last, as far as the hot code.
+        const uintptr_t top = reinterpret_cast<uintptr_t>(cold_.next);
+        const uintptr_t floor = reinterpret_cast<uintptr_t>(hot_.next);
+        if (size > top - floor) return nullptr;
+        const uintptr_t at = (top - size) & ~(align - 1);
+        if (at < floor) return nullptr;
+        cold_.next = reinterpret_cast<uint8_t*>(at);
+        return cold_.next;
+    }
+    Range& range = region == Region::Hot ? hot_ : region == Region::Cold ? cold_ : data_;
+    // Shared: the hot code goes up as far as the cold code.
+    const uintptr_t end = reinterpret_cast<uintptr_t>(
+        layout_ == Layout::Shared && region == Region::Hot ? cold_.next : range.end);
     const uintptr_t at = (reinterpret_cast<uintptr_t>(range.next) + align - 1) & ~(align - 1);
-    if (at > reinterpret_cast<uintptr_t>(range.end) || size > reinterpret_cast<uintptr_t>(range.end) - at)
-        return nullptr;
+    if (at > end || size > end - at) return nullptr;
     range.next = reinterpret_cast<uint8_t*>(at + size);
     return reinterpret_cast<uint8_t*>(at);
 }
 
 std::shared_ptr<CodeArena> CodeArenaPool::arenaFor(uintptr_t code, uintptr_t data) {
     if (current_ && current_->fits(code, data)) return current_;
-    // Larger than an empty arena (its cold region is a quarter of the code half).
-    if (code + kSlack > half_ / 4 || data + kSlack > half_) return nullptr;
+    // Larger than an empty arena (Split: its cold region is a quarter of the
+    // code half).
+    if (code + kSlack > CodeArena::largestCode(half_, layout_) || data + kSlack > half_) return nullptr;
     if (arenas_ == max_arenas_) return nullptr;
-    auto arena = CodeArena::create(half_);
+    auto arena = CodeArena::create(half_, layout_);
     if (!arena) return nullptr;
     ++arenas_;
     // The previous arena stays mapped while its objects live.
