@@ -86,18 +86,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
 
-# ---- Copy-and-patch stencils (cp_format.h): x86-64 hosts ----
+# ---- Copy-and-patch stencils (cp_format.h): x86-64 and AArch64 hosts ----
 # Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
-# On by default where the stencils run (x86-64); OFF builds the core
-# without them anywhere (Core::set_copy_patch then does nothing).
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+# On by default where the stencils run (x86-64, AArch64); OFF builds the
+# core without them anywhere (Core::set_copy_patch then does nothing).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
     set(BCORE_COPY_PATCH_DEFAULT ON)
 else()
     set(BCORE_COPY_PATCH_DEFAULT OFF)
 endif()
-option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64 only)" ${BCORE_COPY_PATCH_DEFAULT})
+option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64, AArch64)" ${BCORE_COPY_PATCH_DEFAULT})
 if(BCORE_COPY_PATCH AND NOT BCORE_COPY_PATCH_DEFAULT)
-    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 host")
+    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 or AArch64 host")
 endif()
 set(BCORE_CP_SOURCES)
 if(BCORE_COPY_PATCH)
@@ -351,7 +351,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     llvm_map_components_to_libnames(LLVM_VECTORIZE_TEST_LIBS irreader)
     target_link_libraries(bcore-vectorize-count-test PRIVATE ${LLVM_VECTORIZE_TEST_LIBS})
     add_test(NAME bcore-vectorize-count-test-rules COMMAND bcore-vectorize-count-test rules)
-    if(BCORE_COPY_PATCH_DEFAULT)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
         add_test(NAME bcore-vectorize-count-test-pipeline
                  COMMAND bcore-vectorize-count-test pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
     endif()
