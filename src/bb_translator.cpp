@@ -1,4 +1,5 @@
 #include "bb_translator.h"
+#include "block_abi.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -84,25 +85,21 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     if (!data_layout_.empty()) mod->setDataLayout(data_layout_);
     if (!target_triple_.empty()) mod->setTargetTriple(target_triple_);
 
-    // Create function: void bb_0x<pc>(CpuState*, Memory*)
+    // Create function: void bb_0x<pc>(CpuState*, Memory*) (block_abi.h)
     char fname[32];
     snprintf(fname, sizeof(fname), "bb_0x%08x%s%s", pc, careful ? ".careful" : "",
              tier && tier->level == 1 ? ".t1" : "");
 
-    auto* i8ptr = Type::getInt8PtrTy(*ctx);
-    auto* ft = FunctionType::get(Type::getVoidTy(*ctx), {i8ptr, i8ptr}, false);
-    auto* fn = Function::Create(ft, Function::ExternalLinkage, fname, mod.get());
-    fn->setCallingConv(CallingConv::GHC);  // see BbFunc
+    auto* fn = bcore_abi::make_block(*mod, fname);  // see BbFunc
     // Not nounwind: a host's memory callback may throw, and the exception
     // unwinds through generated code to the host's Core::run.
 
     auto* entry = BasicBlock::Create(*ctx, "entry", fn);
     IRBuilder<> builder(entry);
 
-    auto arg_it = fn->arg_begin();
-    Value* cpu_ptr = &*arg_it++;
+    Value* cpu_ptr = bcore_abi::block_cpu(fn);
     cpu_ptr->setName("cpu");
-    Value* mem_ptr = &*arg_it++;
+    Value* mem_ptr = bcore_abi::block_mem(fn);
     mem_ptr->setName("mem");
 
     declare_externs(*mod);
@@ -269,7 +266,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     if (tier && tier->level == 0 && first_entry)
         emit_tier_counter(builder, cpu_ptr, first_entry, tier->counter, threshold);
     // A tier-0 block is compiled with FastISel, which cannot select a
-    // return in the GHC convention: every block that ends in one goes to
+    // return in the blocks' convention: every block that ends in one goes to
     // SelectionDAG instead. One return, one such block.
     if (tier && tier->level == 0) merge_returns(fn);
 
@@ -844,9 +841,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
         if (!chain(total, tail, pc, did_jump_clear)) return;
         auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         commit();
-        auto* call = b.CreateCall(fn->getFunctionType(), next_fn, {real, mem});
-        call->setCallingConv(CallingConv::GHC);
-        call->setTailCallKind(CallInst::TCK_MustTail);
+        bcore_abi::tail_call_block(b, next_fn, real, mem);
         b.CreateRetVoid();
     };
 

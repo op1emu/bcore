@@ -59,6 +59,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include "bb_translator.h"
+#include "block_abi.h"
 #include "compiler.h"
 #include "cp_build.h"
 #include "cp_format.h"
@@ -992,14 +993,13 @@ int main(int argc, char** argv) {
             fn->addFnAttr(Attribute::NoUnwind);
             IRBuilder<> b(BasicBlock::Create(ctx, "entry", fn));
             auto store = [&](Constant* value, size_t offset) {
-                b.CreateStore(value, b.CreateGEP(b.getInt8Ty(), fn->getArg(0), b.getInt64(offset)));
+                b.CreateStore(value, b.CreateGEP(b.getInt8Ty(), bcore_abi::block_cpu(fn), b.getInt64(offset)));
             };
             store(value_hole(mod, kHolePc, 0, 1ull << 32, i32), offsetof(CpuState, pc));
             store(value_hole(mod, kHoleField0, 0, 1ull << 32, i32), offsetof(CpuState, insn_len));
             store(value_hole(mod, kHolePacket, 1, 257, i32), offsetof(CpuState, packets));
-            auto* call = b.CreateCall(code_hole(mod, kExitName), {fn->getArg(0), fn->getArg(1)});
-            call->setCallingConv(CallingConv::GHC);
-            call->setTailCallKind(CallInst::TCK_MustTail);
+            Function* exit = code_hole(mod, kExitName);
+            bcore_abi::tail_call_block(b, exit, bcore_abi::block_cpu(fn), bcore_abi::block_mem(fn));
             b.CreateRetVoid();
         }
         // A parallel packet's tail, without and with the CEC check: the same

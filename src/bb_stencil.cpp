@@ -3,6 +3,7 @@
 // tools/stencilgen.cpp compiles and takes the code and relocations of.
 
 #include "bb_translator.h"
+#include "block_abi.h"
 
 #include <cstddef>
 #include <vector>
@@ -20,13 +21,7 @@
 
 using namespace llvm;
 
-Function* BBTranslator::declare_block(Module& mod, const char* name) {
-    auto* i8ptr = Type::getInt8PtrTy(mod.getContext());
-    auto* ft = FunctionType::get(Type::getVoidTy(mod.getContext()), {i8ptr, i8ptr}, false);
-    auto* fn = Function::Create(ft, Function::ExternalLinkage, name, mod);
-    fn->setCallingConv(CallingConv::GHC);
-    return fn;
-}
+Function* BBTranslator::declare_block(Module& mod, const char* name) { return bcore_abi::make_block(mod, name); }
 
 namespace {
 
@@ -45,9 +40,7 @@ void tail_call(BasicBlock* block, Function* next) {
     auto* fn = block->getParent();
     block->getTerminator()->eraseFromParent();
     IRBuilder<> b(block);
-    auto* call = b.CreateCall(next, {fn->getArg(0), fn->getArg(1)});
-    call->setCallingConv(CallingConv::GHC);
-    call->setTailCallKind(CallInst::TCK_MustTail);
+    bcore_abi::tail_call_block(b, next, bcore_abi::block_cpu(fn), bcore_abi::block_mem(fn));
     b.CreateRetVoid();
 }
 
@@ -63,10 +56,10 @@ BBTranslator::StencilLift BBTranslator::translate_stencil(Module& mod, const cha
     auto& ctx = mod.getContext();
     declare_externs(mod);
     auto* fn = stencil_function(mod, name);
-    Value* cpu = fn->getArg(0);
+    Value* cpu = bcore_abi::block_cpu(fn);
     auto* entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> builder(entry);
-    LiftVisitor visitor(builder, cpu, fn->getArg(1), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
+    LiftVisitor visitor(builder, cpu, bcore_abi::block_mem(fn), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
     visitor.set_careful(true);
     visitor.set_idle_waits(idle_waits_);
     visitor.set_stencil(holes.pc, pc, holes.fields);
@@ -164,7 +157,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil_body(Module& mod, cons
     auto* fn = stencil_function(mod, name);
     auto* entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> builder(entry);
-    LiftVisitor visitor(builder, fn->getArg(0), fn->getArg(1), &mod, mem_, unlimited_, fastmem_, fast_base_,
+    LiftVisitor visitor(builder, bcore_abi::block_cpu(fn), bcore_abi::block_mem(fn), &mod, mem_, unlimited_, fastmem_, fast_base_,
                         mem_->rawmem_limit());
     visitor.set_careful(true);
     visitor.set_stencil(holes.pc, pc, holes.fields);
@@ -179,7 +172,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil_body(Module& mod, cons
     out.terminated = !legal || visitor.is_terminated();
     BasicBlock* cont = out.terminated ? nullptr : way_on(builder, fn);
     if (!cont && !builder.GetInsertBlock()->getTerminator()) builder.CreateRetVoid();
-    finish_stencil(fn, fn->getArg(0), nullptr, nullptr, cont, holes, nullptr, false);
+    finish_stencil(fn, bcore_abi::block_cpu(fn), nullptr, nullptr, cont, holes, nullptr, false);
     out.fn = fn;
     out.bytes = 4;
     out.cycles = visitor.accesses_cycles();
@@ -195,10 +188,10 @@ BBTranslator::StencilLift BBTranslator::translate_slot_stencil(Module& mod, cons
     auto& ctx = mod.getContext();
     declare_externs(mod);
     auto* fn = stencil_function(mod, name);
-    Value* cpu = fn->getArg(0);
+    Value* cpu = bcore_abi::block_cpu(fn);
     auto* entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> builder(entry);
-    LiftVisitor visitor(builder, cpu, fn->getArg(1), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
+    LiftVisitor visitor(builder, cpu, bcore_abi::block_mem(fn), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
     visitor.set_careful(true);
     visitor.set_idle_waits(idle_waits_);
     visitor.set_stencil(holes.pc, pc, holes.fields);
@@ -229,7 +222,7 @@ BBTranslator::StencilLift BBTranslator::translate_slot_stencil(Module& mod, cons
 Function* BBTranslator::emit_slot_commit(Module& mod, const char* name, int slot,
                                          const std::vector<LiftVisitor::SlotWrite>& writes, Function* cont) {
     auto* fn = stencil_function(mod, name);
-    Value* cpu = fn->getArg(0);
+    Value* cpu = bcore_abi::block_cpu(fn);
     auto* entry = BasicBlock::Create(mod.getContext(), "entry", fn);
     IRBuilder<> b(entry);
     auto* i32 = b.getInt32Ty();
@@ -256,10 +249,10 @@ BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, con
     auto& ctx = mod.getContext();
     declare_externs(mod);
     auto* fn = stencil_function(mod, name);
-    Value* cpu = fn->getArg(0);
+    Value* cpu = bcore_abi::block_cpu(fn);
     auto* entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> builder(entry);
-    LiftVisitor visitor(builder, cpu, fn->getArg(1), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
+    LiftVisitor visitor(builder, cpu, bcore_abi::block_mem(fn), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
     visitor.set_careful(true);
     visitor.set_idle_waits(idle_waits_);
     visitor.set_stencil(holes.pc, pc, holes.fields);
@@ -286,7 +279,7 @@ Function* BBTranslator::emit_stencil_prologue(Module& mod, const char* name, Con
                                               Constant* count_offset, Constant* threshold, bool host_cycles,
                                               Function* cont) {
     auto* fn = stencil_function(mod, name);
-    Value* cpu = fn->getArg(0);
+    Value* cpu = bcore_abi::block_cpu(fn);
     auto* first = BasicBlock::Create(mod.getContext(), "first", fn);
     IRBuilder<> b(first);
     b.CreateUnreachable();
@@ -298,7 +291,7 @@ Function* BBTranslator::emit_stencil_prologue(Module& mod, const char* name, Con
 
 Function* BBTranslator::emit_stencil_exit(Module& mod, const char* name, Constant* block_pc, Function* self) {
     auto* fn = stencil_function(mod, name);
-    Value* cpu = fn->getArg(0);
+    Value* cpu = bcore_abi::block_cpu(fn);
     auto* entry = BasicBlock::Create(mod.getContext(), "entry", fn);
     IRBuilder<> b(entry);
     b.CreateRetVoid();
@@ -314,6 +307,6 @@ Function* BBTranslator::emit_stencil_exit(Module& mod, const char* name, Constan
         tail_call(again, self);
     }
     if (chaining_ && unlimited_)
-        emit_chain_exit(b, fn, cpu, cpu, fn->getArg(1), 0, again, again, nullptr, nullptr, again ? block_pc : nullptr);
+        emit_chain_exit(b, fn, cpu, cpu, bcore_abi::block_mem(fn), 0, again, again, nullptr, nullptr, again ? block_pc : nullptr);
     return fn;
 }

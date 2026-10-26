@@ -1,5 +1,6 @@
 #include "steady_skip.h"
 #include "guest_memory.h"
+#include "block_abi.h"
 
 #include "cpu_state.h"
 
@@ -256,7 +257,7 @@ void transform(Loop& loop, ScalarEvolution& se, Value* cpu, const DataLayout& la
 
 PreservedAnalyses SteadyLoopSkip::run(Function& f, FunctionAnalysisManager& am) {
     if (f.arg_empty()) return PreservedAnalyses::all();
-    Value* cpu = f.getArg(0);
+    Value* cpu = bcore_abi::block_cpu(&f);
     auto& li = am.getResult<LoopAnalysis>(f);
     auto& dt = am.getResult<DominatorTreeAnalysis>(f);
     auto& se = am.getResult<ScalarEvolutionAnalysis>(f);
