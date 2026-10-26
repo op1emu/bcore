@@ -13,6 +13,11 @@ inputs:
       The ccache cache's key prefix, one per build configuration (with llvm);
       none for a job that compiles nothing it keeps
     default: ""
+  ccache-save:
+    description: >
+      Save the ccache cache at the job's end; "false" for jobs that build a
+      part of what another job of the same key builds, so that the whole is saved
+    default: "true"
   toolchain:
     description: Install the Blackfin toolchain and add it to PATH
     default: "false"
@@ -63,8 +68,18 @@ runs:
     # (cmake/StencilCache.cmake): the same generator relinked from them
     # copies its stencils instead of building them for minutes.
     - name: Cache ccache
-      if: inputs.llvm == 'true' && inputs.ccache-key != ''
+      if: inputs.llvm == 'true' && inputs.ccache-key != '' && inputs.ccache-save == 'true'
       uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/ccache
+          ~/.cache/bcore-stencils
+        key: ccache-${{ inputs.ccache-key }}-${{ github.sha }}
+        restore-keys: ccache-${{ inputs.ccache-key }}-
+
+    - name: Restore ccache
+      if: inputs.llvm == 'true' && inputs.ccache-key != '' && inputs.ccache-save != 'true'
+      uses: actions/cache/restore@v4
       with:
         path: |
           ~/.cache/ccache
