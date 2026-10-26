@@ -224,9 +224,10 @@ namespace {
 // "bb_0x%08x.careful" (a block compiled again after its loop-bottom guard
 // failed), either with ".t1" (a tier-0 block compiled again at tier 1,
 // Core::set_tiering), and any of these with ".cold", the symbol the machine
-// function splitter gives the block's cold part (cold set). Returns false for
-// any other symbol.
+// function splitter gives the block's cold part (cold set), each also with
+// Mach-O's global prefix "_". Returns false for any other symbol.
 bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc, bool& cold) {
+    if (name.startswith("_bb_0x")) name = name.drop_front();
     if (!name.startswith("bb_0x")) return false;
     llvm::StringRef hex = name.drop_front(5);
     cold = hex.consume_back(".cold");

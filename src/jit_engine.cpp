@@ -1,6 +1,7 @@
 #include "jit_engine.h"
 #include "block_abi.h"
 #include "helper_abi.h"
+#include "host_bridge.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -47,6 +48,7 @@ bool JitEngine::init() {
         return false;
     }
 
+    jtmb_or_err->getOptions().SwiftAsyncFramePointer = llvm::SwiftAsyncFramePointerMode::Never;
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(std::move(*jtmb_or_err));
     // LLJIT's default object layer (LLJIT::createObjectLinkingLayer), with
@@ -113,8 +115,9 @@ bool JitEngine::init() {
     std::vector<const char*> names;
     std::vector<void*> targets;
     for (const auto& [name, fn] : helpers) {
+        void* caught = bcore_abi::kHelpersCatch ? bcore_bridge::wrapper(name) : nullptr;
         names.push_back(name);
-        targets.push_back(fn);
+        targets.push_back(caught ? caught : fn);
     }
     std::vector<void*> trampolines(names.size());
     if (!makeTrampolines(names.size(), names.data(), targets.data(), trampolines.data())) return false;
@@ -172,6 +175,7 @@ bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const*
         if (ft->getReturnType()->isVoidTy()) b.CreateRetVoid();
         else b.CreateRet(call);
     }
+    JitWriteScope write;  // the lookups link them
     if (auto err = jit_->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx)))) {
         llvm::errs() << "Failed to add the trampolines: " << err << "\n";
         return false;
@@ -205,6 +209,7 @@ bool JitEngine::defineEnter() {
     llvm::Value* mem = &*args;
     bcore_abi::call_block(b, block, cpu, mem);
     b.CreateRetVoid();
+    JitWriteScope write;  // the lookup links it
     if (auto err = jit_->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx)))) {
         llvm::errs() << "Failed to add bcore_enter: " << err << "\n";
         return false;
@@ -220,6 +225,7 @@ bool JitEngine::defineEnter() {
 
 bool JitEngine::addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
                           uint32_t fallthrough_pc, const std::string& name) {
+    JitWriteScope write;  // the lookup links it
     if (auto err = jit_->addObjectFile(std::move(object))) {
         llvm::errs() << "Failed to add object for PC=0x" << llvm::format_hex(pc, 8)
                      << ": " << err << "\n";

@@ -2,6 +2,7 @@
 """Tests of capped_run.run_capped, with sh and coreutils for the runs:
 python3 -m unittest tests/test_capped_run.py"""
 
+import subprocess
 import sys
 import threading
 import time
@@ -12,15 +13,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 from capped_run import run_capped  # noqa: E402
 
 
+def state(pid: int) -> str:
+    """pid's process state ("Z" for a zombie), or "" if there is no such
+    process: from /proc on Linux, from ps elsewhere (macOS)."""
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                return stat.read().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):  # gone before the open, or before the read
+            return ""
+    ps = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return ps.stdout.strip()[:1]
+
+
 def gone(pid: int, within: float = 2.0) -> bool:
     """Whether pid has stopped running (a zombie no longer runs) in time."""
     end = time.monotonic() + within
     while time.monotonic() < end:
-        try:
-            with open(f"/proc/{pid}/stat") as stat:
-                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
-                    return True
-        except (FileNotFoundError, ProcessLookupError):  # gone before the open, or before the read
+        if state(pid) in ("", "Z"):
             return True
         time.sleep(0.05)
     return False

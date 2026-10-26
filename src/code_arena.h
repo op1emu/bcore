@@ -24,6 +24,9 @@
 // references between an object's sections need. Pages are touched, not
 // committed, as they fill.
 //
+// On Apple silicon the code half is a MAP_JIT mapping, which a thread may
+// write only within a JitWriteScope and run only outside one.
+//
 // Single-threaded, like all of bcore's compilation.
 class CodeArena {
 public:
@@ -56,6 +59,18 @@ private:
     Range hot_;
     Range cold_;
     Range data_;
+};
+
+// Writes to an arena's code by this thread, for as long as it lives (scopes
+// nest): what loads code into an engine, or copies code into an arena, makes
+// one. Nothing elsewhere: a MAP_JIT page is writable or executable per
+// thread, and no code runs while a thread may write.
+class JitWriteScope {
+public:
+    JitWriteScope();
+    ~JitWriteScope();
+    JitWriteScope(const JitWriteScope&) = delete;
+    JitWriteScope& operator=(const JitWriteScope&) = delete;
 };
 
 // The arenas of one JIT engine. An object goes whole into the current arena

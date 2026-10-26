@@ -1,6 +1,9 @@
 #include "code_arena.h"
 
 #include <sys/mman.h>
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <pthread.h>
+#endif
 
 #include <llvm/Support/Memory.h>
 
@@ -11,6 +14,37 @@ constexpr size_t kAlign = size_t(2) << 20;
 constexpr uintptr_t kSlack = 4096;
 }
 
+#if defined(__APPLE__) && defined(__aarch64__)
+// No page there is writable and executable at once but in a MAP_JIT mapping,
+// which a thread sees as one or the other (JitWriteScope). Both halves are
+// mapped as one MAP_JIT range (MAP_JIT takes no MAP_FIXED, and a hint for
+// the data half after it alone was not kept: every object then had pages
+// of its own), the data half then replaced in place by a plain mapping,
+// which this thread writes at any time.
+std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
+    void* raw = mmap(nullptr, 2 * half, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (raw == MAP_FAILED) return nullptr;
+    auto* base = static_cast<uint8_t*>(raw);
+    void* data = mmap(base + half, half, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    if (data != base + half) {
+        munmap(raw, 2 * half);
+        return nullptr;
+    }
+    return std::shared_ptr<CodeArena>(new CodeArena(base, 2 * half, half));
+}
+
+namespace {
+thread_local unsigned write_depth = 0;
+}
+
+JitWriteScope::JitWriteScope() {
+    if (write_depth++ == 0) pthread_jit_write_protect_np(0);
+}
+
+JitWriteScope::~JitWriteScope() {
+    if (--write_depth == 0) pthread_jit_write_protect_np(1);
+}
+#else
 std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
     const size_t size = 2 * half;
     void* raw = mmap(nullptr, size + kAlign, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -27,6 +61,10 @@ std::shared_ptr<CodeArena> CodeArena::create(size_t half) {
     }
     return std::shared_ptr<CodeArena>(new CodeArena(base, size, half));
 }
+
+JitWriteScope::JitWriteScope() = default;
+JitWriteScope::~JitWriteScope() = default;
+#endif
 
 CodeArena::CodeArena(uint8_t* base, size_t size, size_t half)
     : base_(base), size_(size),

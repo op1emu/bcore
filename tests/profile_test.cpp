@@ -236,7 +236,8 @@ static uint64_t hash_of_block(const std::string& ir) {
         auto name = symbol.getName();
         auto section = symbol.getSection();
         auto address = symbol.getAddress();
-        if (!name || !section || !address || *name != "bb_0x00000000") continue;
+        // Mach-O names globals with a leading "_".
+        if (!name || !section || !address || (*name != "bb_0x00000000" && *name != "_bb_0x00000000")) continue;
         return bcore_profile::hash_material(
             bcore_profile::object_code_material(**file, **section, *address - (*section)->getAddress(), size));
     }
