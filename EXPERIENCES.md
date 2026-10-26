@@ -983,3 +983,40 @@ execution -20.3%. Work the same at every mark.
   host code catch it there, as the copy-and-patch tier's always did
   (host_bridge.h): the block stops, Core::run throws it again.
   BCORE_HELPERS_CATCH=1 does the same on x86-64, where ctest passes with it.
+
+## Copy-and-patch on AArch64
+
+- The same stencil set on Linux and macOS: ELF code from the generic CPU
+  with X18 kept (Apple's ABI), narrow helper parameters zeroext (already),
+  no variadic helper. The translator copies bytes and fills its own
+  relocation records, so nothing of the object format reaches the host;
+  CPython's JIT builds Mach-O stencils for macOS instead, and pays for it
+  (Mach-O has no 19-bit branch relocation, its addends come in separate
+  ARM64_RELOC_ADDEND records, and its LOH hints break instruction pairs).
+- Value holes: the small code model reaches a symbol PC-relatively (ADRP +
+  ADD), so an absolute value 4 GiB away from the code is out of reach, and
+  the large model spends four MOVZ/MOVK on every hole. After the IR
+  pipeline each use of a hole is an inline-asm MOVZ (+ MOVK) with
+  R_AARCH64_MOVW_UABS_G* relocations, as wide as its range needs: one
+  instruction for the packet's index and the register offsets, two for a
+  PC or a field. Made at every use, the set was 21.8 MB and 1.38 M
+  relocations; reusing one that dominates the use (the loop bottoms'
+  compares each take the PC), 19.7 MB and 0.87 M. Coverage is the x86-64
+  set's: every 16-bit encoding, 245980 of 246012 32-bit keys.
+- B/BL reach 128 MiB and an arena's hot region is 384 MiB: its helper jumps
+  and exits are copied again beside a block that has none within 120 MiB
+  (as Dynarmic keeps its helpers' preludes within reach, and CPython puts a
+  trampoline per trace). The jumps go through x16 (AAPCS64's veneer
+  register; CPython used x8 until it broke BTI hosts, gh-157510).
+- A set made on x86-64 (bcore-stencilgen --target aarch64) is not the
+  native one byte for byte: 5197 of 89127 stencils have two independent
+  instructions in another order (LLVM built for each host schedules them
+  differently), the same on Linux arm64 and on macOS. It is for looking at;
+  the library takes only its own host's set.
+- No machine function splitting: LLVM 15's AArch64 backend relaxes no
+  branch to another section (CONDBR19 reaches 1 MiB, TSTBR14 32 KiB; LLVM
+  18 relaxes them). The stencils keep their cold paths inline.
+- Tier 0 only (threshold 1e9), 100 test programs run one after another:
+  stencils took 0.57 of LLVM's wall time on an Apple M1 runner (4.69 s
+  against 8.23 s) and on a Linux arm64 runner (6.70 against 11.78), as on
+  x86-64 (0.59); every block of the programs was made of stencils.

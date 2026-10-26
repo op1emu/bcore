@@ -77,10 +77,11 @@ wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 15
 ```
 
 **On macOS (Apple silicon):** `brew install llvm@15`, then
-`-DLLVM_DIR=$(brew --prefix llvm@15)/lib/cmake/llvm`. The copy-and-patch tier
-is x86-64 only (`BCORE_COPY_PATCH`), and the perf JIT listener Linux only
-(`BCORE_PERF_JIT_EVENTS`); the rest builds and runs on AArch64 and macOS too
-(CI runs the tests on macos-15).
+`-DLLVM_DIR=$(brew --prefix llvm@15)/lib/cmake/llvm`. Everything builds and
+runs on AArch64 (macOS and Linux) as on x86-64, the copy-and-patch tier too
+(`BCORE_COPY_PATCH`, with stencils for AArch64), but the perf JIT listener,
+which is Linux only (`BCORE_PERF_JIT_EVENTS`); CI runs the tests on macos-15
+and ubuntu-22.04-arm.
 
 **Blackfin cross-toolchain** is searched in this order:
 1. CMake variable `BFIN_TOOLCHAIN_DIR`
