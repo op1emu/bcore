@@ -1,4 +1,5 @@
 #include "jit_engine.h"
+#include "block_abi.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -115,8 +116,8 @@ bool JitEngine::init() {
     return defineEnter();
 }
 
-// void bcore_enter(fn, cpu, mem) { fn(cpu, mem); } with fn in the GHC
-// convention: the only C-ABI frame a run of chained blocks has.
+// void bcore_enter(fn, cpu, mem) { fn(cpu, mem); } with fn in the blocks'
+// convention (block_abi.h): the only C-ABI frame a run of chained blocks has.
 bool JitEngine::defineEnter() {
     auto ctx = std::make_unique<llvm::LLVMContext>();
     auto mod = std::make_unique<llvm::Module>("bcore_enter", *ctx);
@@ -124,7 +125,6 @@ bool JitEngine::defineEnter() {
     mod->setTargetTriple(jit_->getTargetTriple().str());
     auto* ptr = llvm::Type::getInt8PtrTy(*ctx);
     auto* void_ty = llvm::Type::getVoidTy(*ctx);
-    auto* block_ty = llvm::FunctionType::get(void_ty, {ptr, ptr}, false);
     auto* fn = llvm::Function::Create(llvm::FunctionType::get(void_ty, {ptr, ptr, ptr}, false),
                                       llvm::Function::ExternalLinkage, "bcore_enter", mod.get());
     llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
@@ -132,7 +132,7 @@ bool JitEngine::defineEnter() {
     llvm::Value* block = &*args++;
     llvm::Value* cpu = &*args++;
     llvm::Value* mem = &*args;
-    b.CreateCall(block_ty, block, {cpu, mem})->setCallingConv(llvm::CallingConv::GHC);
+    bcore_abi::call_block(b, block, cpu, mem);
     b.CreateRetVoid();
     if (auto err = jit_->addIRModule(llvm::orc::ThreadSafeModule(std::move(mod), std::move(ctx)))) {
         llvm::errs() << "Failed to add bcore_enter: " << err << "\n";
