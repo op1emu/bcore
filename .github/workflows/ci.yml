@@ -143,7 +143,7 @@ jobs:
               -DBCORE_BUILD_PROFILE_TESTS=ON
               -DBCORE_BUILD_FAULT_TESTS=ON
           # The core without the copy-and-patch tier, as hosts other than
-          # x86-64 build it.
+          # x86-64 and AArch64 build it.
           - config: nocp
             shard: 1
             shards: 1
@@ -267,14 +267,14 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 4: macOS on Apple silicon (AArch64, Mach-O, MAP_JIT)
-  # The core without the copy-and-patch tier (x86-64 only). A macOS runner
+  # With the AArch64 stencils (the copy-and-patch tier 0). A macOS runner
   # has three cores, and an account runs five macOS jobs at a time: one
   # runs the C++ tests (from the start), four the emulator suites on
   # test-elfs' programs, about as long as each other (each suite takes ~2
   # min there). Every job builds what it runs, configured alike so that all
-  # share one ccache, the last run's (they run at once): the suites' jobs
-  # build only emu and restore it, the C++ tests' job, which builds
-  # everything, saves it.
+  # share one ccache and stencil cache, the last run's (they run at once):
+  # the suites' jobs build only emu and restore it, the C++ tests' job,
+  # which builds everything, saves it.
   # ──────────────────────────────────────────────────────────────────────────
   macos-unit:
     name: macos (arm64, unit-test)
@@ -294,6 +294,7 @@ jobs:
             -DLLVM_DIR="$BCORE_LLVM_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR="$BCORE_STENCIL_CACHE_DIR" \
             -DBCORE_BUILD_PROFILE_TESTS=ON \
             -DBCORE_BUILD_FAULT_TESTS=ON
 
@@ -325,10 +326,18 @@ jobs:
             b-run: python3 tests/run_packet_count_test.py -t 60 --ignore-list .github/emu-ignore.txt
           - a-name: O1
             a-run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --ignore-list .github/emu-ignore.txt
+            b-name: diff-copy-patch
+            b-run: |
+              python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
           - a-name: diff-tiers
             a-run: |
               python3 -m unittest tests/test_run_diff.py tests/test_capped_run.py
               python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
+            b-name: diff-tiers-ref-light
+            b-run: |
+              python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
                 -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
     steps:
       - uses: actions/checkout@v4
@@ -345,6 +354,7 @@ jobs:
             -DLLVM_DIR="$BCORE_LLVM_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR="$BCORE_STENCIL_CACHE_DIR" \
             -DBCORE_BUILD_PROFILE_TESTS=ON \
             -DBCORE_BUILD_FAULT_TESTS=ON
 
@@ -365,6 +375,106 @@ jobs:
       - name: ${{ matrix.b-name }}
         if: matrix.b-name && (success() || failure())
         run: ${{ matrix.b-run || 'true' }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 4b: Linux on AArch64 (ELF, no MAP_JIT): the AArch64 stencils on
+  # another host than Apple's. Two jobs run the C++ tests (every other one,
+  # the stencils' differential test too), two the emulator suites that run
+  # the copy-and-patch tier 0, on test-elfs' programs. Shared caches as
+  # macOS's (both test jobs save; either is a whole build).
+  # ──────────────────────────────────────────────────────────────────────────
+  linux-arm64-unit:
+    name: linux (arm64, unit-test ${{ matrix.shard }}/2)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          llvm: "true"
+          ccache-key: linux-arm64
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR="$BCORE_LLVM_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR="$BCORE_STENCIL_CACHE_DIR" \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+
+      - name: ccache statistics
+        run: ccache -s
+
+      - name: C++ tests
+        run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure -I ${{ matrix.shard }},,2
+
+  linux-arm64-emu:
+    name: linux (arm64, ${{ matrix.a-name }} + ${{ matrix.b-name }})
+    needs: test-elfs
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - a-name: diff-copy-patch
+            a-run: |
+              python3 tests/run_diff_test.py --matrix copy-patch --only tier0,t2-bg1 --count-packets \
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
+            b-name: O1-page-table-chain
+            b-run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
+          - a-name: diff-tiers-ref-light
+            a-run: |
+              python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
+                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
+            b-name: packet-count
+            b-run: python3 tests/run_packet_count_test.py -t 60 --ignore-list .github/emu-ignore.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          llvm: "true"
+          ccache-key: linux-arm64
+          ccache-save: "false"
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR="$BCORE_LLVM_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR="$BCORE_STENCIL_CACHE_DIR" \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN) --target emu
+
+      - name: ccache statistics
+        run: ccache -s
+
+      - name: Download test programs
+        uses: actions/download-artifact@v4
+        with:
+          name: test-elfs
+          path: build/test_linked/
+
+      - name: ${{ matrix.a-name }}
+        run: ${{ matrix.a-run }}
+      - name: ${{ matrix.b-name }}
+        if: success() || failure()
+        run: ${{ matrix.b-run }}
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 5: Disassembler comparison test and benchmark, a few seconds each
