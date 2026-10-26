@@ -1,7 +1,7 @@
 // bcore-stencilgen: the stencils of the copy-and-patch tier 0 (cp_format.h),
 // built from the lifter at build time.
 //
-//   bcore-stencilgen OUT_DIR [--jobs N] [--target x86_64|aarch64]
+//   bcore-stencilgen OUT_DIR [--jobs N] [--target x86_64|aarch64] [--no-split]
 //
 // writes OUT_DIR/cp_stencils.bin (the code), cp_tables.bin (the big tables)
 // and cp_stencils.inc (the rest of the tables, which cp_stencils.cpp includes) and cp_stencils.txt (a report: counts, sizes
@@ -238,6 +238,9 @@ bool pick_regs(uint32_t insn, const SelectedInfo& info, const std::vector<std::p
 
 // The target the stencils are compiled for (--target): this host's by default.
 const char* g_triple = kStencilTripleHost;
+// Whether the splitter moves their cold paths apart (--no-split: not, as a
+// baseline to measure the split against).
+bool g_split = true;
 
 // Its LLVM target, with the assembler parser the AArch64 holes' inline
 // assembly needs (materialize_holes); false if this build has none.
@@ -271,7 +274,7 @@ class Worker {
 public:
     explicit Worker(const char* triple = g_triple) : translator_(&memory_) {
         translator_.set_lazy_state(true);
-        compiler_.init(2, 2, /*split=*/true, triple);
+        compiler_.init(2, 2, g_split, triple);
     }
 
     // Lifts item at pc into mod as `name`; false with item.error set if the
@@ -738,13 +741,18 @@ void probe_body(Worker& worker, const std::vector<Pattern>& patterns, SelectedIn
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s OUT_DIR [--jobs N] [--target x86_64|aarch64]\n", argv[0]);
+        fprintf(stderr, "usage: %s OUT_DIR [--jobs N] [--target x86_64|aarch64] [--no-split]\n", argv[0]);
         return 2;
     }
     const std::string out_dir = argv[1];
     unsigned jobs = std::max(1u, std::thread::hardware_concurrency());
     long dump = -1;  // --dump WORD: print a 16-bit word's lifts at both PCs, and stop
-    for (int i = 2; i + 1 < argc; ++i) {
+    for (int i = 2; i < argc; ++i) {
+        if (!strcmp(argv[i], "--no-split")) {
+            g_split = false;
+            continue;
+        }
+        if (i + 1 == argc) break;
         if (!strcmp(argv[i], "--jobs")) jobs = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--dump")) dump = strtol(argv[++i], nullptr, 0);
         else if (!strcmp(argv[i], "--target")) {

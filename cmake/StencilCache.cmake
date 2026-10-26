@@ -1,10 +1,10 @@
 # Runs bcore-stencilgen, or copies what the same generator built before.
 #
-#   cmake -DGEN=<bcore-stencilgen> -DOUT=<cp_gen> -DCACHE=<dir> -P StencilCache.cmake
+#   cmake -DGEN=<bcore-stencilgen> -DOUT=<cp_gen> -DCACHE=<dir> [-DARGS=<its arguments>] -P StencilCache.cmake
 #
-# The key is the generator's own SHA-256: anything that changes the stencils
-# (the lifter's sources, a macro, LLVM) changes the binary, so an entry is
-# never stale. A binary that changes for no reason only costs a regeneration.
+# The key is the generator's own SHA-256 (with its arguments, if any):
+# anything that changes the stencils (the lifter's sources, a macro, LLVM)
+# changes the binary, so an entry is never stale. A binary that changes for no reason only costs a regeneration.
 # CACHE keeps the newest entry alone.
 
 cmake_minimum_required(VERSION 3.21)  # file(COPY_FILE ... RESULT)
@@ -17,6 +17,9 @@ endforeach()
 
 set(files cp_stencils.inc cp_stencils.bin cp_tables.bin cp_stencils.txt)
 file(SHA256 "${GEN}" key)
+if(ARGS)
+    string(SHA256 key "${key};${ARGS}")
+endif()
 string(SUBSTRING "${key}" 0 12 short)
 set(entry "${CACHE}/${key}")
 
@@ -46,7 +49,7 @@ if(hit)
 endif()
 
 message(STATUS "stencils: cache miss ${short}")
-execute_process(COMMAND "${GEN}" "${OUT}" RESULT_VARIABLE rc)
+execute_process(COMMAND "${GEN}" "${OUT}" ${ARGS} RESULT_VARIABLE rc)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "bcore-stencilgen failed: ${rc}")
 endif()
