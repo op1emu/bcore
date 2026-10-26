@@ -49,6 +49,12 @@ void require(bool ok, const std::string& why) {
 
 constexpr uint32_t kRam = 0x200000;
 constexpr uint32_t kCode = 0x10000;   // one instruction every 8 bytes from here
+// Or from here (`high`): L1 instruction SRAM, where op1emu's code runs,
+// PCs whose MOVZ/MOVK halves (AArch64) are both set; outside the RAM and
+// the page table, its code fetched from a buffer of its own unlogged.
+constexpr uint32_t kHighCode = 0xffa00000;
+constexpr uint32_t kHighSize = 0x60000;
+uint32_t g_code = kCode;
 constexpr uint32_t kData = 0x180000;  // pointers point here, 64 KiB
 constexpr uint32_t kNoPage = 0x400000;  // and here, where the callbacks answer
 constexpr uint16_t kRts = 0x0010;
@@ -72,6 +78,7 @@ public:
     }
     uint16_t read16(uint32_t addr) const override {
         if (addr < kRam) return FlatMemory::read16(addr);
+        if (addr - kHighCode < kHighSize) return uint16_t(high_[addr - kHighCode] | high_[addr - kHighCode + 1] << 8);
         return uint16_t(note("r16", addr, 0));
     }
     uint32_t read32(uint32_t addr) const override {
@@ -84,6 +91,11 @@ public:
     }
     void write16(uint32_t addr, uint16_t v) override {
         if (addr < kRam) return FlatMemory::write16(addr, v);
+        if (addr - kHighCode < kHighSize) {
+            high_[addr - kHighCode] = uint8_t(v);
+            high_[addr - kHighCode + 1] = uint8_t(v >> 8);
+            return;
+        }
         note("w16", addr, v);
     }
     void write32(uint32_t addr, uint32_t v) override {
@@ -104,6 +116,7 @@ private:
         return addr * 0x9e3779b1u;
     }
     CpuState* cpu_;
+    std::vector<uint8_t> high_ = std::vector<uint8_t>(kHighSize + 2);
 };
 
 struct Side {
@@ -170,7 +183,7 @@ void random_state(CpuState& cpu, std::mt19937& rng, uint32_t pc) {
     // 0, 1 or more.
     for (int i = 0; i < 2; ++i) {
         cpu.lb[i] = rng() % 4 == 0 ? pc : 0x9000;
-        cpu.lt[i] = kCode + 8 * (rng() % 64);
+        cpu.lt[i] = g_code + 8 * (rng() % 64);
         cpu.lc[i] = rng() % 3 == 0 ? 0 : rng() % 3 == 0 ? 1 : 2 + rng() % 5;
     }
 }
@@ -309,9 +322,14 @@ uint64_t hash_data(const TraceMemory& mem) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // [STRIDE [OFFSET]] [parallel N | clobber N]: every STRIDE-th
+    // [STRIDE [OFFSET]] [parallel N | clobber N] [high]: every STRIDE-th
     // instruction from OFFSET; N random parallel packets alone; or every
-    // STRIDE-th instruction and N parallel packets, callbacks clobbering.
+    // STRIDE-th instruction and N parallel packets, callbacks clobbering;
+    // with `high`, the code at kHighCode.
+    if (argc > 1 && !strcmp(argv[argc - 1], "high")) {
+        g_code = kHighCode;
+        --argc;
+    }
     const unsigned stride = argc > 1 ? std::max(1, atoi(argv[1])) : 1;
     const bool parallel_only = argc > 2 && !strcmp(argv[2], "parallel");
     const bool clobbers = argc > 2 && !strcmp(argv[2], "clobber");
@@ -337,7 +355,7 @@ int main(int argc, char** argv) {
         const size_t end = std::min(todo.size(), begin + kChunk);
         for (size_t i = begin; i < end; ++i) {
             const Instruction& in = todo[i];
-            const uint32_t pc = kCode + 16 * uint32_t(i - begin);
+            const uint32_t pc = g_code + 16 * uint32_t(i - begin);
             for (Side* side : {&cp, &llvm}) {
                 for (int w = 0; w < in.len / 2; ++w)
                     side->mem->write16(pc + 2 * w, uint16_t(in.insn >> (16 * (in.len / 2 - 1 - w))));

@@ -42,6 +42,7 @@ struct Outcome {
     std::vector<uint8_t> state;  // CpuState up to the execution state
     std::vector<uint8_t> data;
     BcoreStats stats;  // not compared
+    unsigned support_sets = 0;  // Core::copy_patch_support_sets, not compared
     bool operator==(const Outcome& o) const { return runs == o.runs && state == o.state && data == o.data; }
 };
 
@@ -64,6 +65,9 @@ struct Mode {
     bool copy_patch = false;
     bool dry = false;
     bool count = true;
+    // Core::set_copy_patch_reach: a block's helper jumps and exits no
+    // further than this (0: the host's reach).
+    size_t reach = 0;
 };
 
 // background: -1 promotions on this thread; else on the worker, published
@@ -80,6 +84,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_tiering(threshold, size_ref);
     core.set_light_tier1(light);
     if (threshold) core.set_copy_patch(mode.copy_patch);
+    core.set_copy_patch_reach(mode.reach);
     if (background >= 0) core.set_tier_background(true, uint64_t(background));
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
@@ -97,6 +102,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     out.state.assign(bytes, bytes + offsetof(CpuState, insn_len));
     out.data.assign(mem.raw(), mem.raw() + 0x4000);
     out.stats = core.stats();
+    out.support_sets = core.copy_patch_support_sets();
     return out;
 }
 
@@ -481,13 +487,16 @@ int main() {
         {"stencils", true, true},
         {"stencils dry", true, true, true},
         {"stencils uncounted", true, true, false, false},
+        // Helper jumps and exits for every block or so (far from the
+        // first, as on AArch64 once an arena holds 120 MiB).
+        {"stencils near", true, true, false, true, 64},
     };
     unsigned compared = 0;
-    uint64_t promoted = 0, overflows = 0, background_promoted = 0, stencil_blocks = 0;
+    uint64_t promoted = 0, overflows = 0, background_promoted = 0, stencil_blocks = 0, near_sets = 0;
     for (const Case& c : cases)
         for (int opt : {0, 1, 2})
         for (const Mode& mode : modes) {
-            if ((mode.dry || !mode.count) && opt != 1) continue;
+            if ((mode.dry || !mode.count || mode.reach) && opt != 1) continue;
             const Outcome want = run(c, opt, 0, -1, mode);
             // Thresholds with and without a size_ref (1: a block of n
             // packets n times the threshold), and promotions with the light
@@ -523,6 +532,12 @@ int main() {
                 require(got.stats.promotions_dropped == 0, "a promotion read code its tier-0 block had not");
                 if (background > 0) background_promoted += got.stats.blocks_promoted;
                 stencil_blocks += got.stats.copy_patch_blocks;
+                if (mode.reach && got.stats.copy_patch_blocks > 1 && got.support_sets < 2) {
+                    fprintf(stderr, "FAIL: %s (%s): %llu blocks of stencils share %u set of helper jumps\n", c.name,
+                            mode.name, (unsigned long long)got.stats.copy_patch_blocks, got.support_sets);
+                    return 1;
+                }
+                if (mode.reach) near_sets += got.support_sets;
                 ++compared;
             }
         }
@@ -532,6 +547,7 @@ int main() {
     require(background_promoted > 0, "no block was promoted on the worker");
 #if BCORE_COPY_PATCH_TEST
     require(stencil_blocks > 0, "no tier-0 block was made of stencils");
+    require(near_sets > 0, "no set of helper jumps was made near a block");
 #endif
 #endif
     printf("tier test passed (%u cases, %llu promotions, %llu request overflows)\n", compared,

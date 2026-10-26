@@ -145,13 +145,13 @@ bool JitEngine::init() {
 // that no code model or reach matters). Not nounwind: a host's exception
 // unwinds through a trampoline as through the block that called it. Where
 // the helpers' convention is C's (x86-64), the targets themselves.
-bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out) {
+bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out,
+                                const std::string& prefix) {
     if (bcore_abi::kHelperCC == llvm::CallingConv::C) {
         std::copy(targets, targets + n, out);
         return true;
     }
     auto ctx = std::make_unique<llvm::LLVMContext>();
-    const std::string prefix = "bcore_trampoline.";
     auto mod = std::make_unique<llvm::Module>(prefix, *ctx);
     mod->setDataLayout(jit_->getDataLayout());
     mod->setTargetTriple(jit_->getTargetTriple().str());

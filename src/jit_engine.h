@@ -59,6 +59,15 @@ public:
     // code does (found in review: an arena only the copy-and-patch
     // translator held went with it, under blocks still in the cache).
     std::shared_ptr<CodeArena> codeArena(uintptr_t code);
+    // For each of the n helpers names[i] (helper_abi.h): what generated
+    // code calls for it, in the helpers' convention, which calls targets[i],
+    // a C function of the helper's signature, in out[i]: targets[i] itself
+    // where that convention is C's, else a function prefix + names[i] of
+    // this engine's (init makes them for its blocks with
+    // "bcore_trampoline."; the copy-and-patch tier, for its wrapped helpers,
+    // with a prefix of its own).
+    bool makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out,
+                         const std::string& prefix = "bcore_trampoline.");
     BbFunc lookup(uint32_t pc);
     bool empty() const { return cache_.empty(); }
     // Runs fn (from lookup()) on cpu and mem.
@@ -111,10 +120,6 @@ private:
     std::function<bool(uint32_t)> chain_filter_;
     void publishChain(uint32_t pc, BbFunc fn);
     bool defineEnter();
-    // For each of the n helpers names[i] (helper_abi.h): what generated
-    // code calls for it, in the helpers' convention, which calls targets[i],
-    // a C function of the helper's signature, in out[i].
-    bool makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out);
     EnterFunc enter_ = nullptr;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
 };
