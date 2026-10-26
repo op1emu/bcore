@@ -1003,7 +1003,7 @@ Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
     if (rarely_called(name)) fn->addFnAttr(Attribute::Cold);
     if (!real_cpu_) {
         auto* call = builder_.CreateCall(ft, fn, args);
-        call->setCallingConv(fn->getCallingConv());
+        bcore_abi::mark_helper_call(*call, *fn);
         reg_cache_after_call(name);
         return call;
     }
@@ -1014,7 +1014,7 @@ Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
         if (arg == cpu_ptr_) arg = real_cpu_;
     emit_loop_sync(kSyncOut);
     auto* call = builder_.CreateCall(ft, fn, real_args);
-    call->setCallingConv(fn->getCallingConv());
+    bcore_abi::mark_helper_call(*call, *fn);
     const std::string callee = name;
     const bool memory = callee.rfind("mem_read", 0) == 0 || callee.rfind("mem_write", 0) == 0;
     // cec_check_pending changes the guest state only where it takes an

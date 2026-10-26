@@ -25,6 +25,11 @@ public:
     std::array<uint8_t, 2 * kPageSize> bytes{};
     std::vector<uint8_t*> pages;
     mutable int data_calls = 0;
+    // The last value a write callback got, widened as the callee sees it: a
+    // caller that leaves a narrow argument's upper bits as they are passes
+    // the whole register to a callee that relies on them (Apple's arm64 ABI,
+    // and clang's code on x86-64), which the bytes stored would hide.
+    uint32_t written = 0;
 
     explicit TwoPages(bool table) {
         if (table) {
@@ -43,9 +48,9 @@ public:
     uint8_t read8(uint32_t a) const override { count(a); return bytes.at(a); }
     uint16_t read16(uint32_t a) const override { count(a); uint16_t v; memcpy(&v, &bytes.at(a), 2); return v; }
     uint32_t read32(uint32_t a) const override { count(a); uint32_t v; memcpy(&v, &bytes.at(a), 4); return v; }
-    void write8(uint32_t a, uint8_t v) override { count(a); bytes.at(a) = v; }
-    void write16(uint32_t a, uint16_t v) override { count(a); memcpy(&bytes.at(a), &v, 2); }
-    void write32(uint32_t a, uint32_t v) override { count(a); memcpy(&bytes.at(a), &v, 4); }
+    void write8(uint32_t a, uint8_t v) override { count(a); written = v; bytes.at(a) = v; }
+    void write16(uint32_t a, uint16_t v) override { count(a); written = v; memcpy(&bytes.at(a), &v, 2); }
+    void write32(uint32_t a, uint32_t v) override { count(a); written = v; memcpy(&bytes.at(a), &v, 4); }
 };
 
 struct Case {
@@ -198,6 +203,11 @@ int main() {
         if (c.write) {
             const uint32_t mask = c.width == 4 ? ~0u : (1u << (8 * c.width)) - 1;
             require(stored == ((0x8382f1f0 & ~mask) | (0x11223344 & mask)), "store");
+            if (!inline_access && mem.written != (0x11223344 & mask)) {
+                fprintf(stderr, "FAIL: %s at 0x%x, table %d, O%d: the callback got 0x%08x\n", c.name, addr, table, opt,
+                        mem.written);
+                return 1;
+            }
         } else {
             uint32_t want = c.width == 4 ? 0x8382f1f0 : c.width == 2 ? 0xf1f0 : 0xf0;
             if (c.sign) want = c.width == 2 ? uint32_t(int32_t(int16_t(want))) : uint32_t(int32_t(int8_t(want)));

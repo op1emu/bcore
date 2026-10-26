@@ -957,6 +957,14 @@ execution -20.3%. Work the same at every mark.
   restores RAX over the value it returns: every reading helper read
   garbage. ctest found it (13 of 21 tests); the emulator suites, whose
   programs take no slow memory path, passed.
+- A helper's parameter narrower than 32 bits (mem_write8's and
+  mem_write16's value) is zeroext on every declaration and call: Apple's
+  arm64 ABI makes the caller extend it, and clang's code relies on that on
+  x86-64 too. Without it, a lifted `B[P0] = R0` passed the whole R0 in w2
+  on arm64 Darwin (found in review), and a callback built by clang took
+  0x12345678 for a byte. GCC's callees narrow it themselves, which is why
+  x86-64 Linux never showed it; the stored bytes hide it, so page_table_test
+  checks the value the callback got.
 - FastISel selects no `swifttailcc` return either: tier 0 still merges a
   block's returns into one (merge_returns).
 - macOS on Apple silicon: the code arena is MAP_JIT and written only inside
