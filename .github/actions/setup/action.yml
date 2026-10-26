@@ -1,7 +1,8 @@
 name: Set up the bcore build
 description: >
   LLVM 15 and ccache (with the cache under the given key), the Blackfin
-  toolchain (cached) on PATH, or either alone.
+  toolchain (cached) on PATH, or either alone. On Linux (apt) or macOS
+  (Homebrew); the toolchain is Linux's only.
 
 inputs:
   llvm:
@@ -22,18 +23,32 @@ runs:
     - name: Runner CPU
       shell: bash
       run: |
-        cpu=$(lscpu | sed -n 's/^Model name: *//p')
-        avx512=$(grep -qw avx512f /proc/cpuinfo && echo yes || echo no)
-        echo "CPU: $cpu, $(nproc) threads, AVX-512: $avx512"
-        echo "Runner CPU: $cpu, $(nproc) threads, AVX-512: $avx512" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$RUNNER_OS" = Linux ]; then
+          cpu=$(lscpu | sed -n 's/^Model name: *//p')
+          avx512=$(grep -qw avx512f /proc/cpuinfo && echo yes || echo no)
+        else
+          cpu=$(sysctl -n machdep.cpu.brand_string)
+          avx512=no
+        fi
+        threads=$(getconf _NPROCESSORS_ONLN)
+        echo "CPU: $cpu, $threads threads, AVX-512: $avx512"
+        echo "Runner CPU: $cpu, $threads threads, AVX-512: $avx512" >> "$GITHUB_STEP_SUMMARY"
 
+    # Ubuntu's packages on Linux, Homebrew's on macOS.
     - name: Install LLVM 15 and ccache
       if: inputs.llvm == 'true'
       shell: bash
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y llvm-15 llvm-15-dev ccache
+        if [ "$RUNNER_OS" = Linux ]; then
+          sudo apt-get update -qq
+          sudo apt-get install -y llvm-15 llvm-15-dev ccache
+          llvm_dir=/usr/lib/llvm-15/lib/cmake/llvm
+        else
+          brew install llvm@15 ccache
+          llvm_dir=$(brew --prefix llvm@15)/lib/cmake/llvm
+        fi
         {
+          echo "BCORE_LLVM_DIR=$llvm_dir"
           echo "CCACHE_DIR=$HOME/.cache/ccache"
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
           echo "CCACHE_MAXSIZE=400M"
