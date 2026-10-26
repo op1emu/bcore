@@ -18,7 +18,10 @@
 // N" for N random parallel packets alone; or "STRIDE clobber N", every
 // n-th instruction and N parallel packets with a Memory whose callbacks
 // change a data register: no parallel packet is made of pieces then (they
-// need callbacks_preserve_registers()), the rest the same.
+// need callbacks_preserve_registers()), the rest the same. "long": blocks
+// of 250 packets of the largest 16-bit stencils that go on to the next,
+// with a TBZ to their cold code if any have one (AArch64: over 32 KiB of
+// code, the translator's trampolines midway).
 
 #include "core.h"
 #include "mmr.h"
@@ -197,7 +200,35 @@ struct Instruction {
     // the exception leaves the registers alone, as the callbacks promise).
     bool raises = false;
     bool body = false;  // a slot 0 piece's key, NOP slots: made of the build's pieces
+    int repeat = 1;     // packets of it in the block
 };
+
+constexpr int kLongBlock = 250;
+
+// The 16-bit words of the largest stencils that go on to the next packet,
+// those with a TBZ (kTestBr14) first.
+std::vector<Instruction> long_instructions() {
+    using namespace bcore_cp;
+    std::vector<std::pair<std::pair<bool, uint16_t>, uint32_t>> words;  // (TBZ, size), word
+    for (uint32_t w = 0; w < 0x10000; ++w) {
+        if (!kIndex16[w]) continue;
+        const Stencil& st = kStencils[kIndex16[w] - 1];
+        if (st.flags & kTerminates) continue;
+        bool tbz = false;
+        for (uint32_t k = 0; k < st.reloc_count; ++k) tbz |= kRelocs[st.relocs + k].kind == kTestBr14;
+        words.push_back({{tbz, st.size}, w});
+    }
+    std::sort(words.begin(), words.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<Instruction> out;
+    for (size_t i = 0; i < words.size() && out.size() < 24; ++i) {
+        Instruction in{words[i].second, 2};
+        in.repeat = kLongBlock;
+        out.push_back(in);
+    }
+    printf("long blocks: largest %u bytes a packet, TBZ %s\n", unsigned(words[0].first.second),
+           words[0].first.first ? "yes" : "no");
+    return out;
+}
 
 std::vector<Instruction> instructions() {
     std::vector<Instruction> out;
@@ -330,17 +361,20 @@ int main(int argc, char** argv) {
         g_code = kHighCode;
         --argc;
     }
+    const bool long_blocks = argc > 1 && !strcmp(argv[1], "long");
     const unsigned stride = argc > 1 ? std::max(1, atoi(argv[1])) : 1;
     const bool parallel_only = argc > 2 && !strcmp(argv[2], "parallel");
     const bool clobbers = argc > 2 && !strcmp(argv[2], "clobber");
     const size_t offset = argc > 2 && !parallel_only && !clobbers ? size_t(atol(argv[2])) : 0;
     const size_t parallel = (parallel_only || clobbers) && argc > 3 ? size_t(atol(argv[3])) : 24000;
     std::vector<Instruction> todo;
-    if (!parallel_only) {
+    if (long_blocks) {
+        todo = long_instructions();
+    } else if (!parallel_only) {
         const auto lone = instructions();
         for (size_t i = offset; i < lone.size(); i += stride) todo.push_back(lone[i]);
     }
-    {
+    if (!long_blocks) {
         const auto more = parallel_instructions(parallel);
         for (size_t i = clobbers ? 0 : offset; i < more.size(); i += clobbers ? 1 : stride) todo.push_back(more[i]);
     }
@@ -355,11 +389,12 @@ int main(int argc, char** argv) {
         const size_t end = std::min(todo.size(), begin + kChunk);
         for (size_t i = begin; i < end; ++i) {
             const Instruction& in = todo[i];
-            const uint32_t pc = g_code + 16 * uint32_t(i - begin);
+            const uint32_t pc = g_code + (long_blocks ? 0x400 : 16) * uint32_t(i - begin);
             for (Side* side : {&cp, &llvm}) {
-                for (int w = 0; w < in.len / 2; ++w)
-                    side->mem->write16(pc + 2 * w, uint16_t(in.insn >> (16 * (in.len / 2 - 1 - w))));
-                side->mem->write16(pc + in.len, kRts);
+                for (int k = 0; k < in.repeat; ++k)
+                    for (int w = 0; w < in.len / 2; ++w)
+                        side->mem->write16(pc + k * in.len + 2 * w, uint16_t(in.insn >> (16 * (in.len / 2 - 1 - w))));
+                side->mem->write16(pc + in.repeat * in.len, kRts);
             }
             std::mt19937 rng(uint32_t(in.insn * 2654435761u + (in.insn >> 32) * 40503u + in.len));
             CpuState start;

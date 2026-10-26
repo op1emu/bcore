@@ -300,6 +300,39 @@ const CpTranslator::Support* CpTranslator::support_for(Arena& a) {
     return &a.sets.back();
 }
 
+namespace {
+
+// A conditional branch between a stencil's hot and cold code (AArch64). The
+// splitter's cold code lies far from the hot code, beyond a B.cond's 1 MiB and
+// a TBZ's 32 KiB, which LLVM 15 does not relax (LLVM 18 does, the same way):
+// the branch goes to a B near it in the same region, which reaches anywhere
+// in the arena (CodeArena's Shared layout). The fast path is the same; the
+// rare one takes one more branch. A piece's cold trampolines follow its cold
+// part (which ends in a jump); hot ones follow the block's code, or, in a
+// long block, a piece that keeps its jump to the next (kIsland).
+bool conditional(const Reloc& r) { return r.kind == kCondBr19 || r.kind == kTestBr14; }
+
+// A piece's branches to one place share a trampoline: the first of them.
+bool first_to(const Reloc* relocs, uint32_t i) {
+    for (uint32_t k = 0; k < i; ++k)
+        if (conditional(relocs[k]) && relocs[k].hole == relocs[i].hole && relocs[k].addend == relocs[i].addend)
+            return false;
+    return true;
+}
+
+size_t trampolines(const Reloc* relocs, uint32_t count, size_t size) {
+    size_t n = 0;
+    for (uint32_t i = 0; i < count; ++i) n += relocs[i].offset < size && conditional(relocs[i]) && first_to(relocs, i);
+    return n;
+}
+
+constexpr size_t kBranchTrampoline = 4;  // B
+// The most hot code between a TBZ and its trampoline (it reaches 32 KiB, and
+// a piece is under 1 KiB).
+constexpr size_t kIsland = size_t(24) << 10;
+
+}  // namespace
+
 bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, const Piece& piece, const Piece* next,
                          uint32_t packet, uint64_t field0, uint32_t counter, const Config& config) {
     const Stencil& s = *piece.stencil;
@@ -309,7 +342,8 @@ bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, con
     if (s.cold_size) memcpy(cold_at, piece.cold, s.cold_size);
     const int exit = !config.chaining ? 0 : config.dry ? (config.count_chained ? 4 : 3) : (config.count_chained ? 2 : 1);
     // Each part's relocations; the hot part's last jump may be dropped.
-    auto fill = [&](uint8_t* at, const Reloc* relocs, uint32_t count, size_t size) {
+    auto fill = [&](uint8_t* at, const Reloc* relocs, uint32_t count, size_t size, uint8_t*& trampoline) {
+        std::vector<std::pair<Reloc, uint8_t*>> jumps;  // this part's trampolines
         for (uint32_t i = 0; i < count; ++i) {
             const Reloc& r = relocs[i];
             if (r.offset >= size) continue;  // in the dropped jump to what follows
@@ -333,12 +367,32 @@ bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, con
             } else {
                 return false;
             }
+            if (conditional(r)) {
+                // The B the piece's first branch there placed, or a new one.
+                uint8_t* jump_at = nullptr;
+                for (const auto& [to, placed] : jumps)
+                    if (to.hole == r.hole && to.addend == r.addend) jump_at = placed;
+                if (!jump_at) {
+                    if (!trampoline) return false;
+                    jump_at = trampoline;
+                    const Reloc jump{0, r.hole, kBranch26, r.addend};
+                    store32(jump_at, 0x14000000u);  // B
+                    if (!patch_reloc(jump_at, jump, value)) return false;
+                    jumps.push_back({r, jump_at});
+                    trampoline += kBranchTrampoline;
+                }
+                const Reloc branch{r.offset, r.hole, r.kind, 0};
+                if (!patch_reloc(at, branch, reinterpret_cast<uintptr_t>(jump_at))) return false;
+                continue;
+            }
             if (!patch_reloc(at, r, value)) return false;
         }
         return true;
     };
-    return fill(hot_at, piece.relocs, s.reloc_count, piece.size) &&
-           fill(cold_at, piece.cold_relocs, s.cold_reloc_count, s.cold_size);
+    uint8_t* hot_jumps = piece.jumps ? code + piece.jumps_at : nullptr;
+    uint8_t* cold_jumps = piece.cold_jumps ? cold + piece.cold_jumps_at : nullptr;
+    return fill(hot_at, piece.relocs, s.reloc_count, piece.size, hot_jumps) &&
+           fill(cold_at, piece.cold_relocs, s.cold_reloc_count, s.cold_size, cold_jumps);
 }
 
 bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet, uint64_t field0,
@@ -405,11 +459,23 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         pieces_.push_back(CpTranslator::piece(kStencils[kSelfExits[config.count_chained]], pc, 0, -1));
     }
     size_t total = 0, cold_total = 0;
+    size_t open = 0;     // the first piece whose hot trampolines are not placed
+    size_t pending = 0;  // and the trampolines of pieces [open, i]
+    // Those of pieces [open, end) after the code so far.
+    auto place_jumps = [&](size_t end) {
+        for (; open < end; ++open) {
+            pieces_[open].jumps_at = total;
+            total += pieces_[open].jumps * kBranchTrampoline;
+        }
+    };
     for (size_t i = 0; i < pieces_.size(); ++i) {
         Piece& p = pieces_[i];
         p.at = total;
         p.cold_at = cold_total;
         cold_total += p.stencil->cold_size;
+        p.cold_jumps = trampolines(p.cold_relocs, p.stencil->cold_reloc_count, p.stencil->cold_size);
+        p.cold_jumps_at = cold_total;
+        cold_total += p.cold_jumps * kBranchTrampoline;
         // The jump to what follows, where it does: the next packet, or the
         // block's own exit.
         const bool to_exit = exit_piece_ >= 0 && int(i) + 1 == exit_piece_;
@@ -417,26 +483,42 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
                                   : (p.stencil->flags & kTailCont) && i + 1 < pieces_.size();
         p.size = p.stencil->size - (drop ? kTailJump : 0);
         total += p.size;
+        p.jumps = trampolines(p.relocs, p.stencil->reloc_count, p.size);
+        // Far from the first unplaced trampolines' branches: after this
+        // piece, which then keeps its jump to the next.
+        pending += p.jumps;
+        if (pending && i + 1 < pieces_.size() && total + pending * kBranchTrampoline - pieces_[open].at > kIsland) {
+            if (drop) {
+                p.size += kTailJump;
+                total += kTailJump;
+            }
+            place_jumps(i + 1);
+            pending = 0;
+        }
     }
+    // The rest after the code, where nothing runs into them: the block's
+    // last piece ends in a jump.
+    place_jumps(pieces_.size());
+    const size_t hot_size = total;
+    const size_t cold_size = cold_total;
     // The helpers' trampolines first: their code takes room in the arena
     // (once per translator).
     if (!helper_targets()) {
         out.why = "no helper trampolines";
         return out;
     }
-    // A set of helper jumps and exits reaches the block's hot code only: on
-    // AArch64, where the cold region lies beyond B/BL's reach of it, no
-    // stencil has cold code (Compiler::init splits nothing there).
-    if (cold_total && kReach != SIZE_MAX) {
+    JitWriteScope write;  // what follows writes code only
+    Arena* arena = arena_for(hot_size + cold_size + 16);
+    // Cold code within B/BL's reach of the hot code and the helper jumps and
+    // exits it goes to: an arena's code as a whole, on AArch64 (Shared).
+    if (arena && cold_total && kReach != SIZE_MAX && arena->arena->codeSpan() > CodeArena::kBranchReach) {
         out.why = "cold code out of reach";
         return out;
     }
-    JitWriteScope write;  // what follows writes code only
-    Arena* arena = arena_for(total + cold_total + 16);
     const Support* support = arena ? support_for(*arena) : nullptr;
-    uint8_t* at = support ? arena->arena->allocate(CodeArena::Region::Hot, total, 16) : nullptr;
-    uint8_t* cold = at && cold_total ? arena->arena->allocate(CodeArena::Region::Cold, cold_total, 16) : nullptr;
-    if (!at || (cold_total && !cold)) {
+    uint8_t* at = support ? arena->arena->allocate(CodeArena::Region::Hot, hot_size, 16) : nullptr;
+    uint8_t* cold = at && cold_size ? arena->arena->allocate(CodeArena::Region::Cold, cold_size, 16) : nullptr;
+    if (!at || (cold_size && !cold)) {
         out.why = "no room";
         return out;
     }
@@ -445,17 +527,17 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         const Piece* next = i + 1 < pieces_.size() ? &pieces_[i + 1] : nullptr;
         if (!place(*support, at, cold, pieces_[i], next, pieces_[i].packet, last_len, counter, config)) {
             // The code is never run (nothing points at it).
-            fill_trap(at, total);
-            if (cold) fill_trap(cold, cold_total);
+            fill_trap(at, hot_size);
+            if (cold) fill_trap(cold, cold_size);
             out.why = "relocation";
             return out;
         }
     }
-    llvm::sys::Memory::InvalidateInstructionCache(at, total);
-    if (cold) llvm::sys::Memory::InvalidateInstructionCache(cold, cold_total);
+    llvm::sys::Memory::InvalidateInstructionCache(at, hot_size);
+    if (cold) llvm::sys::Memory::InvalidateInstructionCache(cold, cold_size);
     out.fn = reinterpret_cast<BbFunc>(at);
-    out.size = total;
+    out.size = hot_size;
     out.cold = cold;
-    out.cold_size = cold_total;
+    out.cold_size = cold_size;
     return out;
 }
