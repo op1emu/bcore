@@ -68,7 +68,7 @@ Native code  ◄──► extern "C" helpers (mem_read/write, CEC, hwloop)
 |---|---|
 | CMake ≥ 3.10 | |
 | C++17 compiler | GCC or Clang |
-| LLVM 15 | `llvm-15` + `llvm-dev` packages, or built from source |
+| LLVM 15 (or 19) | `llvm-15` + `llvm-dev` packages, or built from source; 19 is the WebAssembly build's, and builds natively too (CI runs it on Linux) |
 | `bfin-elf-gcc` / `bfin-elf-ld` | Optional — only required to assemble and run the test suite |
 
 **Installing LLVM 15 on Ubuntu/Debian:**

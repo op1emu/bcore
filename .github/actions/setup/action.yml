@@ -1,13 +1,19 @@
 name: Set up the bcore build
 description: >
-  LLVM 15 and ccache (with the cache under the given key), the Blackfin
+  LLVM (15, or the given version) and ccache (with the cache under the
+  given key), the Blackfin
   toolchain (cached) on PATH, or either alone. On Linux (apt) or macOS
   (Homebrew); the toolchain is Linux's only.
 
 inputs:
   llvm:
-    description: Install LLVM 15 and ccache
+    description: Install LLVM and ccache
     default: "false"
+  llvm-version:
+    description: >
+      LLVM's major version: 15, the hosts', from Ubuntu or Homebrew; 19, the
+      WebAssembly build's, from apt.llvm.org (Linux only)
+    default: "15"
   ccache-key:
     description: >
       The ccache cache's key prefix, one per build configuration (with llvm);
@@ -42,17 +48,27 @@ runs:
         echo "Runner CPU: $cpu, $threads threads, AVX-512: $avx512" >> "$GITHUB_STEP_SUMMARY"
 
     # Ubuntu's packages on Linux, Homebrew's on macOS.
-    - name: Install LLVM 15 and ccache
+    - name: Install LLVM ${{ inputs.llvm-version }} and ccache
       if: inputs.llvm == 'true'
       shell: bash
+      env:
+        V: ${{ inputs.llvm-version }}
       run: |
         if [ "$RUNNER_OS" = Linux ]; then
+          if [ "$V" != 15 ]; then
+            # Ubuntu 22.04 has no LLVM 19: apt.llvm.org's, whose -dev package
+            # has the static libraries and the perf JIT listener.
+            . /etc/os-release
+            curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+            echo "deb http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$V main" |
+              sudo tee /etc/apt/sources.list.d/llvm-$V.list
+          fi
           sudo apt-get update -qq
-          sudo apt-get install -y llvm-15 llvm-15-dev ccache
-          llvm_dir=/usr/lib/llvm-15/lib/cmake/llvm
+          sudo apt-get install -y llvm-$V llvm-$V-dev ccache
+          llvm_dir=/usr/lib/llvm-$V/lib/cmake/llvm
         else
-          brew install llvm@15 ccache
-          llvm_dir=$(brew --prefix llvm@15)/lib/cmake/llvm
+          brew install llvm@$V ccache
+          llvm_dir=$(brew --prefix llvm@$V)/lib/cmake/llvm
         fi
         {
           echo "BCORE_LLVM_DIR=$llvm_dir"

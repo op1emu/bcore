@@ -209,7 +209,7 @@ destructor, so a default-handled signal truncates the jitdump.
 ## Important Notes
 
 - Build with CMake: `cmake -B build && cmake --build build`
-- Requires LLVM 15 (set `LLVM_DIR` in CMakeLists.txt if not at default path); builds on x86-64 Linux and on AArch64 (macOS on Apple silicon, Linux), copy-and-patch on both architectures (stencils for the host's, `bcore-stencilgen --target` makes the other's to look at)
+- Requires LLVM 15, or 19 (the WebAssembly build's; API differences in `src/llvm_compat.h`, behaviour differences under `LLVM_VERSION_MAJOR` where they are) (set `LLVM_DIR` in CMakeLists.txt if not at default path); builds on x86-64 Linux and on AArch64 (macOS on Apple silicon, Linux), copy-and-patch on both architectures (stencils for the host's, `bcore-stencilgen --target` makes the other's to look at)
 - Blocks and stencils are made and called only through `src/block_abi.h` (`make_block`, `call_block`, `tail_call_block`); never call one from C++, only through `JitEngine::enter`. A helper is declared only through `bcore_abi::declare_helper` (`src/helper_abi.h`), and a new helper goes into its `kHelpers` table as well as JitEngine's
 - On Apple silicon the code arena is `MAP_JIT`: anything that writes code into it (linking, copying) does so inside a `JitWriteScope`, and nothing runs code inside one
 - Requires `bfin-elf-gcc` and `bfin-elf-ld` at `$HOME/toolchains/bfin-elf/bin/` for test assembly/linking

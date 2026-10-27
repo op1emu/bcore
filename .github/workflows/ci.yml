@@ -190,6 +190,54 @@ jobs:
             -I ${{ matrix.shard }},,${{ matrix.shards }} ${{ matrix.ctest-args }}
 
   # ──────────────────────────────────────────────────────────────────────────
+  # Job 2b: LLVM 19, the WebAssembly build's (src/llvm_compat.h), natively:
+  # the C++ tests but the slow ones, and of those the loop blocks' (where
+  # most of what LLVM 19 does differently is), the emulator suite in op1emu's
+  # mode, and the copy-patch tier 0 against LLVM's.
+  # ──────────────────────────────────────────────────────────────────────────
+  llvm19:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          llvm: "true"
+          llvm-version: "19"
+          ccache-key: llvm19
+          toolchain: "true"
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR="$BCORE_LLVM_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_STENCIL_CACHE_DIR=$BCORE_STENCIL_CACHE_DIR \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+
+      - name: ccache statistics
+        run: ccache -s
+
+      - name: Test
+        run: |
+          ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure -LE slow
+          ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure -R loop-block
+
+      - name: Emulator suite (O1, page table, chained)
+        run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
+
+      - name: Copy-and-patch tier 0 against LLVM's
+        run: |
+          python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
+            -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
+
+  # ──────────────────────────────────────────────────────────────────────────
   # Job 3: Emulator test suite, one suite per job
   # Every suite skips the tests in .github/emu-ignore.txt; a warning
   # (non-failing) is printed for any ignored test that unexpectedly passes,
