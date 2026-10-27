@@ -14,6 +14,7 @@
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Transforms/Vectorize/LoopVectorize.h>
@@ -32,10 +33,19 @@ static void split_by_counts() {
         auto& options = llvm::cl::getRegisteredOptions();
         auto set = [&](const char* name, const char* value) {
             auto it = options.find(name);
-            if (it != options.end()) it->second->addOccurrence(0, name, value);
+            if (it == options.end()) llvm::report_fatal_error(llvm::Twine("no option ") + name);
+            it->second->addOccurrence(0, name, value);
         };
         set("mfs-psi-cutoff", "0");
         set("mfs-count-threshold", kColdCount);
+#if LLVM_VERSION_MAJOR >= 19
+        // No shrink-wrapping: LLVM 19's puts the frame's setup (the push
+        // that aligns the stack for a call) in a rare path that calls a
+        // helper, and the splitter leaves a block that sets up or tears down
+        // the frame where it is: the rare paths stayed in the hot code,
+        // which branched around them (copy-and-patch execution +13%).
+        set("enable-shrink-wrap", "false");
+#endif
     });
 }
 
@@ -82,7 +92,16 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
             builder->setCPU("generic");
             builder->getFeatures() = llvm::SubtargetFeatures("+reserve-x18,-outline-atomics");
         }
-        builder->setCodeModel(llvm::CodeModel::Small);
+        // AArch64's in the tiny model under LLVM 19: its branch relaxation
+        // takes a branch to another section to be as far as the model's code
+        // may reach, and in the small one (4 GiB) gives a conditional branch
+        // to the cold part a B of its own after the code, which then ends in
+        // no B the translator may drop. The tiny model's 1 MiB is in reach,
+        // as LLVM 15 assumed: the translator's trampolines take the branch
+        // (cp_translator.cpp). Its other differences are in how addresses
+        // are made, which a stencil has none of (its holes are MOVZ/MOVK).
+        builder->setCodeModel(triple.isAArch64() && LLVM_VERSION_MAJOR >= 19 ? llvm::CodeModel::Tiny
+                                                                             : llvm::CodeModel::Small);
         builder->setRelocationModel(llvm::Reloc::Static);
     } else if (triple.isOSDarwin()) {
         // RuntimeDyld's Mach-O AArch64 linking makes no stub for a branch
@@ -90,6 +109,16 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
         // calls them through the GOT. No host exception crosses generated
         // code there (helper_abi.h's kHelpersCatch).
         builder->setCodeModel(llvm::CodeModel::Large);
+        builder->setRelocationModel(llvm::Reloc::PIC_);
+    } else if (LLVM_VERSION_MAJOR >= 19 && triple.isX86()) {
+        // The small model, not the large one detectHost gives: in the large
+        // model LLVM 19 names the section of a function's split-off cold part
+        // as its hot code's (.ltext.<name>, not .text.split.<name>), and the
+        // arena could not keep them apart. Position-independent, since the
+        // arena lies anywhere (a static small model takes a jump table's
+        // address as 32 bits); calls of the helpers, beyond 2 GiB, go through
+        // RuntimeDyld's stubs.
+        builder->setCodeModel(llvm::CodeModel::Small);
         builder->setRelocationModel(llvm::Reloc::PIC_);
     }
     // No Swift async frame record (block_abi.h: the Memory is `swiftasync`
@@ -148,7 +177,7 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
 // and the per-function passes that find nothing there: about a tenth of a
 // promotion's compile time on the boot.
 const char* const Compiler::kLightPipeline =
-    "function(sroa,early-cse<memssa>,instcombine,simplifycfg,gvn,dse,adce,simplifycfg)";
+    "function(sroa,early-cse<memssa>," BCORE_INSTCOMBINE ",simplifycfg,gvn,dse,adce,simplifycfg)";
 
 void Compiler::optimize(llvm::Module& mod, bool light) {
     if (opt_level_ == 0) {
@@ -178,8 +207,20 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
     const bool guest_memory = has_guest_memory(mod);  // lower_guest_memory takes the declarations
     if (guest_memory) {
         llvm::ModulePassManager pre;
-        llvm::cantFail(pb_->parsePassPipeline(
-            pre, "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
+        // Under LLVM 19 loop-simplify before InstCombine: a rare exit that
+        // runs the block again (a raised or misaligned access) is a second
+        // back edge, which LoopSimplify makes an outer loop of by a header
+        // PHI the inner back edge leaves unchanged (a register the loop never
+        // writes). LLVM 19's InstCombine folds those PHIs away, and the two
+        // back edges then share one latch, where SCEV finds no count. (LLVM
+        // 15's keeps them, and its order stays as it was.)
+#if LLVM_VERSION_MAJOR >= 19
+        const char* const pre_pipeline =
+            "function(sroa,early-cse<memssa>,loop-simplify," BCORE_INSTCOMBINE ",simplifycfg,loop-simplify,lcssa)";
+#else
+        const char* const pre_pipeline = "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)";
+#endif
+        llvm::cantFail(pb_->parsePassPipeline(pre, pre_pipeline));
         pre.run(mod, mam_);
         llvm::ModulePassManager versioning;
         versioning.addPass(llvm::createModuleToFunctionPassAdaptor(GuestLoopVersioning()));
@@ -189,12 +230,12 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
         // (guest_speculation.h), and the copies that asked for it
         // vectorized: only those, whatever the opt level.
         llvm::ModulePassManager spec;
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg,loop-simplify,lcssa)"));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(" BCORE_INSTCOMBINE ",simplifycfg,loop-simplify,lcssa)"));
         spec.addPass(llvm::createModuleToFunctionPassAdaptor(SatReductionSpeculation()));
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(adce,instcombine,loop-simplify,lcssa)"));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(adce," BCORE_INSTCOMBINE ",loop-simplify,lcssa)"));
         spec.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::LoopVectorizePass(
             llvm::LoopVectorizeOptions().setVectorizeOnlyWhenForced(true).setInterleaveOnlyWhenForced(true))));
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg)"));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(" BCORE_INSTCOMBINE ",simplifycfg)"));
         spec.run(mod, mam_);
         mam_.clear();
         fam_.clear();
@@ -210,7 +251,7 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
         // shadow in SSA values first.
         llvm::cantFail(pb_->parsePassPipeline(steady, guest_memory
             ? "function(loop-simplify,lcssa)"
-            : "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
+            : "function(sroa,early-cse<memssa>," BCORE_INSTCOMBINE ",simplifycfg,loop-simplify,lcssa)"));
         steady.addPass(llvm::createModuleToFunctionPassAdaptor(SteadyLoopSkip(steady_skip_ == 1)));
         steady.run(mod, mam_);
         mam_.clear();

@@ -17,6 +17,16 @@
 
 #include <cstdint>
 
+// InstCombine in a pass pipeline's text, as the default pipelines run it:
+// since LLVM 18 it otherwise checks that one run reached a fixed point and
+// stops the process where it did not (LLVM 15 has no such check, nor the
+// parameter).
+#if LLVM_VERSION_MAJOR >= 18
+#define BCORE_INSTCOMBINE "instcombine<no-verify-fixpoint>"
+#else
+#define BCORE_INSTCOMBINE "instcombine"
+#endif
+
 namespace bcore_llvm {
 
 // StringRef::startswith, starts_with since LLVM 16 (the old name gone in 19).

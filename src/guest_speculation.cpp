@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/ScalarEvolution.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Dominators.h>
@@ -35,24 +36,40 @@ constexpr uint64_t kMaxIterations = uint64_t(1) << 16;
 
 struct Accumulator {
     PHINode* phi;
-    SelectInst* next;  // select(fits, window(sum), clamp)
+    SelectInst* next;  // select(fits, window(sum), clamp), or select(!fits, clamp, window(sum))
     Value* sum;        // phi + x
     Value* x;
-    ICmpInst* fits;
+    ICmpInst* fits;    // the test
+    bool fits_true;    // the test's value where sum fits
 };
 
-// s fits in i32: (s + 2^31) <u 2^32, or s == sext(trunc s).
-bool is_fits_test(Value* c, Value* s) {
+// Whether c tests that s fits in i32, and then (fits_true) the value it has
+// where s fits: (s + 2^31) <u 2^32 or s == sext(trunc s) are true there,
+// their negations (s - 2^31) <u 2^64 - 2^32, (s + 2^31) >u 2^32 - 1 and
+// s != sext(trunc s), as InstCombine may turn the select round, false.
+bool is_fits_test(Value* c, Value* s, bool& fits_true) {
     ICmpInst::Predicate pred;
     const APInt *bias, *bound;
-    if (match(c, m_ICmp(pred, m_Add(m_Specific(s), m_APInt(bias)), m_APInt(bound))) &&
-        pred == ICmpInst::ICMP_ULT && bias->getBitWidth() == 64 && bias->getZExtValue() == 0x80000000ull &&
-        bound->getZExtValue() == 0x100000000ull)
-        return true;
+    if (match(c, m_ICmp(pred, m_Add(m_Specific(s), m_APInt(bias)), m_APInt(bound))) && bias->getBitWidth() == 64) {
+        const uint64_t k = bias->getZExtValue(), n = bound->getZExtValue();
+        if (pred == ICmpInst::ICMP_ULT && k == 0x80000000ull && n == 0x100000000ull) {
+            fits_true = true;
+            return true;
+        }
+        if ((pred == ICmpInst::ICMP_ULT && k == 0xffffffff80000000ull && n == 0xffffffff00000000ull) ||
+            (pred == ICmpInst::ICMP_UGT && k == 0x80000000ull && n == 0xffffffffull)) {
+            fits_true = false;
+            return true;
+        }
+        return false;
+    }
     Value* other;
-    if (match(c, m_c_ICmp(pred, m_Specific(s), m_Value(other))) && pred == ICmpInst::ICMP_EQ &&
-        match(other, m_SExt(m_Trunc(m_Specific(s)))) && cast<Instruction>(other)->getOperand(0)->getType()->isIntegerTy(32))
+    if (match(c, m_c_ICmp(pred, m_Specific(s), m_Value(other))) &&
+        (pred == ICmpInst::ICMP_EQ || pred == ICmpInst::ICMP_NE) && match(other, m_SExt(m_Trunc(m_Specific(s)))) &&
+        cast<Instruction>(other)->getOperand(0)->getType()->isIntegerTy(32)) {
+        fits_true = pred == ICmpInst::ICMP_EQ;
         return true;
+    }
     return false;
 }
 
@@ -267,19 +284,33 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
         Value* next = phi.getIncomingValueForBlock(latch);
         if (phi.getType()->isIntegerTy(64))
             if (auto* select = dyn_cast<SelectInst>(next)) {
-                Value* window = select->getTrueValue();
-                Value* sum = window;
-                if (!match(window, m_AShr(m_Shl(m_Value(sum), m_SpecificInt(32)), m_SpecificInt(32))) &&
-                    !match(window, m_SExt(m_Trunc(m_Value(sum)))))
-                    sum = window;
-                Value* x = nullptr;
-                if (is_window_of(window, sum) && match(sum, m_c_Add(m_Specific(&phi), m_Value(x))) &&
-                    is_fits_test(select->getCondition(), sum) && ComputeNumSignBits(x, layout) >= 25 &&
-                    !depends_on(x, &phi, loop) && dt.dominates(select, latch->getTerminator())) {
-                    accs.push_back({&phi, select, sum, x, cast<ICmpInst>(select->getCondition())});
-                    phis.push_back({&phi, Kind::Accumulator});
-                    continue;
+                bool matched = false;
+                // The select turned round only under LLVM 19, whose
+                // InstCombine leaves it so: LLVM 15's loops stay as they were.
+#if LLVM_VERSION_MAJOR >= 19
+                Value* const windows[] = {select->getTrueValue(), select->getFalseValue()};
+#else
+                Value* const windows[] = {select->getTrueValue()};
+#endif
+                for (Value* window : windows) {
+                    Value* sum = window;
+                    if (!match(window, m_AShr(m_Shl(m_Value(sum), m_SpecificInt(32)), m_SpecificInt(32))) &&
+                        !match(window, m_SExt(m_Trunc(m_Value(sum)))))
+                        sum = window;
+                    Value* x = nullptr;
+                    bool fits_true = false;
+                    // The window is the value where sum fits.
+                    if (is_window_of(window, sum) && match(sum, m_c_Add(m_Specific(&phi), m_Value(x))) &&
+                        is_fits_test(select->getCondition(), sum, fits_true) &&
+                        fits_true == (window == select->getTrueValue()) && ComputeNumSignBits(x, layout) >= 25 &&
+                        !depends_on(x, &phi, loop) && dt.dominates(select, latch->getTerminator())) {
+                        accs.push_back({&phi, select, sum, x, cast<ICmpInst>(select->getCondition()), fits_true});
+                        phis.push_back({&phi, Kind::Accumulator});
+                        matched = true;
+                        break;
+                    }
                 }
+                if (matched) continue;
             }
         const SCEV* s = se.getSCEV(&phi);
         if (auto* rec = dyn_cast<SCEVAddRecExpr>(s);
@@ -356,7 +387,7 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
     // In the copy no step clamps.
     for (auto& a : accs) {
         auto* fits = cast<Instruction>(mapped(a.fits));
-        fits->replaceAllUsesWith(ConstantInt::getTrue(header->getContext()));
+        fits->replaceAllUsesWith(ConstantInt::getBool(header->getContext(), a.fits_true));
         mapped(a.next)->replaceAllUsesWith(mapped(a.sum));
     }
 
@@ -465,6 +496,10 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
         auto* i_next = at_latch.CreateAdd(i, at_latch.getInt64(1), "spec.i.next");
         auto* more = at_latch.CreateICmpULT(i_next, at_latch.CreateSub(m64, at_latch.getInt64(1)), "spec.more");
         auto* br = at_latch.CreateCondBr(more, copy_header, commit);
+        // In the dominator tree, where Derive expands SCEVs: LLVM 19's
+        // SCEVExpander asks it whether a value it would use dominates the
+        // insertion point, and used poison for every one in a block it lacked.
+        dt.addNewBlock(commit, copy_latch);
         for (auto* succ : successors(copy_latch))
             if (succ != copy_header && succ != commit) succ->removePredecessor(copy_latch);
         // The latch's test too: with chained blocks uncounted
@@ -491,8 +526,10 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
 
     // The commit: the copy's sums, through LCSSA PHIs, and the bound.
     IRBuilder<> at_commit(commit);
+    // Each PHI before the code: a reduction's comes after the bound's.
     auto out = [&](Sum& s) {
-        auto* phi = at_commit.CreatePHI(s.next->getType(), 1, "spec.out");
+        IRBuilder<> at_phis(commit, commit->getFirstInsertionPt());
+        auto* phi = at_phis.CreatePHI(s.next->getType(), 1, "spec.out");
         phi->addIncoming(s.next, copy_latch);
         return phi;
     };

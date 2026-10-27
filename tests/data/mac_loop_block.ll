@@ -2,9 +2,9 @@
 ; tests/vectorize_count_test.cpp: a W32 MAC loop of loop_block_test's mac
 ; programs (one MAC with two loads in a hardware loop), lifted by bcore and
 ; reduced with llvm-reduce-15 to what keeps the test's facts: SatReductionSpeculation
-; speculates its one loop; compiled for znver3 with AVX-512 (Zen 4 to LLVM 15)
-; the vectorizer makes a VF 16 loop and a vectorized VF 8 epilogue, for
-; x86-64-v3 one VF 8 loop.
+; speculates its one loop; compiled for Zen 4 (to LLVM 15 znver3 with AVX-512,
+; to LLVM 19 znver4) the vectorizer makes a vector loop and a vectorized
+; epilogue, for x86-64-v3 one VF 8 loop.
 ; ModuleID = 'reduced.ll'
 source_filename = "bb_module"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"

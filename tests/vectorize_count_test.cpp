@@ -8,12 +8,13 @@
 //   bcore-vectorize-count-test pipeline FILE
 //     a loop block's module as Compiler::optimize is given it (a W32 MAC
 //     loop, tests/data/), compiled -- never run -- at O1 and O2 for Zen 4 as
-//     LLVM 15 sees it (znver3 with AVX-512: VF 16 and a vectorized epilogue)
-//     and for x86-64-v3 (VF 8, none). Each: one loop speculated, one counted
+//     the LLVM in use sees it (a vector loop and a vectorized epilogue) and
+//     for x86-64-v3 (VF 8, none). Each: one loop speculated, one counted
 //     vectorized, and as many vector loops as that CPU's vectorizer makes.
 //     This is what failed on Zen 4 runners only, now on any x86-64 host.
 
 #include "../src/compiler.h"
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
@@ -114,14 +115,20 @@ struct Target {
     unsigned vector_loops;  // the main loop, and an epilogue from VF 16 on
 };
 
-// What LLVM 15's sys::getHostCPUName and getHostCPUFeatures report on Zen 4
-// (AMD EPYC 9V74): znver3, whose tuning does not prefer 256-bit vectors,
-// with every AVX-512 extension it has.
+// What sys::getHostCPUName and getHostCPUFeatures report on Zen 4 (AMD EPYC
+// 9V74): to LLVM 15 znver3, whose tuning does not prefer 256-bit vectors,
+// with every AVX-512 extension it has (VF 16); to LLVM 19 znver4, with its
+// default features. (For LLVM 15's znver3 LLVM 19 makes one VF 8 loop and no
+// epilogue.)
 constexpr Target kTargets[] = {
+#if LLVM_VERSION_MAJOR >= 19
+    {"zen4", "znver4", "", 2},
+#else
     {"zen4", "znver3",
      "+avx512f,+avx512dq,+avx512cd,+avx512bw,+avx512vl,+avx512ifma,+avx512vbmi,+avx512vbmi2,+avx512vnni,"
      "+avx512bitalg,+avx512vpopcntdq,+avx512bf16",
      2},
+#endif
     {"x86-64-v3", "x86-64-v3", "", 1},
 };
 
