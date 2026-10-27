@@ -97,16 +97,15 @@ bool LiftVisitor::shadowable(size_t offset) {
            offset == offsetof(CpuState, chain_packets) || offset == offsetof(CpuState, chain_blocks);
 }
 
-Value* LiftVisitor::cpu_field_ptr(size_t offset, Type* ty, const Twine& name) {
+// ty and name date from typed pointers: an opaque pointer to the field has
+// neither (the name went on a bitcast, which folds away).
+Value* LiftVisitor::cpu_field_ptr(size_t offset, Type* /*ty*/, const Twine& /*name*/) {
     if (offset < offsetof(CpuState, dpregs) + 32 && stencil_regs_[(offset - offsetof(CpuState, dpregs)) / 4])
         reg_hole_violation_ = true;
     if (auto [it, fresh] = field_first_pc_.emplace(offset, packet_pc_); !fresh && packet_pc_ < it->second)
         it->second = packet_pc_;
     Value* base = real_cpu_ && !shadowed(offset) ? real_cpu_ : cpu_ptr_;
-    auto* i8ptr = builder_.CreateBitCast(base, builder_.getInt8PtrTy());
-    auto* gep = builder_.CreateGEP(builder_.getInt8Ty(), i8ptr,
-                                   builder_.getInt32(static_cast<uint32_t>(offset)));
-    return builder_.CreateBitCast(gep, ty->getPointerTo(), name);
+    return builder_.CreateGEP(builder_.getInt8Ty(), base, builder_.getInt32(static_cast<uint32_t>(offset)));
 }
 
 // ---- Register cache ----
@@ -533,7 +532,7 @@ void LiftVisitor::emit_jump(Value* target, const char* kind, bool even) {
         // Misaligned branch: raise alignment exception.
         builder_.SetInsertPoint(bb_misalign);
         auto* ft_exc = llvm::FunctionType::get(builder_.getVoidTy(),
-            {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
+            {builder_.getPtrTy(), builder_.getInt32Ty(), builder_.getPtrTy()}, false);
         builder_.CreateStore(pc_value(current_pc), cpu_field_ptr(offsetof(CpuState, pc), builder_.getInt32Ty()));
         call_extern("cec_exception", ft_exc,
             {cpu_ptr_, builder_.getInt32(VEC_MISALIGNI), mem_ptr_});
@@ -686,12 +685,12 @@ void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
     //   Phase B (always): decrements loop counter(s) whose bottom == insn_pc.
     auto* ft = llvm::FunctionType::get(
         builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt32Ty()},
+        {builder_.getPtrTy(), builder_.getInt32Ty(), builder_.getInt32Ty()},
         false);
     call_extern("bfin_hwloop_step", ft,
         {cpu_ptr_, pc_value(insn_pc), pc_value(insn_pc + insn_len)});
     if (check_cec_pending_) {
-        auto* ft_check = llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getInt8PtrTy()}, false);
+        auto* ft_check = llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getPtrTy()}, false);
         call_extern("cec_check_pending", ft_check, {cpu_ptr_});
         check_cec_pending_ = false;
     }
@@ -892,7 +891,7 @@ void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
         emit_hwloop_count_down(at0, at1, lc0, lc1);
     } else {
         auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
-            {builder_.getInt8PtrTy(), i32, i32}, false);
+            {builder_.getPtrTy(), i32, i32}, false);
         call_extern("bfin_hwloop_step", ft,
             {cpu_ptr_, pc_value(insn_pc), pc_value(insn_pc)});
     }
@@ -910,7 +909,7 @@ void LiftVisitor::emit_epilog_jumped(uint32_t insn_pc) {
 void LiftVisitor::emit_epilog_call(uint32_t insn_pc, uint32_t insn_len, Value* lb0, Value* lb1, bool check_cec) {
     auto& ctx = builder_.getContext();
     auto* fn = builder_.GetInsertBlock()->getParent();
-    auto* i8ptr = builder_.getInt8PtrTy();
+    auto* i8ptr = builder_.getPtrTy();
     auto* at_bottom = builder_.CreateOr(builder_.CreateICmpEQ(lb0, pc_value(insn_pc)),
                                         builder_.CreateICmpEQ(lb1, pc_value(insn_pc)), "at_lb");
     auto* bb_step = BasicBlock::Create(ctx, "hwloop_step", fn);
@@ -957,7 +956,7 @@ void LiftVisitor::emit_cec_check(bool exit_in_check) {
                           weights_rarely(ctx));
     builder_.SetInsertPoint(bb_check);
     call_extern("cec_check_pending",
-                llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getInt8PtrTy()}, false),
+                llvm::FunctionType::get(builder_.getVoidTy(), {builder_.getPtrTy()}, false),
                 {cpu_ptr_});
     if (exit_in_check) emit_did_jump_exit(true);
     builder_.CreateBr(bb_after);
@@ -1535,7 +1534,7 @@ void LiftVisitor::emit_data_alignment(llvm::Value* addr, unsigned width, bool wr
     builder_.SetInsertPoint(fault);
     const uint32_t packet_pc = current_pc - (parallel_slot_ == 1 ? 4 : parallel_slot_ == 2 ? 6 : 0);
     auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt8PtrTy(), builder_.getInt32Ty(),
+        {builder_.getPtrTy(), builder_.getPtrTy(), builder_.getInt32Ty(),
          builder_.getInt32Ty(), builder_.getInt32Ty()}, false);
     call_extern("cec_data_alignment", ft, {cpu_ptr_, mem_ptr_, pc_value(packet_pc),
         addr, builder_.getInt32((write ? 1u << 16 : 0) | (parallel_slot_ == 2 ? 1u << 18 : 0))});
@@ -1552,7 +1551,7 @@ llvm::Value* LiftVisitor::entry_load_ptr(size_t offset, llvm::Value*& slot, cons
         llvm::IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
         auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), real_cpu_ ? real_cpu_ : cpu_ptr_,
                                          at_entry.getInt32(offset));
-        slot = at_entry.CreateLoad(at_entry.getInt8PtrTy(), field, name);
+        slot = at_entry.CreateLoad(at_entry.getPtrTy(), field, name);
     }
     return slot;
 }
@@ -1561,7 +1560,7 @@ llvm::Value* LiftVisitor::entry_load_ptr(size_t offset, llvm::Value*& slot, cons
 // call the host (see Memory::page_table()). The table pointer is loaded once,
 // with entry_load_ptr.
 llvm::Value* LiftVisitor::emit_page_lookup(llvm::Value* addr) {
-    auto* ptr_ty = builder_.getInt8PtrTy();
+    auto* ptr_ty = builder_.getPtrTy();
     entry_load_ptr(offsetof(CpuState, page_table), page_table_value_, "page_table");
     auto* index = builder_.CreateZExt(builder_.CreateLShr(addr, Memory::kPageBits),
                                       builder_.getInt64Ty(), "page_index");
@@ -1601,7 +1600,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* base_c = ConstantInt::get(i64_ty, fast_base_value_);
         auto* addr64 = builder_.CreateZExt(addr, i64_ty);
         auto* host_addr = builder_.CreateAdd(base_c, addr64);
-        auto* ptr = builder_.CreateIntToPtr(host_addr, ret_ty->getPointerTo());
+        auto* ptr = builder_.CreateIntToPtr(host_addr, builder_.getPtrTy());
         return builder_.CreateAlignedLoad(ret_ty, ptr, llvm::MaybeAlign(1));
     }
     // Non-fastmem rawmem fast path: inline load for addr < rawmem_limit_ (normal data range).
@@ -1627,7 +1626,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         auto* base_c = ConstantInt::get(i64_ty, fast_base_value_);
         auto* addr64 = builder_.CreateZExt(addr, i64_ty);
         auto* host_addr = builder_.CreateAdd(base_c, addr64);
-        auto* ptr = builder_.CreateIntToPtr(host_addr, ret_ty->getPointerTo());
+        auto* ptr = builder_.CreateIntToPtr(host_addr, builder_.getPtrTy());
         auto* fast_result = builder_.CreateAlignedLoad(ret_ty, ptr, llvm::MaybeAlign(1));
         auto* fast_bb = builder_.GetInsertBlock();
         builder_.CreateBr(bb_done);
@@ -1635,7 +1634,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         // Slow path: extern call (for MMR addresses, fault addresses, etc.)
         builder_.SetInsertPoint(bb_slow);
         auto* ft = llvm::FunctionType::get(ret_ty,
-            {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
+            {builder_.getPtrTy(), builder_.getInt32Ty()}, false);
         auto* slow_result = call_extern(fn, ft, {mem_ptr_, addr});
         emit_did_jump_exit(true);  // fault may have set did_jump
         auto* slow_bb = builder_.GetInsertBlock();
@@ -1671,7 +1670,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
 
         builder_.SetInsertPoint(bb_slow);
         auto* ft = llvm::FunctionType::get(ret_ty,
-            {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
+            {builder_.getPtrTy(), builder_.getInt32Ty()}, false);
         auto* slow_result = call_extern(fn, ft, {mem_ptr_, addr});
         emit_did_jump_exit(true);
         auto* slow_bb = builder_.GetInsertBlock();
@@ -1685,7 +1684,7 @@ llvm::Value* LiftVisitor::emit_mem_read(const char* fn, llvm::Type* ret_ty, llvm
         return phi;
     }
     auto* ft = llvm::FunctionType::get(ret_ty,
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty()}, false);
     auto* result = call_extern(fn, ft, {mem_ptr_, addr});
     // If mem_read failed, must break out immediately to avoid follow-up instructions
     emit_did_jump_exit(true);
@@ -1701,7 +1700,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* base_c = ConstantInt::get(i64_ty, fast_base_value_);
         auto* addr64 = builder_.CreateZExt(addr, i64_ty);
         auto* host_addr = builder_.CreateAdd(base_c, addr64);
-        auto* ptr = builder_.CreateIntToPtr(host_addr, val->getType()->getPointerTo());
+        auto* ptr = builder_.CreateIntToPtr(host_addr, builder_.getPtrTy());
         builder_.CreateAlignedStore(val, ptr, llvm::MaybeAlign(1));
         return;
     }
@@ -1726,7 +1725,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         auto* base_c = ConstantInt::get(i64_ty, fast_base_value_);
         auto* addr64 = builder_.CreateZExt(addr, i64_ty);
         auto* host_addr = builder_.CreateAdd(base_c, addr64);
-        auto* ptr = builder_.CreateIntToPtr(host_addr, val->getType()->getPointerTo());
+        auto* ptr = builder_.CreateIntToPtr(host_addr, builder_.getPtrTy());
         builder_.CreateAlignedStore(val, ptr, llvm::MaybeAlign(1));
         builder_.CreateBr(bb_done);
 
@@ -1734,7 +1733,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
         builder_.SetInsertPoint(bb_slow);
         auto* val_ty = val->getType();
         auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
-            {builder_.getInt8PtrTy(), builder_.getInt32Ty(), val_ty}, false);
+            {builder_.getPtrTy(), builder_.getInt32Ty(), val_ty}, false);
         call_extern(fn, ft, {mem_ptr_, addr, val});
         emit_did_jump_exit(true);  // MMR write may have raised an exception
         builder_.CreateBr(bb_done);
@@ -1763,7 +1762,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
 
         builder_.SetInsertPoint(bb_slow);
         auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
-            {builder_.getInt8PtrTy(), builder_.getInt32Ty(), val->getType()}, false);
+            {builder_.getPtrTy(), builder_.getInt32Ty(), val->getType()}, false);
         call_extern(fn, ft, {mem_ptr_, addr, val});
         emit_did_jump_exit(true);
         builder_.CreateBr(bb_done);
@@ -1775,7 +1774,7 @@ void LiftVisitor::emit_mem_write(const char* fn, llvm::Value* addr, llvm::Value*
     // Tier 3: always extern call (rawmem_limit not available)
     auto* val_ty = val->getType();
     auto* ft = llvm::FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty(), val_ty}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty(), val_ty}, false);
     call_extern(fn, ft, {mem_ptr_, addr, val});
     // If mem_write failed, must break out immediately to avoid follow-up instructions
     emit_did_jump_exit(true);
@@ -1806,7 +1805,7 @@ bool LiftVisitor::decode_ProgCtrl_EXCPT(uint16_t imm) {
     // The libgloss syscall convention (EXCPT 0 with P0=syscall_nr) is handled
     // inside cec_exception when EVT3 is not installed (see cec.cpp).
     auto* ft = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty(), builder_.getPtrTy()}, false);
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(imm), mem_ptr_});
     // cec_exception sets cpu->pc = EVT3 and cpu->did_jump = true.
     terminate("exception");
@@ -1936,7 +1935,7 @@ bool LiftVisitor::decode_REGMV(uint16_t gd, uint16_t gs, uint16_t d, uint16_t s)
     // require supervisor mode. Raises VEC_ILL_RES (0x2e) from user mode.
     if (gs == 7 || gd == 7) {
         auto* ft_sup = FunctionType::get(builder_.getVoidTy(),
-            {builder_.getInt8PtrTy()}, false);
+            {builder_.getPtrTy()}, false);
         call_extern("cec_check_sup", ft_sup, {cpu_ptr_});
         emit_did_jump_exit(true); // exit before register read/write if exception was raised
     }
@@ -2206,7 +2205,7 @@ bool LiftVisitor::decode_PushReg(uint16_t g, uint16_t r) {
     if (is_reserved || (g == 1 && r == 6)) return false;
     // [--SP] = reg
     auto* ft_sup = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* sp = load_preg(6, "sp"); // SP = P6 = dpregs[14]
     auto* new_sp = builder_.CreateSub(sp, builder_.getInt32(4), "sp_dec");
     Value* push_val;
@@ -2240,7 +2239,7 @@ bool LiftVisitor::decode_PopReg(uint16_t g, uint16_t r) {
     if (!mostreg) return false;
     // reg = [SP++]
     auto* ft_sup = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* sp = load_preg(6, "sp");
     auto* val = emit_mem_read("mem_read32", builder_.getInt32Ty(), sp);
     store_preg(6, builder_.CreateAdd(sp, builder_.getInt32(4), "sp_inc"));
@@ -2265,7 +2264,7 @@ bool LiftVisitor::decode_PopReg(uint16_t g, uint16_t r) {
             builder_.CreateCondBr(is_um, bb_user, bb_cont);
             builder_.SetInsertPoint(bb_user);
             auto* ft_exc = FunctionType::get(builder_.getVoidTy(),
-                {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
+                {builder_.getPtrTy(), builder_.getInt32Ty(), builder_.getPtrTy()}, false);
             call_extern("cec_exception", ft_exc, {cpu_ptr_, builder_.getInt32(VEC_ILGAL_I), mem_ptr_});
             builder_.CreateRetVoid();
             builder_.SetInsertPoint(bb_cont);
@@ -2519,7 +2518,7 @@ bool LiftVisitor::decode_ProgCtrl_RTI() {
 
     // cec_return_rti(CpuState*) → uint32_t newpc
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* newpc = call_extern("cec_return_rti", ft, {cpu_ptr_});
     emit_jump(newpc, "return-from-event");
     return true;
@@ -2529,7 +2528,7 @@ bool LiftVisitor::decode_ProgCtrl_RTX() {
 
     // cec_return_rtx(CpuState*) → uint32_t newpc
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* newpc = call_extern("cec_return_rtx", ft, {cpu_ptr_});
     emit_jump(newpc, "return-from-event");
     return true;
@@ -2539,7 +2538,7 @@ bool LiftVisitor::decode_ProgCtrl_RTN() {
 
     // cec_return_rtn(CpuState*) → uint32_t newpc
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* newpc = call_extern("cec_return_rtn", ft, {cpu_ptr_});
     emit_jump(newpc, "return-from-event");
     return true;
@@ -2549,7 +2548,7 @@ bool LiftVisitor::decode_ProgCtrl_RTE() {
 
     // cec_return_rte(CpuState*) → uint32_t newpc
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* newpc = call_extern("cec_return_rte", ft, {cpu_ptr_});
     emit_jump(newpc, "return-from-event");
     return true;
@@ -2570,8 +2569,8 @@ bool LiftVisitor::decode_ProgCtrl_IDLE() {
     auto* i8 = builder_.getInt8Ty();
     Value* wake = builder_.CreateLoad(i8, entry_load_ptr(offsetof(CpuState, cec_pending), cec_pending_value_,
                                                          "cec_pending_flag"), "cec_pending");
-    auto* wake_ptr = builder_.CreateLoad(builder_.getInt8PtrTy(), cpu_field_ptr(offsetof(CpuState, idle_wake),
-                                                                                 builder_.getInt8PtrTy()), "idle_wake_ptr");
+    auto* wake_ptr = builder_.CreateLoad(builder_.getPtrTy(), cpu_field_ptr(offsetof(CpuState, idle_wake),
+                                                                                 builder_.getPtrTy()), "idle_wake_ptr");
     auto* fn = builder_.GetInsertBlock()->getParent();
     auto* has_flag = BasicBlock::Create(ctx, "idle_wake_flag", fn);
     auto* decide = BasicBlock::Create(ctx, "idle_decide", fn);
@@ -2605,7 +2604,7 @@ bool LiftVisitor::decode_ProgCtrl_CLI(uint16_t d) {
 
     // CLI Rd: mask interrupts, store old IMASK in Rd
     auto* ft = FunctionType::get(builder_.getInt32Ty(),
-        {builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy()}, false);
     auto* old_imask = call_extern("cec_cli", ft, {cpu_ptr_});
     store_dreg(d, old_imask);
     // CLI may raise VEC_ILL_RES if in user mode (sets did_jump).
@@ -2618,7 +2617,7 @@ bool LiftVisitor::decode_ProgCtrl_STI(uint16_t d) {
     // STI Rd: restore IMASK from Rd
     auto* mask = load_dreg(d, "sti_mask");
     auto* ft = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty()}, false);
     call_extern("cec_sti", ft, {cpu_ptr_, mask});
     check_cec_pending_ = true;
     // STI may dispatch a pending interrupt or raise VEC_ILL_RES (sets did_jump).
@@ -2664,7 +2663,7 @@ bool LiftVisitor::decode_ProgCtrl_RAISE(uint16_t imm) {
     if (parallel_slot_ > 0) return false;
 
     auto* ft = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty()}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty()}, false);
     call_extern("cec_raise", ft, {cpu_ptr_, builder_.getInt32(imm)});
     check_cec_pending_ = true;
     // Terminate the BB: cec_raise may have redirected cpu->pc
@@ -8751,11 +8750,9 @@ static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
     B.SetInsertPoint(bb_fail);
     // did_jump perhaps in a loop block's shadow (LiftVisitor::shadowed), the
     // rest in the real state.
-    auto make_ptr = [&](size_t off, llvm::Type* ty) {
+    auto make_ptr = [&](size_t off, llvm::Type*) {
         auto* base = off == offsetof(CpuState, did_jump) ? did_jump_base : real_cpu;
-        auto* i8ptr = B.CreateBitCast(base, B.getInt8PtrTy());
-        auto* gep   = B.CreateConstGEP1_32(B.getInt8Ty(), i8ptr, (unsigned)off);
-        return B.CreateBitCast(gep, ty->getPointerTo());
+        return B.CreateConstGEP1_32(B.getInt8Ty(), base, (unsigned)off);
     };
     B.CreateStore(B.getInt8(1),  make_ptr(offsetof(CpuState, halted),    B.getInt8Ty()));
     B.CreateStore(B.getInt32(0), make_ptr(offsetof(CpuState, chain_budget), B.getInt32Ty()));
@@ -8834,7 +8831,7 @@ bool LiftVisitor::decode_unknown_16(uint16_t insn) {
     // When decode_* returns false (in a parallel slot), in_parallel_ is true.
     uint32_t exc = in_parallel_ ? VEC_ILGAL_I : VEC_UNDEF_I;
     auto* ft = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty(), builder_.getPtrTy()}, false);
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(exc), mem_ptr_});
     terminate("illegal");
     return true;
@@ -8844,7 +8841,7 @@ bool LiftVisitor::decode_unknown_32(uint32_t insn) {
     // Parallel-slot decode failures set in_parallel_; use the more precise code.
     uint32_t exc = in_parallel_ ? VEC_ILGAL_I : VEC_UNDEF_I;
     auto* ft = FunctionType::get(builder_.getVoidTy(),
-        {builder_.getInt8PtrTy(), builder_.getInt32Ty(), builder_.getInt8PtrTy()}, false);
+        {builder_.getPtrTy(), builder_.getInt32Ty(), builder_.getPtrTy()}, false);
     call_extern("cec_exception", ft, {cpu_ptr_, builder_.getInt32(exc), mem_ptr_});
     terminate("illegal");
     return true;

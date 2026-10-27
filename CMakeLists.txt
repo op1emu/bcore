@@ -13,7 +13,17 @@ set(LLVM_DIR "" CACHE PATH
     "Path to LLVM CMake config directory (LLVMConfig.cmake). \
 Leave empty to search standard system paths. \
 Example: /usr/lib/llvm-15/lib/cmake/llvm")
-find_package(LLVM 15 REQUIRED CONFIG)
+# LLVM 15 on the native hosts, what is searched for; 19 is the WebAssembly
+# build's (emscripten-forge has no 15), and builds natively too, from the
+# LLVM_DIR given. What differs is in src/llvm_compat.h.
+if(LLVM_DIR)
+    find_package(LLVM REQUIRED CONFIG)  # that install, whichever version (a version would search on)
+else()
+    find_package(LLVM 15 REQUIRED CONFIG)
+endif()
+if(NOT LLVM_VERSION_MAJOR EQUAL 15 AND NOT LLVM_VERSION_MAJOR EQUAL 19)
+    message(FATAL_ERROR "bcore needs LLVM 15 or 19, found ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
+endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
 llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)

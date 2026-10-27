@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "llvm_compat.h"
+
 #include <llvm/ExecutionEngine/RTDyldMemoryManager.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
 
@@ -134,8 +136,9 @@ public:
     explicit ArenaMemoryManager(std::shared_ptr<CodeArenaPool> pool) : pool_(std::move(pool)) {}
 
     bool needsToReserveAllocationSpace() override { return true; }
-    void reserveAllocationSpace(uintptr_t code, uint32_t code_align, uintptr_t ro_data,
-                                uint32_t ro_align, uintptr_t rw_data, uint32_t rw_align) override;
+    void reserveAllocationSpace(uintptr_t code, bcore_llvm::SectionAlign code_align, uintptr_t ro_data,
+                                bcore_llvm::SectionAlign ro_align, uintptr_t rw_data,
+                                bcore_llvm::SectionAlign rw_align) override;
     uint8_t* allocateCodeSection(uintptr_t size, unsigned alignment, unsigned id,
                                  llvm::StringRef name) override;
     uint8_t* allocateDataSection(uintptr_t size, unsigned alignment, unsigned id,

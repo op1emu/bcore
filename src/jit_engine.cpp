@@ -29,11 +29,15 @@
 JitEngine::JitEngine() = default;
 JitEngine::~JitEngine() = default;
 
-// Helper to create a JITEvaluatedSymbol from a function pointer
-static llvm::JITEvaluatedSymbol sym_from_ptr(void* ptr) {
-    return llvm::JITEvaluatedSymbol(
-        llvm::pointerToJITTargetAddress(ptr),
-        llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable);
+// An absolute symbol at a function pointer (an ExecutorSymbolDef since
+// LLVM 17, a JITEvaluatedSymbol before).
+static auto sym_from_ptr(void* ptr) {
+    const auto flags = llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable;
+#if LLVM_VERSION_MAJOR >= 17
+    return llvm::orc::ExecutorSymbolDef(llvm::orc::ExecutorAddr::fromPtr(ptr), flags);
+#else
+    return llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(ptr), flags);
+#endif
 }
 
 // Compiles bcore_enter only: blocks come as object files (addObject) from
@@ -51,6 +55,13 @@ bool JitEngine::init() {
     jtmb_or_err->getOptions().SwiftAsyncFramePointer = llvm::SwiftAsyncFramePointerMode::Never;
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(std::move(*jtmb_or_err));
+#if LLVM_VERSION_MAJOR >= 17
+    // Every symbol generated code may use is registered below: nothing is to
+    // come from the process, and blocks have no initializers for a platform
+    // to run.
+    builder.setLinkProcessSymbolsByDefault(false);
+    builder.setPlatformSetUp(llvm::orc::setUpInactivePlatform);
+#endif
     // LLJIT's default object layer (LLJIT::createObjectLinkingLayer), with
     // every object's sections placed in the engine's arenas instead of pages
     // of their own (CodeArenaPool; an object no arena can take gets the
@@ -200,7 +211,7 @@ bool JitEngine::defineEnter() {
     auto mod = std::make_unique<llvm::Module>("bcore_enter", *ctx);
     mod->setDataLayout(jit_->getDataLayout());
     mod->setTargetTriple(jit_->getTargetTriple().str());
-    auto* ptr = llvm::Type::getInt8PtrTy(*ctx);
+    auto* ptr = llvm::PointerType::getUnqual(*ctx);
     auto* void_ty = llvm::Type::getVoidTy(*ctx);
     auto* fn = llvm::Function::Create(llvm::FunctionType::get(void_ty, {ptr, ptr, ptr}, false),
                                       llvm::Function::ExternalLinkage, "bcore_enter", mod.get());

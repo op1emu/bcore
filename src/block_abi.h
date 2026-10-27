@@ -29,6 +29,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
 
 namespace bcore_abi {
 
@@ -39,7 +40,7 @@ inline constexpr const char* kNoCalleeSaved = "no_callee_saved_registers";
 
 // void (CpuState*, Memory*), in kCpuArg and kMemArg.
 inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {
-    auto* ptr = llvm::Type::getInt8PtrTy(ctx);
+    auto* ptr = llvm::PointerType::getUnqual(ctx);
     return llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptr, ptr}, false);
 }
 

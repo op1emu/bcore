@@ -1,5 +1,6 @@
 #include "steady_skip.h"
 #include "guest_memory.h"
+#include "llvm_compat.h"
 #include "block_abi.h"
 
 #include "cpu_state.h"
@@ -18,6 +19,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 
 using namespace llvm;
@@ -34,7 +36,7 @@ std::optional<int64_t> cpu_offset(const Value* ptr, const Value* cpu, const Data
 
 bool is_memory_read(const CallInst& call) {
     const Function* f = call.getCalledFunction();
-    return f && f->getName().startswith("mem_read");
+    return f && bcore_llvm::starts_with(f->getName(), "mem_read");
 }
 
 struct Plan {

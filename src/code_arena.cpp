@@ -121,9 +121,12 @@ std::shared_ptr<CodeArena> CodeArenaPool::arenaFor(uintptr_t code, uintptr_t dat
 
 // Each size is rounded up to its alignment once more, for the padding before
 // the first section of each kind.
-void ArenaMemoryManager::reserveAllocationSpace(uintptr_t code, uint32_t code_align, uintptr_t ro_data,
-                                                uint32_t ro_align, uintptr_t rw_data, uint32_t rw_align) {
-    arena_ = pool_->arenaFor(code + code_align, ro_data + ro_align + rw_data + rw_align);
+void ArenaMemoryManager::reserveAllocationSpace(uintptr_t code, bcore_llvm::SectionAlign code_align,
+                                                uintptr_t ro_data, bcore_llvm::SectionAlign ro_align,
+                                                uintptr_t rw_data, bcore_llvm::SectionAlign rw_align) {
+    using bcore_llvm::align_value;
+    arena_ = pool_->arenaFor(code + align_value(code_align),
+                             ro_data + align_value(ro_align) + rw_data + align_value(rw_align));
     if (!arena_) own_ = std::make_unique<llvm::SectionMemoryManager>();
 }
 
@@ -138,7 +141,7 @@ bool ArenaMemoryManager::ownManager() {
 uint8_t* ArenaMemoryManager::allocateCodeSection(uintptr_t size, unsigned alignment, unsigned id,
                                                  llvm::StringRef name) {
     if (ownManager()) return own_->allocateCodeSection(size, alignment, id, name);
-    const bool cold = name.startswith(".text.split");
+    const bool cold = bcore_llvm::starts_with(name, ".text.split");
     uint8_t* p = arena_->allocate(cold ? CodeArena::Region::Cold : CodeArena::Region::Hot, size, alignment);
     if (p) code_.emplace_back(p, size);
     return p;

@@ -3,6 +3,7 @@
 #include "core.h"
 #include "mmr.h"
 #if BCORE_ENABLE_PROFILE
+#include "llvm_compat.h"
 #include "profile_state.h"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -13,7 +14,11 @@
 #include <llvm/Object/SymbolSize.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
+#if LLVM_VERSION_MAJOR >= 17
+#include <llvm/TargetParser/Host.h>
+#else
 #include <llvm/Support/Host.h>
+#endif
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
@@ -227,7 +232,7 @@ static uint64_t hash_of_block(const std::string& ir) {
     llvm::SmallVector<char, 0> object;
     llvm::raw_svector_ostream stream(object);
     llvm::legacy::PassManager passes;
-    require(!machine->addPassesToEmitFile(passes, stream, nullptr, llvm::CGFT_ObjectFile), "emit object");
+    require(!machine->addPassesToEmitFile(passes, stream, nullptr, bcore_llvm::kObjectFile), "emit object");
     passes.run(*module);
     auto file = llvm::object::ObjectFile::createObjectFile(
         llvm::MemoryBufferRef(llvm::StringRef(object.data(), object.size()), "table.o"));

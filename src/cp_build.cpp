@@ -7,7 +7,6 @@
 #include <cctype>
 #include <cstring>
 
-#include <llvm/ADT/Triple.h>
 #include <llvm/BinaryFormat/ELF.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
@@ -26,6 +25,7 @@
 #include "compiler.h"
 #include "helper_abi.h"
 #include "lift_visitor.h"
+#include "llvm_compat.h"
 
 using namespace llvm;
 
@@ -255,7 +255,8 @@ Value* rebuild(Constant* c, Instruction* at, Made& made, std::string& error) {
         error = "a value hole in a constant aggregate";
         return nullptr;
     }
-    Instruction* inst = ce->getAsInstruction(at);
+    Instruction* inst = ce->getAsInstruction();  // then placed: LLVM 19 takes no position
+    inst->insertBefore(at);
     for (Use& op : inst->operands()) {
         auto* k = dyn_cast<Constant>(op.get());
         if (!k || !mentions_hole(k)) continue;

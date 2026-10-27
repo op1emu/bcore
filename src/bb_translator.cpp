@@ -298,7 +298,7 @@ void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* fir
     auto* i32 = b.getInt32Ty();
     Instruction* at = &*first_entry->getFirstInsertionPt();
     b.SetInsertPoint(at);
-    auto* chain = b.CreateLoad(b.getInt8PtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
+    auto* chain = b.CreateLoad(b.getPtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
     auto* table = b.CreateGEP(i8, chain, b.getInt64(kTierTableOffset), "tier_table");
     auto* slot = b.CreateGEP(i8, table, count_offset);
     auto* count = b.CreateAdd(b.CreateLoad(i32, slot), b.getInt32(1), "tier_count");
@@ -720,7 +720,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     auto& ctx = fn->getContext();
     auto* i8 = b.getInt8Ty();
     auto* i32 = b.getInt32Ty();
-    auto* ptr = b.getInt8PtrTy();
+    auto* ptr = b.getPtrTy();
 
     // The chain table does not change while a block runs (the host compiles
     // and publishes between runs): loaded once.
