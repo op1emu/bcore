@@ -971,7 +971,9 @@ execution -20.3%. Work the same at every mark.
   a JitWriteScope (mapped as one MAP_JIT range, its data half replaced in
   place: MAP_JIT takes no MAP_FIXED, and a data half asked for by a hint
   alone was not kept, so every object had pages of its own); no function
-  splitting off x86-64 (an AArch64 conditional branch reaches 1 MiB); the
+  splitting in the LLVM tier off x86-64 (an AArch64 conditional branch
+  reaches 1 MiB, and RuntimeDyld places the parts; the stencils are split,
+  see "Copy-and-patch on AArch64"); the
   large code model on Darwin, because RuntimeDyld's Mach-O AArch64 linking
   makes no stub for a helper call out of reach; no Swift async frame
   record (SwiftAsyncFramePointer never: nothing reads the Memory from a
@@ -1003,7 +1005,12 @@ execution -20.3%. Work the same at every mark.
   relocations; reusing one that dominates the use (the loop bottoms'
   compares each take the PC), 19.7 MB and 0.87 M. Coverage is the x86-64
   set's: every 16-bit encoding, 245980 of 246012 32-bit keys.
-- B/BL reach 128 MiB and an arena's hot region is 384 MiB: its helper jumps
+- B/BL reach 128 MiB, and on AArch64 an arena's code is one 128 MiB window:
+  hot code grows up from its base and cold code down from its top, so a
+  branch between a stencil's parts always reaches (Dolphin pairs near and
+  far code the same way, HotSpot keeps each pair of code heaps within
+  128 MiB). Neither part has a fixed share; 64 arenas of 256 MiB of address
+  space each. A block's helper jumps
   and exits are copied again beside a block that has none within 120 MiB
   (as Dynarmic keeps its helpers' preludes within reach, and CPython puts a
   trampoline per trace). The jumps go through x16 (AAPCS64's veneer
@@ -1013,9 +1020,29 @@ execution -20.3%. Work the same at every mark.
   instructions in another order (LLVM built for each host schedules them
   differently), the same on Linux arm64 and on macOS. It is for looking at;
   the library takes only its own host's set.
-- No machine function splitting: LLVM 15's AArch64 backend relaxes no
-  branch to another section (CONDBR19 reaches 1 MiB, TSTBR14 32 KiB; LLVM
-  18 relaxes them). The stencils keep their cold paths inline.
+- The stencils are split into hot and cold code as on x86-64, but LLVM
+  15's AArch64 backend relaxes no branch to another section: a B.cond or
+  CBZ to the other part stays a CONDBR19 (1 MiB), a TBZ a TSTBR14
+  (32 KiB). The translator points each at a B of its own, as LLVM 18 does
+  at a function's end (D145211, 0315fca): the hot path keeps one branch
+  not taken, the cold path takes one more. A stencil's hot part ends in the
+  jump to the next one, which is dropped, so its trampolines go after the
+  block's last piece, and after a piece midway once the code since the last
+  ones passes 24 KiB (that piece keeps its jump); a cold part ends in a
+  jump, and its trampolines follow it. One per target and part: 1.93
+  conditional branches to the cold part per stencil, 1.26 targets. Never
+  through x16: LLVM does not know the branch leaves the function, and x16
+  may be live (lld makes thunks for B/BL only). cp_stencil_test's long mode
+  runs blocks of 250 of the largest stencils, TBZ first (39 KiB on arm64).
+- Split, a stencil's hot code is 146.4 bytes on average instead of 221.1
+  (-34%); 65224 of 89127 stencils have a cold part, 74.2 bytes on average.
+  Tier 0 only, 198 test programs and two benchmarks, 9 alternating rounds
+  of CPU time (median split / not split): on a Linux arm64 runner the
+  programs took 0.994 (8 rounds of 9 faster), fir_loop 0.991 (9 of 9),
+  bench 0.994 (7 of 9); on an Apple M1 runner 0.994, 0.967 and 0.955, with
+  rounds from 0.75 to 1.13. The programs are small; their blocks fit the
+  instruction cache either way. bcore-stencilgen --no-split
+  (BCORE_STENCIL_SPLIT=OFF) makes the set unsplit.
 - Tier 0 only (threshold 1e9), 100 test programs run one after another:
   stencils took 0.57 of LLVM's wall time on an Apple M1 runner (4.69 s
   against 8.23 s) and on a Linux arm64 runner (6.70 against 11.78), as on
