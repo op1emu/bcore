@@ -1,7 +1,7 @@
 #include "jit_engine.h"
 #include "block_abi.h"
 #include "helper_abi.h"
-#include "host_bridge.h"
+#include "helper_functions.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -90,39 +90,13 @@ bool JitEngine::init() {
 
     // Each helper as generated code calls it, in the helpers' convention
     // (helper_abi.h).
-    const std::pair<const char*, void*> helpers[] = {
-        {"mem_read8", reinterpret_cast<void*>(&mem_read8)},
-        {"mem_read16", reinterpret_cast<void*>(&mem_read16)},
-        {"mem_read32", reinterpret_cast<void*>(&mem_read32)},
-        {"mem_write8", reinterpret_cast<void*>(&mem_write8)},
-        {"mem_write16", reinterpret_cast<void*>(&mem_write16)},
-        {"mem_write32", reinterpret_cast<void*>(&mem_write32)},
-        {"bfin_syscall", reinterpret_cast<void*>(&bfin_syscall)},
-        {"bfin_putchar", reinterpret_cast<void*>(&bfin_putchar)},
-        {"cec_data_alignment", reinterpret_cast<void*>(&cec_data_alignment)},
-        {"cec_exception", reinterpret_cast<void*>(&cec_exception)},
-        {"cec_raise", reinterpret_cast<void*>(&cec_raise)},
-        {"cec_return_rti", reinterpret_cast<void*>(&cec_return_rti)},
-        {"cec_return_rtx", reinterpret_cast<void*>(&cec_return_rtx)},
-        {"cec_return_rtn", reinterpret_cast<void*>(&cec_return_rtn)},
-        {"cec_return_rte", reinterpret_cast<void*>(&cec_return_rte)},
-        {"cec_cli", reinterpret_cast<void*>(&cec_cli)},
-        {"cec_sti", reinterpret_cast<void*>(&cec_sti)},
-        {"cec_push_reti", reinterpret_cast<void*>(&cec_push_reti)},
-        {"cec_pop_reti", reinterpret_cast<void*>(&cec_pop_reti)},
-        {"cec_check_sup", reinterpret_cast<void*>(&cec_check_sup)},
-        {"cec_is_user_mode", reinterpret_cast<void*>(&cec_is_user_mode)},
-        {"cec_check_pending", reinterpret_cast<void*>(&cec_check_pending)},
-        {"bfin_hwloop_step", reinterpret_cast<void*>(&bfin_hwloop_step)},
-    };
-    static_assert(sizeof(helpers) / sizeof(helpers[0]) == sizeof(bcore_abi::kHelpers) / sizeof(bcore_abi::kHelpers[0]),
+    static_assert(std::size(bcore_abi::kHelperFunctions) == std::size(bcore_abi::kHelpers),
                   "a function for every helper");
     std::vector<const char*> names;
     std::vector<void*> targets;
-    for (const auto& [name, fn] : helpers) {
-        void* caught = bcore_abi::kHelpersCatch ? bcore_bridge::wrapper(name) : nullptr;
+    for (const auto& [name, fn] : bcore_abi::kHelperFunctions) {
         names.push_back(name);
-        targets.push_back(caught ? caught : fn);
+        targets.push_back(bcore_abi::bound_helper(name, fn));
     }
     std::vector<void*> trampolines(names.size());
     if (!makeTrampolines(names.size(), names.data(), targets.data(), trampolines.data())) return false;

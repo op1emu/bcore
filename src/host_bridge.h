@@ -17,6 +17,20 @@
 #include "cpu_state.h"
 #include "mem.h"
 
+// On macOS the helpers catch, and in a WebAssembly build, where an
+// exception that left a block would leave the blocks' stack pointer where
+// the block's frame had moved it (wasm_engine.cpp); BCORE_HELPERS_CATCH=1
+// makes them catch on any host. Every helper that may reach host code is
+// among the wrappers (host_bridge.cpp): one that may throw and is not would
+// be a hole there.
+#ifndef BCORE_HELPERS_CATCH
+#if defined(__APPLE__) || defined(__EMSCRIPTEN__)
+#define BCORE_HELPERS_CATCH 1
+#else
+#define BCORE_HELPERS_CATCH 0
+#endif
+#endif
+
 namespace bcore_bridge {
 
 uint8_t mem_read8(Memory* mem, uint32_t addr) noexcept;

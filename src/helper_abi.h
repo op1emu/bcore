@@ -49,6 +49,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 
+#include "host_bridge.h"
 #include "llvm_compat.h"
 
 namespace bcore_abi {
@@ -89,14 +90,7 @@ inline llvm::Type* helper_letter_type(llvm::LLVMContext& ctx, char c) {
     llvm::report_fatal_error("bad helper signature letter");
 }
 
-#ifndef BCORE_HELPERS_CATCH
-#if defined(__APPLE__)
-#define BCORE_HELPERS_CATCH 1
-#else
-#define BCORE_HELPERS_CATCH 0
-#endif
-#endif
-inline constexpr bool kHelpersCatch = BCORE_HELPERS_CATCH;
+inline constexpr bool kHelpersCatch = BCORE_HELPERS_CATCH;  // host_bridge.h
 
 // The convention a helper is called in (see above).
 inline constexpr llvm::CallingConv::ID kHelperCC =
