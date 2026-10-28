@@ -22,7 +22,7 @@ namespace bcore {
 // The first half of the reservation holds code, readable, writable and
 // executable for as long as the arena lives (no permission changes as blocks
 // are added), the blocks' hot code apart from their cold parts (the machine
-// function splitter's .text.split.* sections, see JitEngine::init, and the
+// function splitter's .text.split.* sections, see Compiler::init, and the
 // copy-and-patch stencils' cold code), so that hot code lies densely:
 //  - Split (x86-64): hot code in its first three quarters, cold in the last.
 //  - Shared (AArch64): hot code from its start up, cold code from its end

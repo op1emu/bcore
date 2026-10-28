@@ -397,7 +397,7 @@ private:
 bool attach_listeners(ProfileState& state, JitEngine& jit) {
     state.perf_attached = false;
     state.map_listener = std::make_unique<BlockMapListener>(state);
-    if (!jit.registerJITEventListener(*state.map_listener)) {
+    if (!jit.loader().registerJITEventListener(*state.map_listener)) {
         // Linking layer is not RTDyldObjectLinkingLayer-based: the code map
         // stays empty and the iteration APIs fall back to the lookup-derived
         // address table without sizes. Hosts see this through
@@ -424,13 +424,13 @@ bool attach_perf_listener(ProfileState& state, JitEngine& jit) {
     if (!state.perf_listener) return false;
     // LLVM does not deduplicate registrations. The per-engine flag above
     // prevents duplicate notifications; attach_listeners resets it on rebuild.
-    state.perf_attached = jit.registerJITEventListener(*state.perf_listener);
+    state.perf_attached = jit.loader().registerJITEventListener(*state.perf_listener);
     return state.perf_attached;
 }
 
 void detach_perf_listener(ProfileState& state, JitEngine& jit) {
     if (!state.perf_attached) return;
-    jit.unregisterJITEventListener(*state.perf_listener);
+    jit.loader().unregisterJITEventListener(*state.perf_listener);
     state.perf_attached = false;
 }
 #else

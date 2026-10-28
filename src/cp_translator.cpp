@@ -229,7 +229,7 @@ bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, co
 
 // Where a stencil's call of each helper goes: the helper (wrapped,
 // kHelperFns) where the helpers' convention is C's, else a trampoline in
-// it to the C function (JitEngine::makeTrampolines); memset, memcpy and
+// it to the C function (CodeLoader::makeTrampolines); memset, memcpy and
 // memmove are called in C's.
 bool CpTranslator::helper_targets() {
     if (helpers_ == Helpers::kReady) return true;
@@ -247,7 +247,7 @@ bool CpTranslator::helper_targets() {
     }
     std::vector<void*> out(names.size());
     if (!names.empty() &&
-        !jit_.makeTrampolines(names.size(), names.data(), targets.data(), out.data(), "bcore_cp_trampoline."))
+        !jit_.loader().makeTrampolines(names.size(), names.data(), targets.data(), out.data(), "bcore_cp_trampoline."))
         return false;
     for (size_t k = 0; k < which.size(); ++k) helper_targets_[which[k]] = out[k];
     helpers_ = Helpers::kReady;
@@ -262,7 +262,7 @@ size_t CpTranslator::support_size() {
 
 CpTranslator::Arena* CpTranslator::arena_for(size_t size) {
     // Room for the block and for a set of jumps and exits beside it.
-    auto arena = jit_.codeArena(size + support_size());
+    auto arena = jit_.loader().codeArena(size + support_size());
     if (!arena) return nullptr;
     for (auto& a : arenas_)
         if (a->arena == arena) return a.get();

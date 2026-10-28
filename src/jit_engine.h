@@ -7,26 +7,15 @@
 #include <unordered_map>
 #include <vector>
 
-#include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/Support/MemoryBuffer.h>
 
 #include "chain_table.h"
+#include "code_loader.h"
 #include "tier_table.h"
 #include "cpu_state.h"
 #include "mem.h"
 
-namespace llvm { class JITEventListener; }
-
 namespace bcore {
-
-// A JIT'd block: void bb_0x<pc>(CpuState*, Memory*) in the blocks' calling
-// convention (block_abi.h), in which a block that runs the next one itself
-// (a musttail call, see CpuState::chain_table) is always a tail call. C++
-// cannot call one directly: JitEngine::enter() does.
-using BbFunc = void (*)(CpuState*, Memory*);
-// The C-ABI function enter() calls: it calls the block, with its arguments
-// in the registers the blocks' convention takes them in.
-using EnterFunc = void (*)(BbFunc, CpuState*, Memory*);
 
 struct BBInfo {
     BbFunc fn = nullptr;
@@ -35,11 +24,9 @@ struct BBInfo {
     BBInfo(BbFunc f, uint32_t fpc) : fn(f), fallthrough_pc(fpc) {}
 };
 
-class BBTranslator;
-class CodeArena;
-class CodeArenaPool;
-
-
+// Which block each PC has, and the tables generated code reads (the chain
+// table, the tier table), over a CodeLoader (code_loader.h) that loads the
+// blocks for the host.
 class JitEngine {
 public:
     JitEngine();
@@ -51,29 +38,15 @@ public:
     // compiled for pc.
     bool addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
                    uint32_t fallthrough_pc, const std::string& name);
-    // Code placed in an arena of this engine (codeArena) for pc, as
-    // addObject's: it replaces whatever was compiled for pc.
+    // Code made otherwise for pc (placed in the loader's arena: the
+    // copy-and-patch tier), as addObject's: it replaces whatever was
+    // compiled for pc.
     void addCode(uint32_t pc, BbFunc fn, uint32_t fallthrough_pc);
-    // An arena of this engine's with room for `code` bytes of code beside
-    // the code it holds (null if there is none), for code placed in it
-    // directly (the copy-and-patch tier, cp_translator.h). The engine keeps
-    // it, so that such code lives as long as the engine does, as objects'
-    // code does (found in review: an arena only the copy-and-patch
-    // translator held went with it, under blocks still in the cache).
-    std::shared_ptr<CodeArena> codeArena(uintptr_t code);
-    // For each of the n helpers names[i] (helper_abi.h): what generated
-    // code calls for it, in the helpers' convention, which calls targets[i],
-    // a C function of the helper's signature, in out[i]: targets[i] itself
-    // where that convention is C's, else a function prefix + names[i] of
-    // this engine's (init makes them for its blocks with
-    // "bcore_trampoline."; the copy-and-patch tier, for its wrapped helpers,
-    // with a prefix of its own).
-    bool makeTrampolines(size_t n, const char* const* names, void* const* targets, void** out,
-                         const std::string& prefix = "bcore_trampoline.");
+    CodeLoader& loader() { return loader_; }
     BbFunc lookup(uint32_t pc);
     bool empty() const { return cache_.empty(); }
     // Runs fn (from lookup()) on cpu and mem.
-    void enter(BbFunc fn, CpuState* cpu, Memory* mem) const { enter_(fn, cpu, mem); }
+    void enter(BbFunc fn, CpuState* cpu, Memory* mem) const { loader_.enter(fn, cpu, mem); }
     // The chain table (CpuState::chain_table). A block is in it from when it
     // is compiled, unless the filter rejects its PC; a block that loses its
     // slot to another with the same index gets it back when the host looks
@@ -89,15 +62,6 @@ public:
     void set_executing(uint32_t pc) { executing_bb_pc_ = pc; }
     void clear_executing()          { executing_bb_pc_ = 0; }
 
-    // Register L on the underlying object-linking layer for object load/free
-    // notifications (the profiling code map builds itself from these).
-    // Behavior-neutral on x86-64 Linux where LLJIT defaults to
-    // RTDyldObjectLinkingLayer; returns false (and registers nothing) on any
-    // other layer so callers can degrade gracefully.
-    bool registerJITEventListener(llvm::JITEventListener& L);
-    // Undo registerJITEventListener (no-op on other linking layers).
-    void unregisterJITEventListener(llvm::JITEventListener& L);
-
     // Iterate all cached blocks as fn(host_addr, guest_pc). Addresses come
     // from the symbol lookup, sizes are not tracked here -- use the load
     // listener (via Core::forEachCompiledBlock) when exact sizes are needed.
@@ -108,9 +72,7 @@ public:
     }
 
 private:
-    std::unique_ptr<llvm::orc::LLJIT> jit_;
-    std::shared_ptr<CodeArenaPool> pool_;
-    std::vector<std::shared_ptr<CodeArena>> placed_;  // codeArena's arenas
+    CodeLoader loader_;  // first, so that it goes last: after every table of its code
     std::unordered_map<uint32_t, BBInfo> cache_;
     // The chain table, and the tier table after it (kTierTableOffset).
     struct ChainArea {
@@ -121,8 +83,6 @@ private:
     ChainSlot* chain_ = nullptr;
     std::function<bool(uint32_t)> chain_filter_;
     void publishChain(uint32_t pc, BbFunc fn);
-    bool defineEnter();
-    EnterFunc enter_ = nullptr;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
 };
 
