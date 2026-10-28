@@ -48,6 +48,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 
+#include "block_abi.h"
 #include "llvm_compat.h"
 
 namespace bcore {
@@ -101,16 +102,16 @@ inline constexpr bool kHelpersCatch = BCORE_HELPERS_CATCH;
 
 // The convention a helper is called in (see above).
 inline constexpr llvm::CallingConv::ID kHelperCC =
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__wasm__)
     llvm::CallingConv::C;
 #else
     llvm::CallingConv::PreserveMost;
 #endif
 
 // The convention a helper is called in on triple's architecture: kHelperCC
-// where that is this host's.
+// where that is this host's. On WebAssembly C's, as on x86-64.
 inline llvm::CallingConv::ID helper_cc(const llvm::Triple& triple) {
-    return triple.isX86() ? llvm::CallingConv::C : llvm::CallingConv::PreserveMost;
+    return triple.isX86() || triple.isWasm() ? llvm::CallingConv::C : llvm::CallingConv::PreserveMost;
 }
 
 inline llvm::FunctionType* helper_type(llvm::LLVMContext& ctx, const Helper& h) {
@@ -136,7 +137,7 @@ inline llvm::Function* declare_helper(llvm::Module& mod, const char* name, llvm:
     if (ft != helper_type(mod.getContext(), *h))
         llvm::report_fatal_error(llvm::Twine("a call of ") + name + " with another signature than its own");
     auto* fn = llvm::cast<llvm::Function>(mod.getOrInsertFunction(name, ft).getCallee());
-    fn->setCallingConv(kHelperCC);
+    fn->setCallingConv(is_wasm(mod) ? llvm::CallingConv::C : kHelperCC);
     extend_narrow_params(*h, *fn);
     return fn;
 }
