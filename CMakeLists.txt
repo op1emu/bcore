@@ -53,16 +53,40 @@ if(BCORE_PERF_JIT_EVENTS)
     list(APPEND LLVM_LIBS ${LLVM_PERFJIT_LIBS})
 endif()
 
-# ---- The lifter, the compilers and the JIT: all of the core but Core ----
-# bcore-stencilgen links it to build the stencils bfin-core then holds.
-add_library(bcore-lift STATIC
+# ---- The core in three parts, all but Core ----
+# The runtime: the guest state, memory, the CEC and the helpers generated code
+# calls, the disassembler; no LLVM. The lifter and the compilers, which make
+# blocks into objects: bcore-stencilgen links them to build the stencils
+# bfin-core then holds. The native engine, which runs the objects in this
+# process (LLVM's ORC JIT), the promotion worker and the profiling listeners.
+set(BCORE_WARNINGS)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(BCORE_WARNINGS -Wall -Wextra -Wno-unused-parameter)
+endif()
+
+add_library(bcore-runtime STATIC
     src/disasm_visitor.cpp
-    src/lift_visitor.cpp
-    src/code_arena.cpp
-    src/jit_engine.cpp
+    src/syscall_emu.cpp
+    src/cec.cpp
+    src/evt.cpp
+    src/memory.cpp
+    src/cpu_state.cpp
     src/host_bridge.cpp
+)
+target_include_directories(bcore-runtime
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_compile_definitions(bcore-runtime PUBLIC
+    BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
+    BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
+)
+target_compile_options(bcore-runtime PRIVATE ${BCORE_WARNINGS})
+set_target_properties(bcore-runtime PROPERTIES FOLDER "Core")
+
+add_library(bcore-lift STATIC
+    src/lift_visitor.cpp
     src/compiler.cpp
-    src/compile_worker.cpp
     src/bb_translator.cpp
     src/bb_stencil.cpp
     src/cp_build.cpp
@@ -70,31 +94,24 @@ add_library(bcore-lift STATIC
     src/guest_memory.cpp
     src/guest_speculation.cpp
     src/steady_skip.cpp
-    src/syscall_emu.cpp
-    src/cec.cpp
-    src/evt.cpp
-    src/memory.cpp
-    src/cpu_state.cpp
+)
+target_include_directories(bcore-lift PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(bcore-lift PUBLIC ${LLVM_DEFINITIONS})
+target_link_libraries(bcore-lift PUBLIC bcore-runtime ${LLVM_LIBS})
+target_compile_options(bcore-lift PRIVATE ${BCORE_WARNINGS})
+set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
+
+add_library(bcore-native-engine STATIC
+    src/code_arena.cpp
+    src/jit_engine.cpp
+    src/compile_worker.cpp
     src/profile.cpp
 )
-target_include_directories(bcore-lift
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${LLVM_INCLUDE_DIRS}
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_compile_definitions(bcore-lift PUBLIC
-    ${LLVM_DEFINITIONS}
-    BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
-    BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
-)
+target_include_directories(bcore-native-engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
 find_package(Threads REQUIRED)  # the promotion worker (Core::set_tier_background)
-target_link_libraries(bcore-lift PUBLIC ${LLVM_LIBS} Threads::Threads)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(bcore-lift PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
-set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
+target_link_libraries(bcore-native-engine PUBLIC bcore-lift Threads::Threads)
+target_compile_options(bcore-native-engine PRIVATE ${BCORE_WARNINGS})
+set_target_properties(bcore-native-engine PROPERTIES FOLDER "Core")
 
 # ---- Copy-and-patch stencils (cp_format.h): x86-64 and AArch64 hosts ----
 # Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
@@ -180,10 +197,8 @@ target_compile_definitions(bfin-core PRIVATE
     CP_STENCILS_BIN="${BCORE_CP_GEN}/cp_stencils.bin"
     CP_TABLES_BIN="${BCORE_CP_GEN}/cp_tables.bin"
 )
-target_link_libraries(bfin-core PUBLIC bcore-lift)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(bfin-core PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
+target_link_libraries(bfin-core PUBLIC bcore-native-engine)
+target_compile_options(bfin-core PRIVATE ${BCORE_WARNINGS})
 set_target_properties(bfin-core PROPERTIES FOLDER "Core")
 
 # ---- Executables ----
