@@ -28,7 +28,8 @@
 // their arguments as they are, C's convention: a musttail call is a
 // return_call (with the target's tail-call feature), and C++ calls a block
 // itself. A block there is exported under its name (wasm-export-name), the
-// function the loader finds in its module. Which a module's blocks are is
+// function the loader finds in its module, and has no table of constants
+// (no-jump-tables). Which a module's blocks are is
 // its target triple's (the host's, for a module with none).
 
 #include <llvm/IR/CallingConv.h>
@@ -73,6 +74,9 @@ inline llvm::Function* make_block(llvm::Module& mod, const llvm::Twine& name) {
     auto* fn = llvm::Function::Create(block_type(mod.getContext()), llvm::Function::ExternalLinkage, name, mod);
     if (is_wasm(mod)) {
         fn->addFnAttr("wasm-export-name", fn->getName());
+        // No switch as a table of constants (SimplifyCFG's lookup tables):
+        // data, which the loader cannot place (wasm_object.h).
+        fn->addFnAttr("no-jump-tables", "true");
         return fn;
     }
     fn->setCallingConv(kBlockCC);

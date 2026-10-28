@@ -432,6 +432,22 @@ if(BCORE_BUILD_FAULT_TESTS)
     add_test(NAME bcore-exported-symbols-unittest
              COMMAND python3 -m unittest tests/test_check_exported_symbols.py
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    # Blocks compiled for WebAssembly (not run) on any host whose LLVM has
+    # the target: in the blocks' convention there, and objects the
+    # WebAssembly loader runs as they are (wasm_object.h).
+    if("WebAssembly" IN_LIST LLVM_TARGETS_TO_BUILD)
+        if(EMSCRIPTEN)
+            add_executable(bcore-wasm-object-test tests/wasm_object_test.cpp)
+        else()
+            add_executable(bcore-wasm-object-test tests/wasm_object_test.cpp src/wasm_object.cpp)
+        endif()
+        target_link_libraries(bcore-wasm-object-test PRIVATE bfin-core)
+        target_include_directories(bcore-wasm-object-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
+        llvm_map_components_to_libnames(LLVM_WASM_TEST_LIBS
+            webassemblycodegen webassemblydesc webassemblyinfo object)
+        target_link_libraries(bcore-wasm-object-test PRIVATE ${LLVM_WASM_TEST_LIBS})
+        add_test(NAME bcore-wasm-object-test COMMAND bcore-wasm-object-test)
+    endif()
     # AArch64 stencils compiled (not run) on any host whose LLVM has the
     # target: their relocations, their holes' widths, how they are filled in.
     # (The stencils are LLVM 15's, and their pieces of the lifter are built

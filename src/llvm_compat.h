@@ -17,6 +17,7 @@
 #include <llvm/Support/CodeGen.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -107,6 +108,13 @@ inline const llvm::Target* lookup_target(const std::string& triple, std::string&
     return llvm::TargetRegistry::lookupTarget(triple, error);
 #endif
 }
+
+// createTargetMachine's code model, none to take the target's own.
+#if LLVM_VERSION_MAJOR >= 16
+using CodeModelChoice = std::optional<llvm::CodeModel::Model>;
+#else
+using CodeModelChoice = llvm::Optional<llvm::CodeModel::Model>;
+#endif
 
 // target's TargetMachine for triple; args are createTargetMachine's after
 // the triple.

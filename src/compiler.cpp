@@ -10,7 +10,9 @@
 #include <set>
 
 #include <llvm/Analysis/TargetTransformInfo.h>
+#if !defined(__EMSCRIPTEN__)
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
+#endif
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Error.h>
@@ -58,32 +60,23 @@ static void split_by_counts() {
     });
 }
 
-Compiler::Compiler() = default;
-Compiler::~Compiler() = default;
-
-bool Compiler::init(int opt_level, int codegen_level, bool split, const char* stencil_triple) {
+// The TargetMachine for this host (detectHost), or for stencil_triple's
+// stencils (init); split as the target allows. (None where the host is
+// WebAssembly, which has no JIT: the build has no ORC.)
+std::unique_ptr<llvm::TargetMachine> Compiler::native_machine(CodeGenLevel cg_level, bool split,
+                                                              const char* stencil_triple) {
+#if defined(__EMSCRIPTEN__)
+    llvm::errs() << "No native target on WebAssembly\n";
+    return nullptr;
+#else
     const bool stencil = stencil_triple != nullptr;
-    opt_level_ = opt_level;
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-
-    // The IR pipeline and the backend are separate knobs: the backend level
-    // decides instruction selection and register allocation, the IR pipeline
-    // what the backend is given, and each has its own compile-time cost.
-    const int cg = codegen_level < 0 ? opt_level : codegen_level;
-    const CodeGenLevel cg_level =
-        cg <= 0 ? kCodeGenNone :
-        cg == 1 ? kCodeGenLess :
-        cg == 3 ? kCodeGenAggressive :
-                  kCodeGenDefault;
-
     auto builder = stencil
         ? llvm::Expected<llvm::orc::JITTargetMachineBuilder>(
               llvm::orc::JITTargetMachineBuilder(llvm::Triple(stencil_triple)))
         : llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!builder) {
         llvm::errs() << "Failed to detect host: " << builder.takeError() << "\n";
-        return false;
+        return nullptr;
     }
     if (!stencil && !cpu_.empty()) {
         builder->setCPU(cpu_);
@@ -142,9 +135,59 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     auto machine = builder->createTargetMachine();
     if (!machine) {
         llvm::errs() << "Failed to create TargetMachine: " << machine.takeError() << "\n";
-        return false;
+        return nullptr;
     }
-    machine_ = std::move(*machine);
+    return std::move(*machine);
+#endif
+}
+
+// For WebAssembly, which JITTargetMachineBuilder refuses (it has no JIT):
+// the generic CPU with tail calls, by which blocks run the next one
+// (return_call_indirect), and SIMD, for the vectorizers' code; static
+// relocations, as a block's object refers to nothing but what it imports
+// (code_loader_wasm.cpp).
+static std::unique_ptr<llvm::TargetMachine> wasm_machine(const std::string& triple, CodeGenLevel cg_level) {
+    std::string error;
+    const llvm::Target* target = lookup_target(triple, error);
+    if (!target) {
+        llvm::errs() << "No target for " << triple << ": " << error << "\n";
+        return nullptr;
+    }
+    std::unique_ptr<llvm::TargetMachine> machine(create_target_machine(
+        *target, triple, "generic", "+tail-call,+simd128", llvm::TargetOptions(), llvm::Reloc::Static,
+        CodeModelChoice(), cg_level));
+    if (!machine) llvm::errs() << "Failed to create the TargetMachine for " << triple << "\n";
+    return machine;
+}
+
+Compiler::Compiler() = default;
+Compiler::~Compiler() = default;
+
+bool Compiler::init(int opt_level, int codegen_level, bool split, const char* stencil_triple) {
+    const bool stencil = stencil_triple != nullptr;
+    opt_level_ = opt_level;
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+
+    // The IR pipeline and the backend are separate knobs: the backend level
+    // decides instruction selection and register allocation, the IR pipeline
+    // what the backend is given, and each has its own compile-time cost.
+    const int cg = codegen_level < 0 ? opt_level : codegen_level;
+    const CodeGenLevel cg_level =
+        cg <= 0 ? kCodeGenNone :
+        cg == 1 ? kCodeGenLess :
+        cg == 3 ? kCodeGenAggressive :
+                  kCodeGenDefault;
+
+    const llvm::Triple target(target_triple_.empty() ? llvm::sys::getProcessTriple() : target_triple_);
+    if (!stencil && target.isWasm()) {
+        split_ = false;
+        fresh_backend_ = true;
+        machine_ = wasm_machine(target.str(), cg_level);
+    } else {
+        machine_ = native_machine(cg_level, split, stencil_triple);
+    }
+    if (!machine_) return false;
 
     // The IR pipeline's TTI describes exactly the CPU and features the code is
     // generated for. Without a TargetMachine, PassBuilder's TargetIRAnalysis
@@ -170,6 +213,10 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     pb_->crossRegisterProxies(lam_, fam_, cgam_, mam_);
 
     stream_ = std::make_unique<llvm::raw_svector_ostream>(object_);
+    return makeBackend();
+}
+
+bool Compiler::makeBackend() {
     backend_ = std::make_unique<llvm::legacy::PassManager>();
     if (machine_->addPassesToEmitMC(*backend_, mc_, *stream_, /*DisableVerify=*/true)) {
         llvm::errs() << "The target cannot emit object files\n";
@@ -276,6 +323,7 @@ std::unique_ptr<llvm::MemoryBuffer> Compiler::emit(llvm::Module& mod) {
         for (llvm::Function& function : mod)
             if (!function.isDeclaration() && !function.hasFnAttribute(kNoSplitAttr)) function.setEntryCount(kEntryCount);
     object_.clear();
+    if (fresh_backend_ && !makeBackend()) return nullptr;
     backend_->run(mod);
     if (object_.empty()) return nullptr;
     return llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(object_.data(), object_.size()),
