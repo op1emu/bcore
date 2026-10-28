@@ -216,7 +216,10 @@ int main(int argc, char** argv) {
     core.set_tiering(tier_threshold, tier_size_ref);
     core.set_light_tier1(light_tier1);
     core.set_copy_patch(copy_patch);
-    if (tier_background >= 0) core.set_tier_background(true, static_cast<uint64_t>(tier_background));
+    if (tier_background >= 0 && !core.set_tier_background(true, static_cast<uint64_t>(tier_background))) {
+        fprintf(stderr, "--tier-background: this build has no threads\n");
+        return 1;
+    }
     if (!core.init(opt_level)) {
         fprintf(stderr, "failed to init JIT\n");
         return 1;

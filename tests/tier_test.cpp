@@ -73,7 +73,9 @@ struct Mode {
 };
 
 // background: -1 promotions on this thread; else on the worker, published
-// after that many packets (0: as soon as the worker is done).
+// after that many packets (0: as soon as the worker is done), which a build
+// without threads has not (Core::kHasThreads): its cases leave the worker
+// out, as they would run on this thread, the same as the ones without it.
 static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"},
                    uint32_t size_ref = 0, bool light = false) {
     CpuState cpu{};
@@ -87,7 +89,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_light_tier1(light);
     if (threshold) core.set_copy_patch(mode.copy_patch);
     core.set_copy_patch_reach(mode.reach);
-    if (background >= 0) core.set_tier_background(true, uint64_t(background));
+    if (background >= 0) require(core.set_tier_background(true, uint64_t(background)), "no worker");
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
     cec_init(); evt_init();
@@ -141,6 +143,7 @@ static void test_throwing_stencils() {
     // with the worker; and the load in a parallel packet's slot, one of the
     // packet's pieces.
     for (int mode : {1, 2, 3}) {
+        if (mode == 2 && !Core::kHasThreads) continue;
         CpuState cpu{};
         ThrowingPagedMemory mem(&cpu);
         if (mode == 3) {
@@ -155,7 +158,7 @@ static void test_throwing_stencils() {
         core.set_chaining(true, false);
         core.set_tiering(1000);
         core.set_copy_patch(true);
-        if (mode == 2) core.set_tier_background(true, 1);
+        if (mode == 2) require(core.set_tier_background(true, 1), "no worker");
         require(core.init(1), "init");
         cec_init(); evt_init();
         cpu.lb[0] = cpu.lb[1] = 0x3f00;
@@ -252,6 +255,7 @@ static void test_hidden_page_table() {
 static void test_throwing_callback() {
     for (int opt : {0, 1, 2})
         for (int mode : {0, 1, 2}) {  // untiered; tiered; tiered on the worker
+            if (mode == 2 && !Core::kHasThreads) continue;
             CpuState cpu{};
             ThrowingMemory mem(&cpu);
             mem.write16(0x100, 0x9000);  // R0 = [P0++]
@@ -259,7 +263,7 @@ static void test_throwing_callback() {
             Core core(&cpu, &mem);
             core.set_chaining(true, false);
             if (mode) core.set_tiering(1);
-            if (mode == 2) core.set_tier_background(true, 1);
+            if (mode == 2) require(core.set_tier_background(true, 1), "no worker");
             require(core.init(opt), "init");
             cec_init(); evt_init();
             cpu.lb[0] = cpu.lb[1] = 0x3f00;
@@ -296,6 +300,7 @@ public:
 
 static void test_late_page_table() {
     for (int background : {-1, 0, 1}) {
+        if (background >= 0 && !Core::kHasThreads) continue;
         CpuState cpu{};
         LatePagesMemory mem(&cpu);
         mem.write16(0x100, 0x9000);  // R0 = [P0++]
@@ -303,7 +308,7 @@ static void test_late_page_table() {
         mem.write32(0x200, 42);
         Core core(&cpu, &mem);
         core.set_tiering(2);
-        if (background >= 0) core.set_tier_background(true, uint64_t(background));
+        if (background >= 0) require(core.set_tier_background(true, uint64_t(background)), "no worker");
         require(core.init(1), "init");
         cec_init(); evt_init();
         cpu.lb[0] = cpu.lb[1] = 0x3f00;
@@ -328,6 +333,7 @@ static void test_late_page_table() {
 // review: it did, the guard missed again, and the second careful
 // compilation's symbol was defined twice).
 static void test_stale_promotion() {
+    if (!Core::kHasThreads) return;
     auto once = [](bool tiered) {
         CpuState cpu{};
         FlatMemory mem(0, 0x4000, &cpu);
@@ -335,7 +341,7 @@ static void test_stale_promotion() {
         Core core(&cpu, &mem);
         if (tiered) {
             core.set_tiering(1);
-            core.set_tier_background(true, 20);
+            require(core.set_tier_background(true, 20), "no worker");
         }
         require(core.init(2), "init");
         cec_init(); evt_init();
@@ -437,7 +443,37 @@ static void test_result_order() {
     result.module = std::make_unique<llvm::Module>("dropped", *result.context);
 }
 
+// A build without threads (Core::kHasThreads): set_tier_background refuses
+// a worker and sets nothing, no worker starts, and the promotions run on
+// this thread as without it (found in review: the cases on the worker ran
+// there, the build's tests none the wiser).
+static int g_worker_starts = 0;
+
+static void test_no_worker() {
+    if (Core::kHasThreads) return;
+    for (int publish_after : {0, 1, 50}) {
+        CpuState cpu{};
+        FlatMemory mem(0, 0x4000, &cpu);
+        mem.write16(0x100, kAdd1); mem.write16(0x102, kAdd1); mem.write16(0x104, jump_s(0x104, 0x100));
+        Core core(&cpu, &mem);
+        core.set_tiering(1);
+        require(!core.set_tier_background(true, uint64_t(publish_after), [] { ++g_worker_starts; }),
+                "a worker in a build without threads");
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        for (int r = 0; r < 6; ++r) {
+            require(core.run(0x100), "run");
+            require(cpu.pc == 0x100 && cpu.dpregs[0] == uint32_t(2 * (r + 1)), "a promotion on this thread ran wrong");
+            cpu.did_jump = false;
+        }
+        require(core.set_tier_background(false), "set_tier_background(false) refused");
+    }
+    require(g_worker_starts == 0, "a worker started in a build without threads");
+}
+
 int main() {
+    test_no_worker();
     test_result_order();
     test_size_ref();
     test_throwing_callback();
@@ -509,6 +545,7 @@ int main() {
             };
             for (const Tiers& t : {Tiers{1, 0, false}, {2, 0, false}, {7, 0, false}, {1, 1, false}, {2, 1, true}})
             for (int background : {-1, 0, 1, 50}) {
+                if (background >= 0 && !Core::kHasThreads) continue;
                 const uint32_t threshold = t.threshold;
                 const Outcome got = run(c, opt, threshold, background, mode, t.size_ref, t.light);
                 if (!(got == want)) {

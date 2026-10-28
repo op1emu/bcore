@@ -785,12 +785,14 @@ void Core::set_tiering(uint32_t threshold, uint32_t size_ref) {
     tier_size_ref_ = size_ref;
 }
 
-void Core::set_tier_background(bool background, uint64_t publish_after, std::function<void()> on_start) {
+bool Core::set_tier_background(bool background, uint64_t publish_after, std::function<void()> on_start) {
+    if (background && !kHasThreads) return false;
     stopWorker();
     tier_background_ = background;
     publish_after_ = publish_after;
     worker_start_ = std::move(on_start);
     if (tier_background_ && compiler_) startWorker();
+    return true;
 }
 
 // Publishes what is underway, then stops the worker.

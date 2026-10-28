@@ -218,7 +218,7 @@ static Outcome run(const Program& p, int opt, bool chained, uint32_t budget, boo
     core.set_loop_blocks(loops);
     core.set_steady_skip(steady);
     core.set_tiering(tier);
-    if (background >= 0) core.set_tier_background(true, uint64_t(background));
+    if (background >= 0) require(core.set_tier_background(true, uint64_t(background)), "no worker");
     require(core.init(opt), "init");
 
     // Supervisor at IVG15, interrupts enabled, as in the firmware.
@@ -411,14 +411,16 @@ int main(int argc, char** argv) {
                         circular += got.stats.dag_circular;
                         // Tiered (Core::set_tiering) as well, every block
                         // promoted after its first start, its second or its
-                        // seventh, here or on the worker: the same again.
+                        // seventh, here or on the worker (where the build
+                        // has threads, Core::kHasThreads): the same again.
                         static const uint32_t kThresholds[] = {1, 2, 7};
                         uint32_t tiered = 0;
                         if (want == got) {
                             tiered = kThresholds[(program_no + budget) % 3];
                             static const int kBackground[] = {-1, 0, 3};
+                            const int background = Core::kHasThreads ? kBackground[(program_no / 3 + budget) % 3] : -1;
                             got = run(p, opt, chained, budget, pages, true, false, program_no / 2 % 2 ? 2 : 0, tiered,
-                                      kBackground[(program_no / 3 + budget) % 3]);
+                                      background);
                             promoted += got.stats.blocks_promoted;
                         }
                         if (!(want == got)) {
