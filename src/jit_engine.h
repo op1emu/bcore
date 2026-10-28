@@ -17,6 +17,8 @@
 
 namespace llvm { class JITEventListener; }
 
+namespace bcore {
+
 // A JIT'd block: void bb_0x<pc>(CpuState*, Memory*) in the blocks' calling
 // convention (block_abi.h), in which a block that runs the next one itself
 // (a musttail call, see CpuState::chain_table) is always a tail call. C++
@@ -123,3 +125,5 @@ private:
     EnterFunc enter_ = nullptr;
     uint32_t executing_bb_pc_ = 0;  // PC of currently-executing BB (0 = none)
 };
+
+}  // namespace bcore

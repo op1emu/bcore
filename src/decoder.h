@@ -9,6 +9,8 @@
 /* Common to all DSP32 instructions.  */
 #define BIT_MULTI_INS 0x0800
 
+namespace bcore {
+
 template<class OpCodeType, class Visitor>
 class InstructionMatcher {
     using RetType = typename Visitor::return_type;
@@ -231,3 +233,5 @@ int decodeInstruction(Visitor& visitor, uint32_t pc) {
     }
     return 4;
 }
+
+}  // namespace bcore

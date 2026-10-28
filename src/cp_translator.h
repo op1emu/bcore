@@ -50,6 +50,8 @@
 #include "mem.h"
 #include "tier_memory.h"
 
+namespace bcore {
+
 class CodeArena;
 namespace bcore_cp { class RuntimeStencils; }
 
@@ -174,3 +176,5 @@ private:
     std::vector<Piece> pieces_;
     bcore_tier::CodeLog words_;
 };
+
+}  // namespace bcore

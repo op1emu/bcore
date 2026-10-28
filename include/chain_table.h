@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+namespace bcore {
+
 struct CpuState;
 class Memory;
 
@@ -17,3 +19,5 @@ static constexpr unsigned kChainBits = 16;
 static constexpr uint32_t kChainEmpty = UINT32_MAX;  // odd: no block starts there
 // Instructions are halfword aligned, so bit 0 carries nothing; bit 1 does.
 inline uint32_t chainIndex(uint32_t pc) { return (pc >> 1) & ((1u << kChainBits) - 1); }
+
+}  // namespace bcore

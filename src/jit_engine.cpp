@@ -26,6 +26,8 @@
 #include "cec.h"
 #include "cpu_state.h"
 
+namespace bcore {
+
 JitEngine::JitEngine() = default;
 JitEngine::~JitEngine() = default;
 
@@ -302,3 +304,5 @@ void JitEngine::unregisterJITEventListener(llvm::JITEventListener& L) {
     if (auto* rtdyld = llvm::dyn_cast<llvm::orc::RTDyldObjectLinkingLayer>(&jit_->getObjLinkingLayer()))
         rtdyld->unregisterJITEventListener(L);
 }
+
+}  // namespace bcore

@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstring>
 
+namespace bcore {
+
 struct CpuState {
     // dpregs[0..7] = R0-R7, dpregs[8..15] = P0-P5, SP(14), FP(15)
     uint32_t dpregs[16];
@@ -235,3 +237,5 @@ extern "C" {
 void cpu_state_init(CpuState* cpu);
 
 uint32_t hwloop_get_next_pc(CpuState* cpu, uint32_t insn_pc, uint32_t next_pc);
+
+}  // namespace bcore

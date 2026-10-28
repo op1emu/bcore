@@ -17,6 +17,8 @@
 #include "cpu_state.h"
 #include "mem.h"
 
+namespace bcore {
+
 // Branch weights for the generated code's branches whose way is known
 // (definitions in lift_visitor.cpp): to a path that rarely runs (first or
 // second successor), or along a loop that runs again. MachineBlockPlacement
@@ -1114,3 +1116,5 @@ private:
     void emit_byteop3p(bool reversed, bool hi_slot,
                        uint32_t dst0, uint32_t src0, uint32_t src1);
 };
+
+}  // namespace bcore

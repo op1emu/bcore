@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+namespace bcore {
+
 class Memory {
 public:
     virtual ~Memory() = default;
@@ -75,3 +77,5 @@ extern "C" {
     void     mem_write16(Memory* mem, uint32_t addr, uint16_t val);
     void     mem_write32(Memory* mem, uint32_t addr, uint32_t val);
 }
+
+}  // namespace bcore

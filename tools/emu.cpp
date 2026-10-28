@@ -11,6 +11,8 @@
 #include "core.h"
 #include "flat_memory.h"
 
+using namespace bcore;
+
 static bool read_file(const std::string& path, std::vector<uint8_t>& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;

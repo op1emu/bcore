@@ -5,6 +5,8 @@
 
 #include "chain_table.h"
 
+namespace bcore {
+
 // What tier-0 blocks count (Core::set_tiering). It lies right after the
 // chain table, in the same allocation: generated code finds it at
 // CpuState::chain_table + kTierTableOffset, so the code holds no host
@@ -36,3 +38,5 @@ inline uint32_t tier_threshold(uint32_t threshold, uint32_t size_ref, uint32_t p
     const uint64_t scaled = uint64_t(threshold) * packets / size_ref;
     return scaled > UINT32_MAX ? UINT32_MAX : uint32_t(scaled);
 }
+
+}  // namespace bcore

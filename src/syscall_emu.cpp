@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <unistd.h>
 
+namespace bcore {
+
 // Libgloss syscall convention:
 //   P0 = syscall number
 //   R0 = pointer to params array (4 x uint32_t)
@@ -56,3 +58,5 @@ extern "C" void bfin_syscall(CpuState* cpu, Memory* mem) {
         break;
     }
 }
+
+}  // namespace bcore

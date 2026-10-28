@@ -26,6 +26,8 @@
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
 
+namespace bcore {
+
 // What a tier-0 compilation saw, to compile the block again at tier 1 as
 // an untiered compilation would have: its instructions, and the guest state
 // it took its hints from.
@@ -934,3 +936,5 @@ uint64_t Core::profileHistoryDropped() const {
     return 0;
 #endif
 }
+
+}  // namespace bcore

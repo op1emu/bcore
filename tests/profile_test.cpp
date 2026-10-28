@@ -31,6 +31,8 @@
 #include <vector>
 #include <unistd.h>
 
+using namespace bcore;
+
 static void require(bool value, const char* message) {
     if (!value) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }

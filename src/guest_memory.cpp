@@ -17,6 +17,8 @@
 
 #include "mem.h"
 
+namespace bcore {
+
 using namespace llvm;
 
 static constexpr const char* kGuestPtr = "bcore.guest.ptr";
@@ -370,3 +372,5 @@ void lower_guest_memory(Module& m) {
         f->eraseFromParent();
     }
 }
+
+}  // namespace bcore

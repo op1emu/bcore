@@ -19,6 +19,8 @@
 #include "lift_visitor.h"
 #include "packet_state.h"
 
+namespace bcore {
+
 using namespace llvm;
 
 Function* BBTranslator::declare_block(Module& mod, const char* name) { return bcore_abi::make_block(mod, name); }
@@ -310,3 +312,5 @@ Function* BBTranslator::emit_stencil_exit(Module& mod, const char* name, Constan
         emit_chain_exit(b, fn, cpu, cpu, bcore_abi::block_mem(fn), 0, again, again, nullptr, nullptr, again ? block_pc : nullptr);
     return fn;
 }
+
+}  // namespace bcore

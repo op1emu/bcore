@@ -2,6 +2,8 @@
 #include "cec.h"
 #include "evt.h"
 
+namespace bcore {
+
 extern "C" {
 
 uint32_t cpu_astat_compose(CpuState* cpu) {
@@ -56,3 +58,5 @@ uint32_t hwloop_get_next_pc(CpuState* cpu, uint32_t insn_pc, uint32_t next_pc) {
         return cpu->lt[0];
     return next_pc;
 }
+
+}  // namespace bcore

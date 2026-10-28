@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+namespace bcore {
+
 // IVG level constants (mirrors dv-bfin_cec.h)
 static constexpr uint32_t IVG_EMU    = 0;
 static constexpr uint32_t IVG_RST    = 1;
@@ -546,3 +548,5 @@ extern "C" void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc,
     mem->data_alignment_fault(pc, addr, status);
     cec_exception(cpu, 0x24u, mem);
 }
+
+}  // namespace bcore

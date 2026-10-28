@@ -20,6 +20,8 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 
+namespace bcore {
+
 using namespace llvm;
 
 namespace {
@@ -274,3 +276,5 @@ PreservedAnalyses SteadyLoopSkip::run(Function& f, FunctionAnalysisManager& am) 
     }
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
+
+}  // namespace bcore

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+namespace bcore {
+
 // EVT register storage — own device state, separate from CEC.
 static uint32_t s_evt[16];
 
@@ -33,3 +35,5 @@ void evt_set(uint32_t ivg, uint32_t handler_addr) {
     }
     s_evt[ivg] = handler_addr;
 }
+
+}  // namespace bcore

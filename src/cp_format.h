@@ -15,6 +15,8 @@
 
 #include <cstdint>
 
+namespace bcore {
+
 namespace bcore_cp {
 
 // What a relocation fills in.
@@ -180,3 +182,5 @@ extern const SlotEntry kSlots[4][0x10000];
 extern const uint32_t kParallelTail[2];
 
 }  // namespace bcore_cp
+
+}  // namespace bcore

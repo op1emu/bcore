@@ -16,6 +16,8 @@
 
 #include "utils/signextend.h"
 
+namespace bcore {
+
 using namespace llvm;
 
 // ---------------------------------------------------------------------------
@@ -8888,3 +8890,5 @@ std::vector<LiftVisitor::SlotWrite> LiftVisitor::end_slot() {
     parallel_slot_ = 0;
     return writes;
 }
+
+}  // namespace bcore

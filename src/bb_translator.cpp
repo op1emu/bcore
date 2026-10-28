@@ -26,6 +26,8 @@
 #include "lift_visitor.h"
 #include "packet_state.h"
 
+namespace bcore {
+
 using namespace llvm;
 
 BBTranslator::BBTranslator(Memory* mem,
@@ -918,3 +920,5 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     }
     call_slot(slot_of(next), next, total, tail, out, clear);
 }
+
+}  // namespace bcore

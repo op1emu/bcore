@@ -17,6 +17,8 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Transforms/Vectorize/LoopVectorize.h>
 
+namespace bcore {
+
 // A block function's entry count (emit), and the count under which the
 // splitter calls a basic block cold: a path behind a rare branch (weighted
 // 1:2^20) counts 2^10 at most, one behind as many as 19 even branches still
@@ -295,3 +297,5 @@ ModuleCounts count_module(const llvm::Module& mod) {
     }
     return counts;
 }
+
+}  // namespace bcore

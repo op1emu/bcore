@@ -6,6 +6,8 @@
 #include "evt.h"
 #include "mem.h"
 
+namespace bcore {
+
 // Core Event Controller (CEC) helpers — extern "C" so JIT can call them.
 //
 // Semantics derived from refs/dv-bfin_cec.c (GNU binutils simulator).
@@ -86,3 +88,5 @@ extern "C" {
     // Returns true if an exception was raised, false otherwise.
     bool user_mmr_check(CpuState* cpu, uint32_t addr);
 }
+
+}  // namespace bcore

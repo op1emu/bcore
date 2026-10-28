@@ -2,6 +2,8 @@
 
 #include <ctime>
 
+namespace bcore {
+
 static uint64_t clock_ns(clockid_t clock) {
     timespec ts{};
     clock_gettime(clock, &ts);
@@ -95,3 +97,5 @@ CompileWorker::Result CompileWorker::compile(Job job) {
     result.end_ns = clock_ns(CLOCK_MONOTONIC);
     return result;
 }
+
+}  // namespace bcore

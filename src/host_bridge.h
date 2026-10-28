@@ -17,6 +17,8 @@
 #include "cpu_state.h"
 #include "mem.h"
 
+namespace bcore {
+
 namespace bcore_bridge {
 
 uint8_t mem_read8(Memory* mem, uint32_t addr) noexcept;
@@ -48,3 +50,5 @@ private:
 };
 
 }  // namespace bcore_bridge
+
+}  // namespace bcore

@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
         auto mod = llvm::parseIRFile(argv[1], diag, context);
         if (!mod) diag.print("bcore-host-types-test", llvm::errs());
         require(mod != nullptr, "the module parses");
-        Compiler compiler;
+        bcore::Compiler compiler;
         require(compiler.init(opt, -1, false), "the compiler initializes");
         try {
             compiler.optimize(*mod);

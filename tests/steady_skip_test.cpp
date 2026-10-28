@@ -18,6 +18,8 @@
 #include <initializer_list>
 #include <vector>
 
+using namespace bcore;
+
 static void require(bool ok, const char* why) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
 }

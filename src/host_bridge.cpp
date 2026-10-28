@@ -6,6 +6,8 @@
 #include "cec.h"
 #include "syscall_emu.h"
 
+namespace bcore {
+
 namespace bcore_bridge {
 
 namespace {
@@ -25,31 +27,31 @@ void caught() noexcept {
 }  // namespace
 
 uint8_t mem_read8(Memory* mem, uint32_t addr) noexcept {
-    try { return ::mem_read8(mem, addr); } catch (...) { caught(); return 0; }
+    try { return bcore::mem_read8(mem, addr); } catch (...) { caught(); return 0; }
 }
 uint16_t mem_read16(Memory* mem, uint32_t addr) noexcept {
-    try { return ::mem_read16(mem, addr); } catch (...) { caught(); return 0; }
+    try { return bcore::mem_read16(mem, addr); } catch (...) { caught(); return 0; }
 }
 uint32_t mem_read32(Memory* mem, uint32_t addr) noexcept {
-    try { return ::mem_read32(mem, addr); } catch (...) { caught(); return 0; }
+    try { return bcore::mem_read32(mem, addr); } catch (...) { caught(); return 0; }
 }
 void mem_write8(Memory* mem, uint32_t addr, uint8_t value) noexcept {
-    try { ::mem_write8(mem, addr, value); } catch (...) { caught(); }
+    try { bcore::mem_write8(mem, addr, value); } catch (...) { caught(); }
 }
 void mem_write16(Memory* mem, uint32_t addr, uint16_t value) noexcept {
-    try { ::mem_write16(mem, addr, value); } catch (...) { caught(); }
+    try { bcore::mem_write16(mem, addr, value); } catch (...) { caught(); }
 }
 void mem_write32(Memory* mem, uint32_t addr, uint32_t value) noexcept {
-    try { ::mem_write32(mem, addr, value); } catch (...) { caught(); }
+    try { bcore::mem_write32(mem, addr, value); } catch (...) { caught(); }
 }
 void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc, uint32_t addr, uint32_t flags) noexcept {
-    try { ::cec_data_alignment(cpu, mem, pc, addr, flags); } catch (...) { caught(); }
+    try { bcore::cec_data_alignment(cpu, mem, pc, addr, flags); } catch (...) { caught(); }
 }
 void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem) noexcept {
-    try { ::cec_exception(cpu, excp, mem); } catch (...) { caught(); }
+    try { bcore::cec_exception(cpu, excp, mem); } catch (...) { caught(); }
 }
 void bfin_syscall(CpuState* cpu, Memory* mem) noexcept {
-    try { ::bfin_syscall(cpu, mem); } catch (...) { caught(); }
+    try { bcore::bfin_syscall(cpu, mem); } catch (...) { caught(); }
 }
 
 void* wrapper(const char* name) {
@@ -81,3 +83,5 @@ void RunScope::rethrow() {
 }
 
 }  // namespace bcore_bridge
+
+}  // namespace bcore

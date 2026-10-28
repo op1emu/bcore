@@ -10,6 +10,8 @@
 
 #include "core.h"
 
+using namespace bcore;
+
 // Lightweight read-only memory wrapper for per-section disassembly.
 // Only raw(), base(), size() are used by Core::disassemble().
 class SectionMemory : public Memory {

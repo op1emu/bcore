@@ -15,6 +15,8 @@
 
 namespace llvm { class MCContext; class TargetMachine; }
 
+namespace bcore {
+
 // What a compiled module is made of (BcoreCompileMetrics, BcoreStats).
 struct ModuleCounts {
     uint64_t ir_instructions = 0, ir_blocks = 0;
@@ -110,3 +112,5 @@ private:
     std::unique_ptr<llvm::legacy::PassManager> backend_;
     llvm::MCContext* mc_ = nullptr;
 };
+
+}  // namespace bcore

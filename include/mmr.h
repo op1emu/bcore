@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+namespace bcore {
+
 // ── CEC MMR region ──────────────────────────────────────────────────────────
 
 static constexpr uint32_t CEC_MMR_BASE          = 0xFFE02100u;
@@ -69,3 +71,5 @@ int cec_current_ivg();
 // Dispatches per IVG level (0 = EMU ... 15 = IVG15) since cec_init(); all
 // zero unless BCORE_ENABLE_PROFILE. Hosts read them through Core::stats().
 void cec_entry_counts(uint64_t out[16]);
+
+}  // namespace bcore

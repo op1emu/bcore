@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <stdexcept>
 
+namespace bcore {
+
 // Sign extend helper
 static int32_t signext(uint32_t val, int bits) {
     uint32_t sign_bit = 1u << (bits - 1);
@@ -2810,3 +2812,5 @@ bool DisasmVisitor::decode_unknown_32(uint32_t insn) {
     out() << "illegal\n";
     return true;
 }
+
+}  // namespace bcore

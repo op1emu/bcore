@@ -1,5 +1,7 @@
 #include "mem.h"
 
+namespace bcore {
+
 extern "C" {
 
 __attribute__((hot)) uint8_t mem_read8(Memory* mem, uint32_t addr) {
@@ -27,3 +29,5 @@ __attribute__((hot)) void mem_write32(Memory* mem, uint32_t addr, uint32_t val) 
 }
 
 } // extern "C"
+
+}  // namespace bcore

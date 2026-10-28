@@ -30,6 +30,8 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 
+namespace bcore {
+
 namespace bcore_abi {
 
 inline constexpr llvm::CallingConv::ID kBlockCC = llvm::CallingConv::SwiftTail;
@@ -80,3 +82,5 @@ inline llvm::CallInst* tail_call_block(llvm::IRBuilder<>& b, llvm::Value* callee
 }
 
 }  // namespace bcore_abi
+
+}  // namespace bcore

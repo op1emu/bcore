@@ -47,6 +47,8 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 
+namespace bcore {
+
 namespace bcore_abi {
 
 // sig: the return type, then the parameters' types, a letter each: v void,
@@ -164,3 +166,5 @@ inline llvm::Function* declare_helper(llvm::Module& mod, const char* name) {
 }
 
 }  // namespace bcore_abi
+
+}  // namespace bcore

@@ -5,6 +5,8 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/PassManager.h>
 
+namespace bcore {
+
 // Guest memory in loop blocks, said abstractly until the loops around it are
 // known.
 //
@@ -57,3 +59,5 @@ unsigned attribute_count(const llvm::Function& f, const char* attr);
 // Every bcore.guest.ptr and bcore.guest.aligned call as its definition; the
 // declarations go.
 void lower_guest_memory(llvm::Module& m);
+
+}  // namespace bcore

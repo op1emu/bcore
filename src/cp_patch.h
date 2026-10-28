@@ -9,6 +9,8 @@
 
 #include "cp_format.h"
 
+namespace bcore {
+
 namespace bcore_cp {
 
 // A 64-bit value hole (the others are 32-bit values, of which a 32-bit
@@ -82,3 +84,5 @@ inline bool patch_reloc(uint8_t* at, const Reloc& r, uint64_t value) {
 }
 
 }  // namespace bcore_cp
+
+}  // namespace bcore
