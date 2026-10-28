@@ -57,7 +57,6 @@
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/ADT/Triple.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -67,6 +66,7 @@
 #include "cp_build.h"
 #include "cp_format.h"
 #include "cpu_state.h"
+#include "llvm_compat.h"
 #include "mem.h"
 #include "tier_table.h"
 

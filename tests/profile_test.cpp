@@ -3,6 +3,7 @@
 #include "core.h"
 #include "mmr.h"
 #if BCORE_ENABLE_PROFILE
+#include "llvm_compat.h"
 #include "profile_state.h"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -13,7 +14,6 @@
 #include <llvm/Object/SymbolSize.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
-#include <llvm/Support/Host.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
@@ -221,15 +221,15 @@ static uint64_t hash_of_block(const std::string& ir) {
     require(module != nullptr, "test IR parses");
     const std::string triple = llvm::sys::getProcessTriple();
     std::string error;
-    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, error);
+    const llvm::Target* target = bcore::lookup_target(triple, error);
     require(target != nullptr, "native target");
     std::unique_ptr<llvm::TargetMachine> machine(
-        target->createTargetMachine(triple, "generic", "", {}, llvm::Reloc::Static));
+        bcore::create_target_machine(*target, triple, "generic", "", llvm::TargetOptions{}, llvm::Reloc::Static));
     module->setDataLayout(machine->createDataLayout());
     llvm::SmallVector<char, 0> object;
     llvm::raw_svector_ostream stream(object);
     llvm::legacy::PassManager passes;
-    require(!machine->addPassesToEmitFile(passes, stream, nullptr, llvm::CGFT_ObjectFile), "emit object");
+    require(!machine->addPassesToEmitFile(passes, stream, nullptr, bcore::kObjectFile), "emit object");
     passes.run(*module);
     auto file = llvm::object::ObjectFile::createObjectFile(
         llvm::MemoryBufferRef(llvm::StringRef(object.data(), object.size()), "table.o"));

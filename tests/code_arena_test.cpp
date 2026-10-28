@@ -121,7 +121,7 @@ static void exhaust(Layout layout, const char* what, uintptr_t hot, uintptr_t co
     size_t own = 0;
     for (int i = 0; i < 64; ++i) {
         auto mm = std::make_unique<ArenaMemoryManager>(pool);
-        mm->reserveAllocationSpace(hot + cold, 16, data, 16, 0, 1);
+        mm->reserveAllocationSpace(hot + cold, SectionAlign(16), data, SectionAlign(16), 0, SectionAlign(1));
         uint8_t* h = mm->allocateCodeSection(hot, 16, 1, ".text");
         uint8_t* c = cold ? mm->allocateCodeSection(cold, 16, 2, ".text.split.f") : h;
         uint8_t* d = data ? mm->allocateDataSection(data, 16, 3, ".rodata", true) : h;
@@ -141,7 +141,7 @@ static void too_large(Layout layout) {
     auto pool = std::make_shared<CodeArenaPool>(kHalf, 2, layout);
     ArenaMemoryManager mm(pool);
     const uintptr_t code = CodeArena::largestCode(kHalf, layout);
-    mm.reserveAllocationSpace(code, 16, 0, 1, 0, 1);
+    mm.reserveAllocationSpace(code, SectionAlign(16), 0, SectionAlign(1), 0, SectionAlign(1));
     require(mm.allocateCodeSection(code, 16, 1, ".text") && !mm.inArena() && pool->arenas() == 0,
             "an object larger than an arena gets its own manager");
 }
@@ -179,10 +179,10 @@ static void jit_exhaust(Layout layout) {
     llvm::InitializeNativeTargetAsmPrinter();
     auto pool = std::make_shared<CodeArenaPool>(kHalf, 2, layout);
     auto jit = llvm::orc::LLJITBuilder()
-        .setObjectLinkingLayerCreator([pool](llvm::orc::ExecutionSession& es, const llvm::Triple&)
+        .setObjectLinkingLayerCreator([pool](llvm::orc::ExecutionSession& es, auto&&)
                                           -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
             return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
-                es, [pool] { return std::make_unique<ArenaMemoryManager>(pool); });
+                es, [pool](auto&&...) { return std::make_unique<ArenaMemoryManager>(pool); });
         })
         .create();
     require(bool(jit), "LLJIT");
@@ -193,7 +193,7 @@ static void jit_exhaust(Layout layout) {
         mod->setDataLayout((*jit)->getDataLayout());
         const std::string name = "f" + std::to_string(i);
         auto* fn = llvm::Function::Create(
-            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx), {llvm::Type::getInt8PtrTy(*ctx)}, false),
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx), {llvm::PointerType::getUnqual(*ctx)}, false),
             llvm::Function::ExternalLinkage, name, mod.get());
         llvm::IRBuilder<> b(llvm::BasicBlock::Create(*ctx, "entry", fn));
         for (int k = 0; k < 300; ++k) b.CreateStore(b.getInt32(k), fn->getArg(0), /*isVolatile=*/true);

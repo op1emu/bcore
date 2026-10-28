@@ -16,6 +16,7 @@
 #include <llvm/Transforms/Utils/ValueMapper.h>
 
 #include "mem.h"
+#include "scev_expander.h"
 
 namespace bcore {
 
@@ -34,13 +35,13 @@ static Function* declare(Module& m, const char* name, FunctionType* type) {
 }
 
 Value* guest_ptr(IRBuilder<>& b, Module& m, Value* table, Value* addr) {
-    auto* type = FunctionType::get(b.getInt8PtrTy(), {b.getInt8PtrTy(), b.getInt32Ty()}, false);
+    auto* type = FunctionType::get(b.getPtrTy(), {b.getPtrTy(), b.getInt32Ty()}, false);
     return b.CreateCall(declare(m, kGuestPtr, type), {table, addr}, "guest_ptr");
 }
 
 Value* guest_ptr_in(IRBuilder<>& b, Module& m, Value* table, Value* addr, Value* lo, Value* size) {
     auto* i32 = b.getInt32Ty();
-    auto* type = FunctionType::get(b.getInt8PtrTy(), {b.getInt8PtrTy(), i32, i32, i32}, false);
+    auto* type = FunctionType::get(b.getPtrTy(), {b.getPtrTy(), i32, i32, i32}, false);
     return b.CreateCall(declare(m, kGuestPtrIn, type), {table, addr, lo, size}, "guest_ptr");
 }
 
@@ -150,13 +151,13 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
             } else {
                 continue;
             }
-            SCEVExpander probe(se, layout, "guest.lver");
+            ScevExpander probe(se, layout, "guest.lver");
             if (!probe.isSafeToExpandAt(start, at) || !probe.isSafeToExpandAt(step, at)) continue;
             accesses.push_back({call, start, step, width, pointer});
         }
     if (accesses.empty()) return false;
     {
-        SCEVExpander probe(se, layout, "guest.lver");
+        ScevExpander probe(se, layout, "guest.lver");
         if (!probe.isSafeToExpandAt(count, at)) return false;
     }
 
@@ -165,7 +166,7 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
     // page, and start and step are multiples of the width.
     IRBuilder<> b(at);
     auto* i64 = b.getInt64Ty();
-    SCEVExpander expander(se, layout, "guest.lver");
+    ScevExpander expander(se, layout, "guest.lver");
     Value* n = b.CreateZExt(expander.expandCodeFor(count, count->getType(), at), i64, "lver.count");
     Value* ok = b.getTrue();
     std::vector<Value*> pages(accesses.size()), page_vas(accesses.size());
@@ -181,7 +182,7 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
             ok = b.CreateAnd(ok, b.CreateICmpULT(hi, b.getInt64(1ull << 32)));
             ok = b.CreateAnd(ok, b.CreateICmpEQ(b.CreateLShr(lo, Memory::kPageBits), b.CreateLShr(hi, Memory::kPageBits)));
             auto* index = b.CreateAnd(b.CreateLShr(lo, Memory::kPageBits), b.getInt64(Memory::kPageTableEntries - 1));
-            auto* page = b.CreateLoad(b.getInt8PtrTy(), b.CreateGEP(b.getInt8PtrTy(), table, index), "lver.page");
+            auto* page = b.CreateLoad(b.getPtrTy(), b.CreateGEP(b.getPtrTy(), table, index), "lver.page");
             ok = b.CreateAnd(ok, b.CreateIsNotNull(page));
             pages[k] = page;
             page_vas[k] = b.CreateTrunc(b.CreateAnd(lo, b.getInt64(~uint64_t(Memory::kPageSize - 1))), b.getInt32Ty(),
@@ -205,7 +206,7 @@ static bool version(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution
         // The page's entry, at an index masked to the table so that the load
         // is in it whatever lo is.
         auto* index = b.CreateAnd(b.CreateLShr(lo, Memory::kPageBits), b.getInt64(Memory::kPageTableEntries - 1));
-        auto* page = b.CreateLoad(b.getInt8PtrTy(), b.CreateGEP(b.getInt8PtrTy(), table, index), "lver.page");
+        auto* page = b.CreateLoad(b.getPtrTy(), b.CreateGEP(b.getPtrTy(), table, index), "lver.page");
         ok = b.CreateAnd(ok, b.CreateIsNotNull(page));
         pages[k] = page;
         page_vas[k] = b.CreateTrunc(b.CreateAnd(lo, b.getInt64(~uint64_t(Memory::kPageSize - 1))), b.getInt32Ty(),
@@ -336,7 +337,7 @@ void lower_guest_memory(Module& m) {
             Value* table = call->getArgOperand(0);
             Value* addr = call->getArgOperand(1);
             auto* index = b.CreateZExt(b.CreateLShr(addr, Memory::kPageBits), b.getInt64Ty(), "page_index");
-            auto* page = b.CreateLoad(b.getInt8PtrTy(), b.CreateGEP(b.getInt8PtrTy(), table, index), "page");
+            auto* page = b.CreateLoad(b.getPtrTy(), b.CreateGEP(b.getPtrTy(), table, index), "page");
             auto* offset = b.CreateZExt(b.CreateAnd(addr, Memory::kPageSize - 1), b.getInt64Ty(), "page_offset");
             auto* ptr = b.CreateGEP(b.getInt8Ty(), page, offset);
             // A compare with null asks whether the page is there; the rest
@@ -350,7 +351,7 @@ void lower_guest_memory(Module& m) {
                     other = true;
             }
             if (other) {
-                call->replaceAllUsesWith(b.CreateSelect(b.CreateIsNull(page), ConstantPointerNull::get(b.getInt8PtrTy()), ptr));
+                call->replaceAllUsesWith(b.CreateSelect(b.CreateIsNull(page), ConstantPointerNull::get(b.getPtrTy()), ptr));
             } else {
                 for (auto* cmp : nulls) cmp->setOperand(0, page);
                 call->replaceAllUsesWith(ptr);

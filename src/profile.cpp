@@ -37,6 +37,7 @@
 #include <llvm/Object/SymbolSize.h>
 
 #include "jit_engine.h"
+#include "llvm_compat.h"
 
 #endif
 
@@ -229,8 +230,8 @@ namespace {
 // function splitter gives the block's cold part (cold set), each also with
 // Mach-O's global prefix "_". Returns false for any other symbol.
 bool parse_bb_name(llvm::StringRef name, uint32_t& guest_pc, bool& cold) {
-    if (name.startswith("_bb_0x")) name = name.drop_front();
-    if (!name.startswith("bb_0x")) return false;
+    if (starts_with(name, "_bb_0x")) name = name.drop_front();
+    if (!starts_with(name, "bb_0x")) return false;
     llvm::StringRef hex = name.drop_front(5);
     cold = hex.consume_back(".cold");
     hex.consume_back(".t1");

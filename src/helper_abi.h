@@ -41,13 +41,14 @@
 #include <vector>
 
 #include <llvm/ADT/StringRef.h>
-#include <llvm/ADT/Triple.h>
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
+
+#include "llvm_compat.h"
 
 namespace bcore {
 
@@ -84,7 +85,7 @@ inline llvm::Type* helper_letter_type(llvm::LLVMContext& ctx, char c) {
     case 'c': return llvm::Type::getInt8Ty(ctx);
     case 's': return llvm::Type::getInt16Ty(ctx);
     case 'i': return llvm::Type::getInt32Ty(ctx);
-    case 'p': return llvm::Type::getInt8PtrTy(ctx);
+    case 'p': return llvm::PointerType::getUnqual(ctx);
     }
     llvm::report_fatal_error("bad helper signature letter");
 }

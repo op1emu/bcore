@@ -2,6 +2,7 @@
 #include "block_abi.h"
 #include "helper_abi.h"
 #include "host_bridge.h"
+#include "llvm_compat.h"
 #include "mem_helpers.h"
 
 #include <cstddef>
@@ -32,12 +33,18 @@ namespace bcore {
 JitEngine::JitEngine() = default;
 JitEngine::~JitEngine() = default;
 
-// Helper to create a JITEvaluatedSymbol from a function pointer
+// The absolute symbol of a function at ptr.
+#if LLVM_VERSION_MAJOR >= 17
+static llvm::orc::ExecutorSymbolDef sym_from_ptr(void* ptr) {
+    return {llvm::orc::ExecutorAddr::fromPtr(ptr), llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable};
+}
+#else
 static llvm::JITEvaluatedSymbol sym_from_ptr(void* ptr) {
     return llvm::JITEvaluatedSymbol(
         llvm::pointerToJITTargetAddress(ptr),
         llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable);
 }
+#endif
 
 // Compiles bcore_enter only: blocks come as object files (addObject) from
 // a Compiler.
@@ -60,10 +67,13 @@ bool JitEngine::init() {
     // default memory manager).
     pool_ = std::make_shared<CodeArenaPool>();
     builder.setObjectLinkingLayerCreator(
-        [pool = pool_](llvm::orc::ExecutionSession& es, const llvm::Triple&)
+        // (The creator's second argument, LLVM 15's Triple and 23's
+        // JITLinkMemoryManager, and the MemoryBuffer that 23 gives the
+        // memory manager's getter go unused.)
+        [pool = pool_](llvm::orc::ExecutionSession& es, auto&&)
             -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
             return std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
-                es, [pool] { return std::make_unique<ArenaMemoryManager>(pool); });
+                es, [pool](auto&&...) { return std::make_unique<ArenaMemoryManager>(pool); });
         });
     auto jit_or_err = builder.create();
     if (!jit_or_err) {
@@ -158,7 +168,7 @@ bool JitEngine::makeTrampolines(size_t n, const char* const* names, void* const*
     auto ctx = std::make_unique<llvm::LLVMContext>();
     auto mod = std::make_unique<llvm::Module>(prefix, *ctx);
     mod->setDataLayout(jit_->getDataLayout());
-    mod->setTargetTriple(jit_->getTargetTriple().str());
+    set_target_triple(*mod, jit_->getTargetTriple().str());
     for (size_t i = 0; i < n; ++i) {
         const bcore_abi::Helper* h = bcore_abi::find_helper(names[i]);
         if (!h) {
@@ -203,8 +213,8 @@ bool JitEngine::defineEnter() {
     auto ctx = std::make_unique<llvm::LLVMContext>();
     auto mod = std::make_unique<llvm::Module>("bcore_enter", *ctx);
     mod->setDataLayout(jit_->getDataLayout());
-    mod->setTargetTriple(jit_->getTargetTriple().str());
-    auto* ptr = llvm::Type::getInt8PtrTy(*ctx);
+    set_target_triple(*mod, jit_->getTargetTriple().str());
+    auto* ptr = llvm::PointerType::getUnqual(*ctx);
     auto* void_ty = llvm::Type::getVoidTy(*ctx);
     auto* fn = llvm::Function::Create(llvm::FunctionType::get(void_ty, {ptr, ptr, ptr}, false),
                                       llvm::Function::ExternalLinkage, "bcore_enter", mod.get());

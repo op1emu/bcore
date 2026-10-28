@@ -25,6 +25,7 @@ class ForeignNamesTest(unittest.TestCase):
             "std::__cxx11::basic_string<char> bcore::name[abi:cxx11](bool)",
             "__clang_call_terminate",
             "___clang_call_terminate",
+            "std::enable_if<!is_same_v<llvm::ModuleToFunctionPassAdaptor, llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>>, void>::type llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>::addPass<llvm::ModuleToFunctionPassAdaptor>(llvm::ModuleToFunctionPassAdaptor&&)",
         ]:
             self.assertEqual(foreign_names(symbol), [], symbol)
 
