@@ -28,9 +28,10 @@ using namespace llvm;
 
 namespace {
 
-// The offset from cpu of a pointer into CpuState, or none.
+// The offset from cpu of a pointer into CpuState, or none. (In the width of
+// the target's pointer index: 32 bits on WebAssembly.)
 std::optional<int64_t> cpu_offset(const Value* ptr, const Value* cpu, const DataLayout& layout) {
-    APInt offset(64, 0);
+    APInt offset(layout.getIndexTypeSizeInBits(ptr->getType()), 0);
     const Value* base = ptr->stripAndAccumulateConstantOffsets(layout, offset, /*AllowNonInbounds=*/true);
     if (base != cpu) return std::nullopt;
     return offset.getSExtValue();
