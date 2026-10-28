@@ -53,53 +53,7 @@ if(BCORE_PERF_JIT_EVENTS)
     list(APPEND LLVM_LIBS ${LLVM_PERFJIT_LIBS})
 endif()
 
-# ---- The lifter, the compilers and the JIT: all of the core but Core ----
-# bcore-stencilgen links it to build the stencils bfin-core then holds.
-add_library(bcore-lift STATIC
-    src/disasm_visitor.cpp
-    src/lift_visitor.cpp
-    src/code_arena.cpp
-    src/jit_engine.cpp
-    src/code_loader_native.cpp
-    src/helper_functions.cpp
-    src/host_bridge.cpp
-    src/compiler.cpp
-    src/compile_worker.cpp
-    src/bb_translator.cpp
-    src/bb_stencil.cpp
-    src/cp_build.cpp
-    src/packet_state.cpp
-    src/guest_memory.cpp
-    src/guest_speculation.cpp
-    src/steady_skip.cpp
-    src/syscall_emu.cpp
-    src/cec.cpp
-    src/evt.cpp
-    src/memory.cpp
-    src/cpu_state.cpp
-    src/profile.cpp
-)
-target_include_directories(bcore-lift
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${LLVM_INCLUDE_DIRS}
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_compile_definitions(bcore-lift PUBLIC
-    ${LLVM_DEFINITIONS}
-    BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
-    BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
-)
-find_package(Threads REQUIRED)  # the promotion worker (Core::set_tier_background)
-target_link_libraries(bcore-lift PUBLIC ${LLVM_LIBS} Threads::Threads)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(bcore-lift PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
-set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
-
-# ---- Copy-and-patch stencils (cp_format.h): x86-64 and AArch64 hosts ----
-# Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
+# ---- Copy-and-patch (cp_format.h): x86-64 and AArch64 hosts ----
 # On by default where the stencils run (x86-64, AArch64); OFF builds the
 # core without them anywhere (Core::set_copy_patch then does nothing).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
@@ -115,11 +69,89 @@ option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64, AArch64; LLVM 15)" ${BCO
 if(BCORE_COPY_PATCH AND NOT BCORE_COPY_PATCH_DEFAULT)
     message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 or AArch64 host, and LLVM 15")
 endif()
+
+# ---- The core in three libraries ----
+# bcore-runtime: what blocks run on and the disassembler, without LLVM (the
+# CPU state, the CEC and event controller, the helpers' C functions, the
+# syscalls). bcore-lift: guest code to object files (the lifter, its IR
+# passes, Compiler). bcore-engine: the objects loaded and run (JitEngine
+# over the host's CodeLoader, the promotion worker, profiling). bfin-core,
+# below, is Core over the three. bcore-stencilgen links bcore-lift alone.
+add_library(bcore-runtime STATIC
+    src/disasm_visitor.cpp
+    src/host_bridge.cpp
+    src/syscall_emu.cpp
+    src/cec.cpp
+    src/evt.cpp
+    src/memory.cpp
+    src/cpu_state.cpp
+)
+target_include_directories(bcore-runtime
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_compile_definitions(bcore-runtime PUBLIC
+    BCORE_ENABLE_PROFILE=$<BOOL:${BCORE_ENABLE_PROFILE}>
+    BCORE_PERF_JIT_EVENTS=$<BOOL:${BCORE_PERF_JIT_EVENTS}>
+)
+set_target_properties(bcore-runtime PROPERTIES FOLDER "Core")
+
+# The stencils' pieces of the lifter only with copy-and-patch (below).
+set(BCORE_LIFT_CP_SOURCES)
+if(BCORE_COPY_PATCH)
+    set(BCORE_LIFT_CP_SOURCES src/bb_stencil.cpp src/cp_build.cpp)
+endif()
+add_library(bcore-lift STATIC
+    src/lift_visitor.cpp
+    src/compiler.cpp
+    src/bb_translator.cpp
+    src/packet_state.cpp
+    src/guest_memory.cpp
+    src/guest_speculation.cpp
+    src/steady_skip.cpp
+    ${BCORE_LIFT_CP_SOURCES}
+)
+target_include_directories(bcore-lift
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${LLVM_INCLUDE_DIRS}
+)
+target_compile_definitions(bcore-lift PUBLIC ${LLVM_DEFINITIONS})
+target_link_libraries(bcore-lift PUBLIC bcore-runtime ${LLVM_LIBS})
+set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
+
+add_library(bcore-engine STATIC
+    src/jit_engine.cpp
+    src/code_loader_native.cpp
+    src/code_arena.cpp
+    src/helper_functions.cpp
+    src/compile_worker.cpp
+    src/profile.cpp
+)
+target_include_directories(bcore-engine
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${LLVM_INCLUDE_DIRS}
+)
+find_package(Threads REQUIRED)  # the promotion worker (Core::set_tier_background)
+target_link_libraries(bcore-engine PUBLIC bcore-lift Threads::Threads)
+set_target_properties(bcore-engine PROPERTIES FOLDER "Core")
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(library bcore-runtime bcore-lift bcore-engine)
+        target_compile_options(${library} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    endforeach()
+endif()
+
+# ---- Copy-and-patch stencils ----
+# Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
 set(BCORE_CP_SOURCES)
 if(BCORE_COPY_PATCH)
     add_executable(bcore-stencilgen tools/stencilgen.cpp)
     target_include_directories(bcore-stencilgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
-    target_link_libraries(bcore-stencilgen PRIVATE bcore-lift)
+    target_link_libraries(bcore-stencilgen PRIVATE bcore-lift Threads::Threads)  # it lifts on threads
     # Each architecture's stencils it can make (--target), with the assembler
     # parser AArch64's hole materialization needs.
     foreach(arch X86 AArch64)
@@ -186,7 +218,7 @@ target_compile_definitions(bfin-core PRIVATE
     CP_STENCILS_BIN="${BCORE_CP_GEN}/cp_stencils.bin"
     CP_TABLES_BIN="${BCORE_CP_GEN}/cp_tables.bin"
 )
-target_link_libraries(bfin-core PUBLIC bcore-lift)
+target_link_libraries(bfin-core PUBLIC bcore-engine)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bfin-core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
@@ -383,7 +415,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     # loop block still optimizes and the JIT finds its blocks.
     add_executable(bcore-host-types-test tests/host_types_test.cpp tests/host_types_bridge.cpp)
     set_source_files_properties(tests/host_types_test.cpp PROPERTIES COMPILE_OPTIONS -O0)
-    target_link_libraries(bcore-host-types-test PRIVATE bcore-lift)
+    target_link_libraries(bcore-host-types-test PRIVATE bcore-engine)
     target_include_directories(bcore-host-types-test PRIVATE ${LLVM_INCLUDE_DIRS})
     target_link_libraries(bcore-host-types-test PRIVATE ${LLVM_VECTORIZE_TEST_LIBS})
     add_test(NAME bcore-host-types-test
@@ -394,15 +426,17 @@ if(BCORE_BUILD_FAULT_TESTS)
     if(BCORE_LLVM_NM)
         add_test(NAME bcore-exported-symbols-test
                  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_exported_symbols.py --nm ${BCORE_LLVM_NM}
-                         $<TARGET_FILE:bcore-lift> $<TARGET_FILE:bfin-core>)
+                         $<TARGET_FILE:bcore-runtime> $<TARGET_FILE:bcore-lift> $<TARGET_FILE:bcore-engine>
+                         $<TARGET_FILE:bfin-core>)
     endif()
     add_test(NAME bcore-exported-symbols-unittest
              COMMAND python3 -m unittest tests/test_check_exported_symbols.py
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     # AArch64 stencils compiled (not run) on any host whose LLVM has the
     # target: their relocations, their holes' widths, how they are filled in.
-    # (The stencils are LLVM 15's.)
-    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD AND LLVM_VERSION_MAJOR EQUAL 15)
+    # (The stencils are LLVM 15's, and their pieces of the lifter are built
+    # with copy-and-patch.)
+    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD AND BCORE_COPY_PATCH)
         add_executable(bcore-cp-a64-test tests/cp_a64_test.cpp)
         target_link_libraries(bcore-cp-a64-test PRIVATE bcore-lift)
         target_include_directories(bcore-cp-a64-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
