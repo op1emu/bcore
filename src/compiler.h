@@ -13,6 +13,8 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include "llvm_compat.h"
+
 namespace llvm { class MCContext; class TargetMachine; }
 
 namespace bcore {
@@ -62,6 +64,12 @@ public:
     // out of line. The splitter is on for stencils of any architecture, and
     // off on hosts other than x86-64.
     bool init(int opt_level, int codegen_level, bool split = true, const char* stencil_triple = nullptr);
+    // Before init: the target to compile for in place of this host, a
+    // WebAssembly triple (wasm32-unknown-emscripten) for code that is
+    // compiled here and run elsewhere (tests/wasm_object_test.cpp, whose
+    // caller has initialized the target). On WebAssembly (as host or
+    // target) no splitter, and a backend of its own for every module.
+    void set_target_triple(std::string triple) { target_triple_ = std::move(triple); }
     // Before init: a CPU and its features (SubtargetFeatures text, "+avx2,...")
     // in place of the host's, for code that is compiled here and never run
     // (tests/vectorize_count_test.cpp compiles for AVX-512 on any x86-64).
@@ -98,6 +106,7 @@ private:
     int steady_skip_ = 0;
     std::string post_pipeline_;
     std::string cpu_, features_;
+    std::string target_triple_;
     std::unique_ptr<llvm::TargetMachine> machine_;
     // The IR pipeline. The analysis managers hold results for the module
     // being optimized only: optimize clears them before it returns.
@@ -111,6 +120,13 @@ private:
     std::unique_ptr<llvm::raw_svector_ostream> stream_;
     std::unique_ptr<llvm::legacy::PassManager> backend_;
     llvm::MCContext* mc_ = nullptr;
+    // A backend made for each module (WebAssembly's AsmPrinter writes a
+    // module's declarations, its types and exports, once in its life: from
+    // the second module on there would be no export).
+    bool fresh_backend_ = false;
+    bool makeBackend();
+    std::unique_ptr<llvm::TargetMachine> native_machine(CodeGenLevel cg_level, bool split,
+                                                        const char* stencil_triple);
 };
 
 }  // namespace bcore
