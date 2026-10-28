@@ -83,6 +83,10 @@ runs on AArch64 (macOS and Linux) as on x86-64, the copy-and-patch tier too
 which is Linux only (`BCORE_PERF_JIT_EVENTS`); CI runs the tests on macos-15
 and ubuntu-22.04-arm.
 
+**WebAssembly:** the core runs in Node and in a browser's Worker, built
+with Emscripten and LLVM 23 for wasm32, each block a module of its own;
+see `tools/wasm/README.md`.
+
 **LLVM 23:** `-DLLVM_DIR=/usr/lib/llvm-23/lib/cmake/llvm` (apt.llvm.org's
 `llvm-23-dev`). The copy-and-patch tier is off there: its stencils are LLVM
 15's. Where the two LLVMs differ, `src/llvm_compat.h` says it once; what

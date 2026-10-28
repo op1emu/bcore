@@ -35,7 +35,9 @@
 // RuntimeDyld registers no usable unwind information for Mach-O AArch64
 // objects (a test's exception through a block ended in std::terminate).
 // There the helpers that reach host code catch it (host_bridge.h,
-// kHelpersCatch); BCORE_HELPERS_CATCH=1 does the same on any host.
+// kHelpersCatch); BCORE_HELPERS_CATCH=1 does the same on any host. On
+// WebAssembly too, where a block's frame has a stack pointer of the blocks'
+// own (code_loader_wasm.h), which an exception through it would leave moved.
 
 #include <cstring>
 #include <vector>
@@ -92,7 +94,7 @@ inline llvm::Type* helper_letter_type(llvm::LLVMContext& ctx, char c) {
 }
 
 #ifndef BCORE_HELPERS_CATCH
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__EMSCRIPTEN__)
 #define BCORE_HELPERS_CATCH 1
 #else
 #define BCORE_HELPERS_CATCH 0
