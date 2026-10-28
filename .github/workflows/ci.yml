@@ -238,6 +238,98 @@ jobs:
             -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
 
   # ──────────────────────────────────────────────────────────────────────────
+  # Job 2c: WebAssembly (tools/wasm/README.md): bcore built with Emscripten,
+  # its blocks on the WebAssembly engine, under Node. Of the C++ tests, those
+  # that need no native engine and are not labelled slow; and the emulator
+  # against the build job's on every test (op1emu's mode): exit code, output
+  # and packets the same.
+  # ──────────────────────────────────────────────────────────────────────────
+  wasm:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # emsdk and emscripten-forge's LLVM, as setup.sh pins them, and ccache:
+      # each saved as soon as it is made, whatever the job does after.
+      - name: Restore the WebAssembly tools
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/bcore-wasm
+          key: bcore-wasm-${{ hashFiles('tools/wasm/setup.sh') }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-wasm-${{ github.sha }}
+          restore-keys: ccache-wasm-
+
+      # Node 24 runs the tests, not emsdk's Node 20, whose V8 gives every
+      # instance a copy of the function table it imports: thousands of
+      # blocks' modules ran it out of memory (tier_test).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ccache
+          tools/wasm/setup.sh
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_MAXSIZE=400M"
+          } >> "$GITHUB_ENV"
+
+      - name: Save the WebAssembly tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/bcore-wasm
+          key: bcore-wasm-${{ hashFiles('tools/wasm/setup.sh') }}
+
+      - name: Configure and build
+        run: |
+          ccache -z
+          source ~/.cache/bcore-wasm/emsdk/emsdk_env.sh
+          emcmake cmake -B build-wasm \
+            -DLLVM_DIR=$HOME/.cache/bcore-wasm/llvm/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CROSSCOMPILING_EMULATOR=$(command -v node) \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+          cmake --build build-wasm -j$(getconf _NPROCESSORS_ONLN)
+          ccache -s
+
+      - name: Save ccache
+        if: success() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-wasm-${{ github.sha }}
+
+      - name: Test
+        run: ctest --test-dir build-wasm -j$(getconf _NPROCESSORS_ONLN) --output-on-failure -LE slow -E comparison_test
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Against the native emulator
+        run: |
+          chmod +x build/emu
+          python3 tests/run_diff_test.py --emu build-wasm/emu.js --base-emu build/emu \
+            --matrix standard --only O1-paged-chain --count-packets \
+            -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
+
+  # ──────────────────────────────────────────────────────────────────────────
   # Job 3: Emulator test suite, one suite per job
   # Every suite skips the tests in .github/emu-ignore.txt; a warning
   # (non-failing) is printed for any ignored test that unexpectedly passes,
