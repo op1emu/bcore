@@ -1,4 +1,6 @@
 #include "steady_skip.h"
+#include "llvm_compat.h"
+#include "scev_expander.h"
 #include "guest_memory.h"
 #include "block_abi.h"
 
@@ -36,7 +38,7 @@ std::optional<int64_t> cpu_offset(const Value* ptr, const Value* cpu, const Data
 
 bool is_memory_read(const CallInst& call) {
     const Function* f = call.getCalledFunction();
-    return f && f->getName().startswith("mem_read");
+    return f && starts_with(f->getName(), "mem_read");
 }
 
 struct Plan {
@@ -198,7 +200,7 @@ bool plan_loop(Loop& loop, ScalarEvolution& se, DominatorTree& dt, Value* cpu, c
                 return false;
     }
 
-    SCEVExpander probe(se, layout, "steady");
+    ScevExpander probe(se, layout, "steady");
     if (!probe.isSafeToExpandAt(plan.last, preheader->getTerminator())) return false;
     for (PHINode* phi : plan.counters) {
         auto* rec = cast<SCEVAddRecExpr>(se.getSCEV(phi));
@@ -219,7 +221,7 @@ void transform(Loop& loop, ScalarEvolution& se, Value* cpu, const DataLayout& la
     // Each counter at the last iteration, from its start and step at entry.
     std::vector<Value*> at_last;
     {
-        SCEVExpander expander(se, layout, "steady");
+        ScevExpander expander(se, layout, "steady");
         for (PHINode* phi : plan.counters) {
             auto* rec = cast<SCEVAddRecExpr>(se.getSCEV(phi));
             const SCEV* at = rec->evaluateAtIteration(se.getTruncateOrZeroExtend(plan.last, phi->getType()), se);

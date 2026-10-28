@@ -9,11 +9,21 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 # (no global include_directories — per-target PRIVATE/PUBLIC below)
 
 # ---- LLVM ----
+# LLVM 15, or 23 (the version the WebAssembly build has). A given LLVM_DIR
+# is the one used, whichever of the two it is: were 15 looked for first, it
+# would replace a cache's LLVM_DIR of 23 with 15's.
 set(LLVM_DIR "" CACHE PATH
     "Path to LLVM CMake config directory (LLVMConfig.cmake). \
-Leave empty to search standard system paths. \
+Leave empty to search standard system paths for LLVM 15. \
 Example: /usr/lib/llvm-15/lib/cmake/llvm")
-find_package(LLVM 15 REQUIRED CONFIG)
+if(LLVM_DIR)
+    find_package(LLVM REQUIRED CONFIG NO_DEFAULT_PATH PATHS ${LLVM_DIR})
+else()
+    find_package(LLVM 15 REQUIRED CONFIG)
+endif()
+if(NOT LLVM_VERSION_MAJOR EQUAL 15 AND NOT LLVM_VERSION_MAJOR EQUAL 23)
+    message(FATAL_ERROR "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}: bcore builds with LLVM 15 or 23")
+endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
 llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)
@@ -95,9 +105,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
 else()
     set(BCORE_COPY_PATCH_DEFAULT OFF)
 endif()
-option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64, AArch64)" ${BCORE_COPY_PATCH_DEFAULT})
+# The stencils are LLVM 15's: LLVM 23 builds without them.
+if(NOT LLVM_VERSION_MAJOR EQUAL 15)
+    set(BCORE_COPY_PATCH_DEFAULT OFF)
+endif()
+option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64, AArch64; LLVM 15)" ${BCORE_COPY_PATCH_DEFAULT})
 if(BCORE_COPY_PATCH AND NOT BCORE_COPY_PATCH_DEFAULT)
-    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 or AArch64 host")
+    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 or AArch64 host, and LLVM 15")
 endif()
 set(BCORE_CP_SOURCES)
 if(BCORE_COPY_PATCH)
@@ -385,7 +399,8 @@ if(BCORE_BUILD_FAULT_TESTS)
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     # AArch64 stencils compiled (not run) on any host whose LLVM has the
     # target: their relocations, their holes' widths, how they are filled in.
-    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
+    # (The stencils are LLVM 15's.)
+    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD AND LLVM_VERSION_MAJOR EQUAL 15)
         add_executable(bcore-cp-a64-test tests/cp_a64_test.cpp)
         target_link_libraries(bcore-cp-a64-test PRIVATE bcore-lift)
         target_include_directories(bcore-cp-a64-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})

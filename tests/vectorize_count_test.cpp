@@ -14,6 +14,7 @@
 //     This is what failed on Zen 4 runners only, now on any x86-64 host.
 
 #include "../src/compiler.h"
+#include "../src/llvm_compat.h"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
@@ -42,7 +43,7 @@ unsigned vector_loops(const llvm::Module& mod) {
     unsigned n = 0;
     for (const llvm::Function& f : mod)
         for (const llvm::BasicBlock& block : f) {
-            auto* loop = block.getTerminator() ? block.getTerminator()->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
+            auto* loop = bcore::terminator(block) ? bcore::terminator(block)->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
             if (!loop) continue;
             bool vectorized = false, vector = false;
             for (auto& op : loop->operands())

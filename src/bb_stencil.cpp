@@ -4,6 +4,7 @@
 
 #include "bb_translator.h"
 #include "block_abi.h"
+#include "llvm_compat.h"
 
 #include <cstddef>
 #include <vector>
@@ -88,7 +89,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil(Module& mod, const cha
         builder.CreateBr(cont);
         builder.SetInsertPoint(cont);
         builder.CreateUnreachable();
-    } else if (!builder.GetInsertBlock()->getTerminator()) {
+    } else if (!terminator(*builder.GetInsertBlock())) {
         builder.CreateRetVoid();
     }
     // A packet in a block finds its own PC in pc, which the one before it
@@ -173,7 +174,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil_body(Module& mod, cons
     if (parallel && legal) visitor.on_parallel_end();
     out.terminated = !legal || visitor.is_terminated();
     BasicBlock* cont = out.terminated ? nullptr : way_on(builder, fn);
-    if (!cont && !builder.GetInsertBlock()->getTerminator()) builder.CreateRetVoid();
+    if (!cont && !terminator(*builder.GetInsertBlock())) builder.CreateRetVoid();
     finish_stencil(fn, bcore_abi::block_cpu(fn), nullptr, nullptr, cont, holes, nullptr, false);
     out.fn = fn;
     out.bytes = 4;
@@ -213,7 +214,7 @@ BBTranslator::StencilLift BBTranslator::translate_slot_stencil(Module& mod, cons
     out.terminated = visitor.is_terminated() || visitor.has_pending_exits();
     out.did_jump_clear = visitor.did_jump_known_clear();
     BasicBlock* cont = out.terminated ? nullptr : way_on(builder, fn);
-    if (!cont && !builder.GetInsertBlock()->getTerminator()) builder.CreateRetVoid();
+    if (!cont && !terminator(*builder.GetInsertBlock())) builder.CreateRetVoid();
     finish_stencil(fn, cpu, insn_entry, insn, cont, holes, builder.getInt32(8), lazy_state_);
     out.fn = fn;
     out.bytes = 8;
@@ -269,7 +270,7 @@ BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, con
     visitor.set_fallthrough_pc(pc + 8);
     visitor.finalize_pending_exits(pc, 8);
     BasicBlock* cont = visitor.is_terminated() ? nullptr : way_on(builder, fn);
-    if (!cont && !builder.GetInsertBlock()->getTerminator()) builder.CreateRetVoid();
+    if (!cont && !terminator(*builder.GetInsertBlock())) builder.CreateRetVoid();
     finish_stencil(fn, cpu, insn_entry, insn, cont, holes, builder.getInt32(8), lazy_state_);
     out.fn = fn;
     out.bytes = 8;

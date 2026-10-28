@@ -2,6 +2,7 @@
 #include "bb_translator.h"
 #include "guest_memory.h"
 #include "guest_speculation.h"
+#include "llvm_compat.h"
 #include "steady_skip.h"
 
 #include <cstdint>
@@ -53,11 +54,11 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     // decides instruction selection and register allocation, the IR pipeline
     // what the backend is given, and each has its own compile-time cost.
     const int cg = codegen_level < 0 ? opt_level : codegen_level;
-    const llvm::CodeGenOpt::Level cg_level =
-        cg <= 0 ? llvm::CodeGenOpt::None :
-        cg == 1 ? llvm::CodeGenOpt::Less :
-        cg == 3 ? llvm::CodeGenOpt::Aggressive :
-                  llvm::CodeGenOpt::Default;
+    const CodeGenLevel cg_level =
+        cg <= 0 ? kCodeGenNone :
+        cg == 1 ? kCodeGenLess :
+        cg == 3 ? kCodeGenAggressive :
+                  kCodeGenDefault;
 
     auto builder = stencil
         ? llvm::Expected<llvm::orc::JITTargetMachineBuilder>(
@@ -277,7 +278,7 @@ ModuleCounts count_module(const llvm::Module& mod) {
         // however many vector loops it became (kSpeculatedLoopMD).
         std::set<const llvm::MDNode*> copies;
         for (const llvm::BasicBlock& block : f) {
-            auto* loop = block.getTerminator() ? block.getTerminator()->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
+            auto* loop = terminator(block) ? terminator(block)->getMetadata(llvm::LLVMContext::MD_loop) : nullptr;
             if (!loop) continue;
             bool vectorized = false, vector = false;
             const llvm::MDNode* copy = nullptr;

@@ -76,7 +76,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
     // equals its own and rejects any other, so the strings come from that same
     // JIT (Core passes JitEngine::dataLayout/targetTriple).
     if (!data_layout_.empty()) mod->setDataLayout(data_layout_);
-    if (!target_triple_.empty()) mod->setTargetTriple(target_triple_);
+    if (!target_triple_.empty()) set_target_triple(*mod, target_triple_);
 
     // Create function: void bb_0x<pc>(CpuState*, Memory*) (block_abi.h)
     char fname[32];
@@ -163,7 +163,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
         builder.CreateRetVoid();
     } else {
         auto* block = builder.GetInsertBlock();
-        if (!block->getTerminator())
+        if (!terminator(*block))
             builder.CreateRetVoid();
     }
 
@@ -300,7 +300,7 @@ void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* fir
     auto* i32 = b.getInt32Ty();
     Instruction* at = &*first_entry->getFirstInsertionPt();
     b.SetInsertPoint(at);
-    auto* chain = b.CreateLoad(b.getInt8PtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
+    auto* chain = b.CreateLoad(b.getPtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
     auto* table = b.CreateGEP(i8, chain, b.getInt64(kTierTableOffset), "tier_table");
     auto* slot = b.CreateGEP(i8, table, count_offset);
     auto* count = b.CreateAdd(b.CreateLoad(i32, slot), b.getInt32(1), "tier_count");
@@ -697,7 +697,7 @@ static Tail sink_tail(ReturnInst* ret, Value* cpu) {
 void BBTranslator::merge_returns(Function* fn) {
     std::vector<ReturnInst*> returns;
     for (auto& block : *fn)
-        if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator())) {
+        if (auto* ret = dyn_cast_or_null<ReturnInst>(terminator(block))) {
             // A musttail call must stay right before its return.
             auto* call = dyn_cast_or_null<CallInst>(ret->getPrevNode());
             if (!call || !call->isMustTailCall()) returns.push_back(ret);
@@ -717,14 +717,14 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
                                    Value* entry_pc_value) {
     std::vector<ReturnInst*> returns;
     for (auto& block : *fn)
-        if (auto* ret = dyn_cast_or_null<ReturnInst>(block.getTerminator()); ret && &block != direct)
+        if (auto* ret = dyn_cast_or_null<ReturnInst>(terminator(block)); ret && &block != direct)
             returns.push_back(ret);
     if (returns.empty()) return;
 
     auto& ctx = fn->getContext();
     auto* i8 = b.getInt8Ty();
     auto* i32 = b.getInt32Ty();
-    auto* ptr = b.getInt8PtrTy();
+    auto* ptr = b.getPtrTy();
 
     // The chain table does not change while a block runs (the host compiles
     // and publishes between runs): loaded once.

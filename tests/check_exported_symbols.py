@@ -47,6 +47,11 @@ KEYWORDS = {
     "noexcept", "restrict", "__restrict",
 }
 
+# The standard library's names the demangler prints without std:: in an
+# expression within a symbol's template arguments (LLVM 23's
+# PassManager::addPass: enable_if<!is_same_v<...>>).
+STD_IN_EXPRESSIONS = {"is_same_v"}
+
 # The demangler's words around a name ("vtable for X") and in it.
 DEMANGLER = re.compile(
     r"\b(?:vtable|VTT|typeinfo name|typeinfo|guard variable|construction vtable|"
@@ -73,7 +78,8 @@ def foreign_names(symbol: str) -> List[str]:
             continue
         name = m.group(0)
         head = name.split("::")[0]
-        if head in NAMESPACES or name in KEYWORDS or PREFIXED.match(head) or RESERVED.match(head):
+        if (head in NAMESPACES or name in KEYWORDS or name in STD_IN_EXPRESSIONS or PREFIXED.match(head)
+                or RESERVED.match(head)):
             continue
         found.append(name)
     return found

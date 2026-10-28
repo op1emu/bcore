@@ -1,5 +1,7 @@
 #include "guest_speculation.h"
 #include "guest_memory.h"
+#include "llvm_compat.h"
+#include "scev_expander.h"
 
 #include <map>
 #include <set>
@@ -44,7 +46,7 @@ struct Accumulator {
 
 // s fits in i32: (s + 2^31) <u 2^32, or s == sext(trunc s).
 bool is_fits_test(Value* c, Value* s) {
-    ICmpInst::Predicate pred;
+    CmpPred pred;
     const APInt *bias, *bound;
     if (match(c, m_ICmp(pred, m_Add(m_Specific(s), m_APInt(bias)), m_APInt(bound))) &&
         pred == ICmpInst::ICMP_ULT && bias->getBitWidth() == 64 && bias->getZExtValue() == 0x80000000ull &&
@@ -87,7 +89,7 @@ bool depends_on(Value* v, Value* of, const Loop& loop) {
 bool is_stop_test(BasicBlock* exiting, const Loop& loop) {
     auto* br = dyn_cast<BranchInst>(exiting->getTerminator());
     if (!br || !br->isConditional()) return false;
-    ICmpInst::Predicate pred;
+    CmpPred pred;
     Value* value;
     if (!match(br->getCondition(), m_ICmp(pred, m_Value(value), m_Zero()))) return false;
     auto* load = dyn_cast<LoadInst>(value);
@@ -172,7 +174,7 @@ public:
 
 private:
     ScalarEvolution& se_;
-    SCEVExpander expander_;
+    ScevExpander expander_;
     IRBuilder<> b_;
     Instruction* at_;
     const Loop& copy_;
@@ -257,7 +259,7 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
     const DataLayout& layout = header->getModule()->getDataLayout();
     Instruction* at = preheader->getTerminator();
     {
-        SCEVExpander probe(se, layout, "spec");
+        ScevExpander probe(se, layout, "spec");
         if (!probe.isSafeToExpandAt(m, at)) return false;
     }
 
@@ -313,7 +315,7 @@ bool speculate(Loop& loop, LoopInfo& li, DominatorTree& dt, ScalarEvolution& se,
     IRBuilder<> b(at);
     auto* i64 = b.getInt64Ty();
     auto* i32 = b.getInt32Ty();
-    SCEVExpander expander(se, layout, "spec");
+    ScevExpander expander(se, layout, "spec");
     Value* m64 = b.CreateZExtOrTrunc(expander.expandCodeFor(m, m->getType(), at), i64, "spec.m");
     b.SetInsertPoint(at);
     Value* go = b.CreateAnd(b.CreateICmpUGE(m64, b.getInt64(kMinIterations)),

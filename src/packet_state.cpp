@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cpu_state.h"
+#include "llvm_compat.h"
 
 #include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
@@ -67,7 +68,7 @@ PcEffect pc_effect(CallInst& call) {
     }
     // The memory callbacks and the CEC's helpers change pc only by raising
     // an exception or taking an interrupt, which also sets did_jump.
-    if (name.startswith("mem_read") || name.startswith("mem_write") || name == "user_mmr_check" ||
+    if (starts_with(name, "mem_read") || starts_with(name, "mem_write") || name == "user_mmr_check" ||
         name == "cec_check_pending" || name == "cec_check_sup" || name == "cec_cli" ||
         name == "cec_sti" || name == "cec_push_reti" || name == "cec_pop_reti" || name == "cec_raise" ||
         name == "cec_exception" || name == "cec_data_alignment")

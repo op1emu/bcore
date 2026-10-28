@@ -7,7 +7,6 @@
 #include <cctype>
 #include <cstring>
 
-#include <llvm/ADT/Triple.h>
 #include <llvm/BinaryFormat/ELF.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
@@ -26,6 +25,7 @@
 #include "compiler.h"
 #include "helper_abi.h"
 #include "lift_visitor.h"
+#include "llvm_compat.h"
 
 namespace bcore {
 
@@ -257,7 +257,7 @@ Value* rebuild(Constant* c, Instruction* at, Made& made, std::string& error) {
         error = "a value hole in a constant aggregate";
         return nullptr;
     }
-    Instruction* inst = ce->getAsInstruction(at);
+    Instruction* inst = as_instruction(ce, at);
     for (Use& op : inst->operands()) {
         auto* k = dyn_cast<Constant>(op.get());
         if (!k || !mentions_hole(k)) continue;
@@ -517,7 +517,7 @@ size_t tail_jump(const Code& c, Hole hole) {
 std::map<std::string, Code> compile_stencils(Compiler& compiler, Module& mod) {
     std::map<std::string, Code> out;
     mod.setDataLayout(compiler.dataLayout());
-    mod.setTargetTriple(compiler.targetTriple());
+    set_target_triple(mod, compiler.targetTriple());
     const Triple triple(compiler.targetTriple());
     make_local(mod);
     bcore_abi::set_helper_cc(mod, bcore_abi::helper_cc(triple));  // lifted in this host's
