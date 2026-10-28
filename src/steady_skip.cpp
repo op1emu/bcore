@@ -28,7 +28,7 @@ namespace {
 
 // The offset from cpu of a pointer into CpuState, or none.
 std::optional<int64_t> cpu_offset(const Value* ptr, const Value* cpu, const DataLayout& layout) {
-    APInt offset(64, 0);
+    APInt offset(layout.getIndexTypeSizeInBits(ptr->getType()), 0);  // 32 bits on wasm32
     const Value* base = ptr->stripAndAccumulateConstantOffsets(layout, offset, /*AllowNonInbounds=*/true);
     if (base != cpu) return std::nullopt;
     return offset.getSExtValue();
