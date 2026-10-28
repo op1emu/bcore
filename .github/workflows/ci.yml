@@ -320,6 +320,140 @@ jobs:
         run: python3 tests/run_emu_test.py --no-fail-fast --ignore-list .github/emu-ignore.txt
 
   # ──────────────────────────────────────────────────────────────────────────
+  # Job 3c: WebAssembly (tools/wasm/README.md), in Node 24: the core built
+  # with Emscripten 4.0.9 and emscripten-forge's LLVM 23 (cached, as
+  # setup.sh fetches them), its C++ tests, and its emu against the build
+  # job's native one, every test's exit code, output and packets the same:
+  # O1 paged chained here, O0 (raw memory) in wasm-o0 on this job's emu.
+  # The tools and ccache are restored, and saved as soon as they are there:
+  # a job that times out still leaves them for the next.
+  # ──────────────────────────────────────────────────────────────────────────
+  wasm:
+    name: wasm (Node, O1-paged-chain)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Restore the WebAssembly tools
+        id: wasm-tools
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/bcore-wasm
+          key: wasm-tools-${{ hashFiles('tools/wasm/setup.sh') }}
+
+      - name: Fetch the WebAssembly tools
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        run: tools/wasm/setup.sh
+
+      - name: Save the WebAssembly tools
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/bcore-wasm
+          key: wasm-tools-${{ hashFiles('tools/wasm/setup.sh') }}
+
+      - name: Install ccache
+        run: sudo apt-get install -y ccache
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-wasm-${{ github.sha }}
+          restore-keys: ccache-wasm-
+
+      - name: Configure (CMake)
+        run: |
+          node=$(command -v node)  # setup-node's, before emsdk's goes on PATH
+          source ~/.cache/bcore-wasm/emsdk-4.0.9/emsdk_env.sh
+          emcmake cmake -B build-wasm \
+            -DLLVM_DIR=$HOME/.cache/bcore-wasm/llvm-23.1.2/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CROSSCOMPILING_EMULATOR=$node \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: |
+          source ~/.cache/bcore-wasm/emsdk-4.0.9/emsdk_env.sh
+          export CCACHE_DIR=$HOME/.cache/ccache CCACHE_MAXSIZE=400M
+          ccache -z
+          cmake --build build-wasm -j$(getconf _NPROCESSORS_ONLN)
+          ccache -s
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-wasm-${{ github.sha }}
+
+      - name: Upload the WebAssembly emu
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-emu
+          path: |
+            build-wasm/emu.js
+            build-wasm/emu.wasm
+
+      - name: C++ tests
+        run: ctest --test-dir build-wasm -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
+
+      - name: Download build artifacts
+        if: success() || failure()
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Against the native emu, O1-paged-chain
+        if: success() || failure()
+        run: |
+          chmod +x build/emu build-wasm/emu-node
+          python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
+            --matrix standard --only O1-paged-chain --count-packets \
+            -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
+
+  wasm-o0:
+    name: wasm (Node, O0)
+    needs: [build, wasm]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Download the WebAssembly emu
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-emu
+          path: build-wasm/
+
+      - name: Against the native emu, O0
+        run: |
+          chmod +x build/emu
+          printf '#!/bin/sh\nexec node "%s/build-wasm/emu.js" "$@"\n' "$PWD" > build-wasm/emu-node
+          chmod +x build-wasm/emu-node
+          python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
+            --matrix standard --only O0 --count-packets \
+            -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
+
+  # ──────────────────────────────────────────────────────────────────────────
   # Job 4: macOS on Apple silicon (AArch64, Mach-O, MAP_JIT)
   # With the AArch64 stencils (the copy-and-patch tier 0). A macOS runner
   # has three cores, and an account runs five macOS jobs at a time: one
