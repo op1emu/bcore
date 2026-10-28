@@ -57,6 +57,15 @@ inline constexpr CodeGenLevel kCodeGenAggressive = llvm::CodeGenOpt::Aggressive;
 inline constexpr llvm::CodeGenFileType kObjectFile = llvm::CGFT_ObjectFile;
 #endif
 
+// InstCombine in a textual pipeline, as the default pipelines run it: since
+// LLVM 18 it checks that one run reached a fixed point, and stops the
+// process where it did not.
+#if LLVM_VERSION_MAJOR >= 18
+#define BCORE_INSTCOMBINE "instcombine<no-verify-fixpoint>"
+#else
+#define BCORE_INSTCOMBINE "instcombine"
+#endif
+
 // What PatternMatch's m_ICmp binds a predicate to.
 #if LLVM_VERSION_MAJOR >= 20
 using CmpPred = llvm::CmpPredicate;

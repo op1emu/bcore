@@ -28,16 +28,33 @@ namespace bcore {
 static constexpr uint64_t kEntryCount = uint64_t(1) << 30;
 static constexpr const char* kColdCount = "2048";
 
+#if LLVM_VERSION_MAJOR >= 19
+#define BCORE_LOOP_SIMPLIFY_FIRST "loop-simplify,"
+#else
+#define BCORE_LOOP_SIMPLIFY_FIRST ""
+#endif
+
 static void split_by_counts() {
     static std::once_flag once;
     std::call_once(once, [] {
         auto& options = llvm::cl::getRegisteredOptions();
         auto set = [&](const char* name, const char* value) {
             auto it = options.find(name);
-            if (it != options.end()) it->second->addOccurrence(0, name, value);
+            if (it == options.end()) llvm::report_fatal_error(llvm::Twine("no option ") + name);
+            it->second->addOccurrence(0, name, value);
         };
         set("mfs-psi-cutoff", "0");
         set("mfs-count-threshold", kColdCount);
+#if LLVM_VERSION_MAJOR >= 19
+        // No shrink-wrapping: since LLVM 19 it puts the frame's setup (the
+        // push that aligns the stack for a call) in a rare path that calls a
+        // helper, and the splitter leaves a block that sets up or tears down
+        // the frame where it is: the rare paths stay in the hot code, which
+        // branches around them. Like the options above it holds for the
+        // process, from the first splitting Compiler on (Core's, made before
+        // a worker's, which compiles meanwhile).
+        set("enable-shrink-wrap", "false");
+#endif
     });
 }
 
@@ -97,6 +114,18 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
         // code there (helper_abi.h's kHelpersCatch).
         builder->setCodeModel(llvm::CodeModel::Large);
         builder->setRelocationModel(llvm::Reloc::PIC_);
+#if LLVM_VERSION_MAJOR >= 19
+    } else if (triple.isX86()) {
+        // The small model, not the large one detectHost gives: in the large
+        // model LLVM 19 on names the section of a function's split-off cold
+        // part as its hot code's (.ltext.<name>, not .text.split.<name>), and
+        // the arena could not keep them apart. Position-independent, since
+        // the arena lies anywhere (a static small model takes a jump table's
+        // address as 32 bits); calls of the helpers, beyond 2 GiB, go through
+        // RuntimeDyld's stubs.
+        builder->setCodeModel(llvm::CodeModel::Small);
+        builder->setRelocationModel(llvm::Reloc::PIC_);
+#endif
     }
     // No Swift async frame record (block_abi.h: the Memory is `swiftasync`
     // only to be passed in a register C keeps; nothing reads it from a frame).
@@ -154,7 +183,7 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
 // and the per-function passes that find nothing there: about a tenth of a
 // promotion's compile time on the boot.
 const char* const Compiler::kLightPipeline =
-    "function(sroa,early-cse<memssa>,instcombine,simplifycfg,gvn,dse,adce,simplifycfg)";
+    "function(sroa,early-cse<memssa>," BCORE_INSTCOMBINE ",simplifycfg,gvn,dse,adce,simplifycfg)";
 
 void Compiler::optimize(llvm::Module& mod, bool light) {
     if (opt_level_ == 0) {
@@ -181,11 +210,19 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
     // form and its shadow in SSA values first, so that SCEV sees the
     // registers as inductions, then proven copies, then the rest as plain
     // accesses. The default pipeline then cleans up after both.
+    //
+    // From LLVM 19 on, loop-simplify before InstCombine too: a rare exit that
+    // runs the block again (a raised or misaligned access) is a second back
+    // edge, which LoopSimplify makes an outer loop of by a header PHI that
+    // the inner back edge leaves unchanged (a register the loop never
+    // writes). LLVM 19's InstCombine folds those PHIs away first, and the two
+    // back edges then share one latch where SCEV finds no count.
     const bool guest_memory = has_guest_memory(mod);  // lower_guest_memory takes the declarations
     if (guest_memory) {
         llvm::ModulePassManager pre;
         llvm::cantFail(pb_->parsePassPipeline(
-            pre, "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
+            pre, "function(sroa,early-cse<memssa>," BCORE_LOOP_SIMPLIFY_FIRST BCORE_INSTCOMBINE
+                 ",simplifycfg,loop-simplify,lcssa)"));
         pre.run(mod, mam_);
         llvm::ModulePassManager versioning;
         versioning.addPass(llvm::createModuleToFunctionPassAdaptor(GuestLoopVersioning()));
@@ -195,12 +232,12 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
         // (guest_speculation.h), and the copies that asked for it
         // vectorized: only those, whatever the opt level.
         llvm::ModulePassManager spec;
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg,loop-simplify,lcssa)"));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(" BCORE_INSTCOMBINE ",simplifycfg,loop-simplify,lcssa)"));
         spec.addPass(llvm::createModuleToFunctionPassAdaptor(SatReductionSpeculation()));
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(adce,instcombine,loop-simplify,lcssa)"));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(adce," BCORE_INSTCOMBINE ",loop-simplify,lcssa)"));
         spec.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::LoopVectorizePass(
             llvm::LoopVectorizeOptions().setVectorizeOnlyWhenForced(true).setInterleaveOnlyWhenForced(true))));
-        llvm::cantFail(pb_->parsePassPipeline(spec, "function(instcombine,simplifycfg)"));
+        llvm::cantFail(pb_->parsePassPipeline(spec, "function(" BCORE_INSTCOMBINE ",simplifycfg)"));
         spec.run(mod, mam_);
         mam_.clear();
         fam_.clear();
@@ -216,7 +253,7 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
         // shadow in SSA values first.
         llvm::cantFail(pb_->parsePassPipeline(steady, guest_memory
             ? "function(loop-simplify,lcssa)"
-            : "function(sroa,early-cse<memssa>,instcombine,simplifycfg,loop-simplify,lcssa)"));
+            : "function(sroa,early-cse<memssa>," BCORE_INSTCOMBINE ",simplifycfg,loop-simplify,lcssa)"));
         steady.addPass(llvm::createModuleToFunctionPassAdaptor(SteadyLoopSkip(steady_skip_ == 1)));
         steady.run(mod, mam_);
         mam_.clear();
