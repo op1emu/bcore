@@ -1,8 +1,6 @@
-#include "mem.h"
+#include "mem_helpers.h"
 
 namespace bcore {
-
-extern "C" {
 
 __attribute__((hot)) uint8_t mem_read8(Memory* mem, uint32_t addr) {
     return mem->read8(addr);
@@ -27,7 +25,5 @@ __attribute__((hot)) void mem_write16(Memory* mem, uint32_t addr, uint16_t val) 
 __attribute__((hot)) void mem_write32(Memory* mem, uint32_t addr, uint32_t val) {
     mem->write32(addr, val);
 }
-
-} // extern "C"
 
 }  // namespace bcore

@@ -4,6 +4,7 @@
 #include <exception>
 
 #include "cec.h"
+#include "mem_helpers.h"
 #include "syscall_emu.h"
 
 namespace bcore {

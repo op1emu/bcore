@@ -57,10 +57,10 @@ uint32_t evt_read(uint32_t addr);
 void     evt_write(uint32_t addr, uint32_t val);
 
 // CEC exception dispatch (called by FlatMemory::fault)
-extern "C" void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem);
+void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem);
 
 // User-mode MMR access check (called by FlatMemory for all reads/writes)
-extern "C" bool user_mmr_check(CpuState* cpu, uint32_t addr);
+bool user_mmr_check(CpuState* cpu, uint32_t addr);
 
 // CEC initialization
 void cec_init();

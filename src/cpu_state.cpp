@@ -4,8 +4,6 @@
 
 namespace bcore {
 
-extern "C" {
-
 uint32_t cpu_astat_compose(CpuState* cpu) {
     return astat_compose(cpu);
 }
@@ -39,8 +37,6 @@ void bfin_hwloop_step(CpuState* cpu, uint32_t insn_pc, uint32_t fallthrough_pc) 
     if (cpu->lc[0] > 0 && cpu->lb[0] == insn_pc)
         --cpu->lc[0];
 }
-
-} // extern "C"
 
 void cpu_state_init(CpuState* cpu) {
     std::memset(cpu, 0, sizeof(CpuState));

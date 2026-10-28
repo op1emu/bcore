@@ -8,7 +8,7 @@
 
 namespace bcore {
 
-// Core Event Controller (CEC) helpers — extern "C" so JIT can call them.
+// Core Event Controller (CEC) helpers, called by generated code too.
 //
 // Semantics derived from refs/dv-bfin_cec.c (GNU binutils simulator).
 // This is a usermode-focused subset: no MMU/CPLB, no peripheral interrupts.
@@ -33,60 +33,58 @@ inline int cec_current_ivg_val(uint32_t ipend) {
     return p ? static_cast<int>(__builtin_ctz(p)) : -1;
 }
 
-extern "C" {
-    // An interrupt may be pending: cec_check_pending has something to check.
-    extern bool bcore_cec_pending;
+// An interrupt may be pending: cec_check_pending has something to check.
+extern bool bcore_cec_pending;
 
-    void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc, uint32_t addr, uint32_t flags);
-    // EXCPT imm: set SEQSTAT.EXCAUSE, RETX, dispatch to EVT3 handler.
-    // mem: pointer to memory object, used only for the EXCPT 0 libgloss syscall
-    // fallback (when no EVT3 handler is installed). Pass nullptr when not needed.
-    void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem);
+void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc, uint32_t addr, uint32_t flags);
+// EXCPT imm: set SEQSTAT.EXCAUSE, RETX, dispatch to EVT3 handler.
+// mem: pointer to memory object, used only for the EXCPT 0 libgloss syscall
+// fallback (when no EVT3 handler is installed). Pass nullptr when not needed.
+void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem);
 
-    // RAISE imm: latch ILAT, dispatch if enabled and higher priority than current.
-    void cec_raise(CpuState* cpu, uint32_t ivg);
+// RAISE imm: latch ILAT, dispatch if enabled and higher priority than current.
+void cec_raise(CpuState* cpu, uint32_t ivg);
 
-    // RTI: clear IPEND for current IVG, return RETI.
-    uint32_t cec_return_rti(CpuState* cpu);
+// RTI: clear IPEND for current IVG, return RETI.
+uint32_t cec_return_rti(CpuState* cpu);
 
-    // RTX: clear IPEND for IVG_EVX (3), return RETX.
-    uint32_t cec_return_rtx(CpuState* cpu);
+// RTX: clear IPEND for IVG_EVX (3), return RETX.
+uint32_t cec_return_rtx(CpuState* cpu);
 
-    // RTN: clear IPEND for IVG_NMI (2), return RETN.
-    uint32_t cec_return_rtn(CpuState* cpu);
+// RTN: clear IPEND for IVG_NMI (2), return RETN.
+uint32_t cec_return_rtn(CpuState* cpu);
 
-    // RTE: clear IPEND for IVG_EMU (0), return RETE.
-    uint32_t cec_return_rte(CpuState* cpu);
+// RTE: clear IPEND for IVG_EMU (0), return RETE.
+uint32_t cec_return_rte(CpuState* cpu);
 
-    // CLI Rd: globally mask interrupts, return old IMASK (to be stored in Rd).
-    // Raises VEC_ILL_RES if called from user mode.
-    uint32_t cec_cli(CpuState* cpu);
+// CLI Rd: globally mask interrupts, return old IMASK (to be stored in Rd).
+// Raises VEC_ILL_RES if called from user mode.
+uint32_t cec_cli(CpuState* cpu);
 
-    // STI Rd: restore IMASK from the value in Rd.
-    // Raises VEC_ILL_RES if called from user mode.
-    void cec_sti(CpuState* cpu, uint32_t mask);
+// STI Rd: restore IMASK from the value in Rd.
+// Raises VEC_ILL_RES if called from user mode.
+void cec_sti(CpuState* cpu, uint32_t mask);
 
-    // [--SP] = RETI: clears IRPTEN in IPEND, enabling nested maskable interrupts.
-    // Raises VEC_ILL_RES if called from user mode (supervisor register access).
-    void cec_push_reti(CpuState* cpu);
+// [--SP] = RETI: clears IRPTEN in IPEND, enabling nested maskable interrupts.
+// Raises VEC_ILL_RES if called from user mode (supervisor register access).
+void cec_push_reti(CpuState* cpu);
 
-    // RETI = [SP++]: sets IRPTEN in IPEND, restoring the global interrupt mask.
-    // Raises VEC_ILL_RES if called from user mode.
-    void cec_pop_reti(CpuState* cpu);
+// RETI = [SP++]: sets IRPTEN in IPEND, restoring the global interrupt mask.
+// Raises VEC_ILL_RES if called from user mode.
+void cec_pop_reti(CpuState* cpu);
 
-    // Returns true if currently in user mode (IPEND has no supervisor bits).
-    // Used as a JIT guard to conditionally raise different exceptions per access type.
-    bool cec_is_user_mode();
+// Returns true if currently in user mode (IPEND has no supervisor bits).
+// Used as a JIT guard to conditionally raise different exceptions per access type.
+bool cec_is_user_mode();
 
-    // Raise VEC_ILL_RES if currently in user mode.
-    // Used as a JIT guard for supervisor-only register accesses (group-7 regs).
-    void cec_check_sup(CpuState* cpu);
+// Raise VEC_ILL_RES if currently in user mode.
+// Used as a JIT guard for supervisor-only register accesses (group-7 regs).
+void cec_check_sup(CpuState* cpu);
 
-    void cec_check_pending(CpuState* cpu);
+void cec_check_pending(CpuState* cpu);
 
-    // Raise VEC_DCPLB_MISS if in user mode and addr is in System MMR space (>= 0xFFC00000).
-    // Returns true if an exception was raised, false otherwise.
-    bool user_mmr_check(CpuState* cpu, uint32_t addr);
-}
+// Raise VEC_DCPLB_MISS if in user mode and addr is in System MMR space (>= 0xFFC00000).
+// Returns true if an exception was raised, false otherwise.
+bool user_mmr_check(CpuState* cpu, uint32_t addr);
 
 }  // namespace bcore

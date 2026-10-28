@@ -115,7 +115,7 @@ static void check_sink_time_excluded() {
 #endif
 }
 
-extern "C" uint32_t cec_return_rti(CpuState* cpu);
+namespace bcore { uint32_t cec_return_rti(CpuState* cpu); }
 
 // Interrupt entries are counted per level where the CEC dispatches them.
 static void check_interrupt_counts() {

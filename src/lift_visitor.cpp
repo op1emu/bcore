@@ -484,7 +484,7 @@ static const std::pair<size_t, unsigned> kAstatFields[] = {
 };
 
 // Emit inline IR that packs all ASTAT flag fields into a single i32 value.
-// Equivalent to the extern "C" cpu_astat_compose() without an indirect call.
+// Equivalent to cpu_astat_compose() without an indirect call.
 Value* LiftVisitor::emit_astat_compose() {
     Value* result = load_cpu_u32(offsetof(CpuState, astat_reserved));
     for (auto [off, bit] : kAstatFields) {
@@ -497,7 +497,7 @@ Value* LiftVisitor::emit_astat_compose() {
 }
 
 // Emit inline IR that unpacks an i32 ASTAT value into all individual flag fields.
-// Equivalent to the extern "C" cpu_astat_decompose() without an indirect call.
+// Equivalent to cpu_astat_decompose() without an indirect call.
 void LiftVisitor::emit_astat_decompose(Value* astat) {
     for (auto [off, bit] : kAstatFields) {
         Value* shifted = (bit > 0) ? builder_.CreateLShr(astat, builder_.getInt32(bit))
@@ -682,7 +682,7 @@ void LiftVisitor::emit_epilog(uint32_t insn_pc, uint32_t insn_len) {
         emit_epilog_jumped(insn_pc);
         return;
     }
-    // Delegate the full hw-loop probe to an extern "C" helper to keep IR compact.
+    // Delegate the full hw-loop probe to a helper to keep IR compact.
     // bfin_hwloop_step():
     //   Phase A (when !did_jump): redirects cpu->pc via hw-loop back-edge rules.
     //   Phase B (always): decrements loop counter(s) whose bottom == insn_pc.

@@ -5,7 +5,7 @@
 
 namespace bcore {
 
-extern "C" void bfin_syscall(CpuState* cpu, Memory* mem);
-extern "C" void bfin_putchar(uint32_t ch);
+void bfin_syscall(CpuState* cpu, Memory* mem);
+void bfin_putchar(uint32_t ch);
 
 }  // namespace bcore

@@ -37,7 +37,7 @@ BBTranslator
 JitEngine (LLVM LLJIT)
    │
    ▼
-Native code  ◄──► extern "C" helpers (mem_read/write, CEC, hwloop)
+Native code  ◄──► helpers (mem_read/write, CEC, hwloop)
 ```
 
 ### Key Components
