@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>bcore in a Worker</title>
+<!-- Runs each program of programs/ (test ELFs copied there) in the Worker,
+     emu-web.js and emu-web.wasm beside it, and shows and POSTs the results
+     to /result (serve.py writes them to result.json). ?args=... sets emu's
+     flags (default "-O 1 --page-table --chain"). -->
+<pre id="log"></pre>
+<script>
+const programs = ["d2.s.elf", "10272_small.s.elf", "fir_loop.s.elf", "c_mmr_loop.S.elf", "bench.s.elf"];
+const args = (new URLSearchParams(location.search).get("args") || "-O 1 --page-table --chain").split(" ");
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; };
+(async () => {
+    const results = [];
+    for (const name of programs) {
+        const elf = await (await fetch("programs/" + name)).arrayBuffer();
+        const worker = new Worker("worker.js");
+        const result = await new Promise((done) => { worker.onmessage = (e) => done(e.data); worker.postMessage({elf, args}); });
+        worker.terminate();
+        const pass = result.rc === 0;
+        log(`${name}: ${pass ? "pass" : "FAIL rc=" + result.rc} (init ${result.init_ms.toFixed(0)} ms, run ${result.run_ms.toFixed(0)} ms)`);
+        if (!pass) log(result.out.join("\n"));
+        results.push({name, ...result, pass});
+    }
+    log(results.every((r) => r.pass) ? "all pass" : "FAIL");
+    await fetch("/result", {method: "POST", body: JSON.stringify({userAgent: navigator.userAgent, args, results})});
+})();
+</script>

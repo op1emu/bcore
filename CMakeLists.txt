@@ -26,14 +26,60 @@ if(NOT LLVM_VERSION_MAJOR EQUAL 15 AND NOT LLVM_VERSION_MAJOR EQUAL 23)
 endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
 
-llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)
+if(EMSCRIPTEN)
+    # WebAssembly (tools/wasm/README.md): LLVM's WebAssembly backend,
+    # which emits each block's object, and its Object library, which reads
+    # it back (wasm_object.h); no JIT.
+    llvm_map_components_to_libnames(LLVM_LIBS core support passes object
+        webassemblycodegen webassemblydesc webassemblyinfo)
+else()
+    llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)
+endif()
+
+if(EMSCRIPTEN)
+    # Exceptions as WebAssembly's (a helper's, caught in host_bridge), the
+    # same RTTI as LLVM's (its classes are derived from here), and a link
+    # at -O1 whatever the build type: wasm-opt's -O2 and up took 75 s for
+    # each executable, and its larger functions started three times slower
+    # (V8 compiled them again); the code runs as fast either way.
+    add_compile_options(-fwasm-exceptions)
+    if(NOT LLVM_ENABLE_RTTI)
+        add_compile_options(-fno-rtti)
+    endif()
+    add_link_options(-fwasm-exceptions -O1 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB
+        -sALLOW_TABLE_GROWTH=1 -sSTACK_SIZE=8MB)
+    # The executables built here (the tools, the tests) run in Node, on the
+    # host's files. Node 24 or newer (CMAKE_CROSSCOMPILING_EMULATOR, which
+    # runs the tests): Node 20's V8 copied the whole table into every
+    # instance that imports it, a block's module each, memory as the square
+    # of the blocks (V8 13.3 has one for all, Chrome 133 on).
+    add_link_options(-sNODERAWFS=1 -sEXIT_RUNTIME=1)
+    if(NOT CMAKE_CROSSCOMPILING_EMULATOR)
+        message(FATAL_ERROR "-DCMAKE_CROSSCOMPILING_EMULATOR=<Node 24 or newer> runs the WebAssembly build's executables")
+    endif()
+    execute_process(COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} --version OUTPUT_VARIABLE BCORE_NODE_VERSION
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT BCORE_NODE_VERSION MATCHES "^v([0-9]+)\\." OR CMAKE_MATCH_1 LESS 24)
+        message(FATAL_ERROR "${CMAKE_CROSSCOMPILING_EMULATOR} is Node ${BCORE_NODE_VERSION}: the WebAssembly build's executables need 24 or newer")
+    endif()
+endif()
 
 # ---- Profiling / observability ----
 # Standalone default ON: the code map, event sink and counters cost a null
 # check and a few increments per dispatch. Hosts can compile them out (see
 # bcore_profile.h).
+# Off on WebAssembly, where there is no code to map (the blocks are
+# modules) nor perf.
+if(EMSCRIPTEN)
+    set(BCORE_ENABLE_PROFILE_DEFAULT OFF)
+else()
+    set(BCORE_ENABLE_PROFILE_DEFAULT ON)
+endif()
 option(BCORE_ENABLE_PROFILE
-    "JIT observability API: code map, typed event sink, counters" ON)
+    "JIT observability API: code map, typed event sink, counters" ${BCORE_ENABLE_PROFILE_DEFAULT})
+if(BCORE_ENABLE_PROFILE AND EMSCRIPTEN)
+    message(FATAL_ERROR "BCORE_ENABLE_PROFILE: no profiling on WebAssembly")
+endif()
 # OFF by default: emits jitdump files on disk whenever blocks are compiled.
 option(BCORE_PERF_JIT_EVENTS
     "Register LLVM's PerfJITEventListener (enables 'perf inject --jit')" OFF)
@@ -56,7 +102,7 @@ endif()
 # ---- Copy-and-patch (cp_format.h): x86-64 and AArch64 hosts ----
 # On by default where the stencils run (x86-64, AArch64); OFF builds the
 # core without them anywhere (Core::set_copy_patch then does nothing).
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$" AND NOT EMSCRIPTEN)
     set(BCORE_COPY_PATCH_DEFAULT ON)
 else()
     set(BCORE_COPY_PATCH_DEFAULT OFF)
@@ -122,10 +168,15 @@ target_compile_definitions(bcore-lift PUBLIC ${LLVM_DEFINITIONS})
 target_link_libraries(bcore-lift PUBLIC bcore-runtime ${LLVM_LIBS})
 set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
 
+# The host's CodeLoader (code_loader.h).
+if(EMSCRIPTEN)
+    set(BCORE_LOADER_SOURCES src/code_loader_wasm.cpp src/wasm_object.cpp)
+else()
+    set(BCORE_LOADER_SOURCES src/code_loader_native.cpp src/code_arena.cpp)
+endif()
 add_library(bcore-engine STATIC
     src/jit_engine.cpp
-    src/code_loader_native.cpp
-    src/code_arena.cpp
+    ${BCORE_LOADER_SOURCES}
     src/helper_functions.cpp
     src/compile_worker.cpp
     src/profile.cpp
@@ -235,6 +286,20 @@ endif()
 
 add_executable(emu tools/emu.cpp)
 target_link_libraries(emu PRIVATE bfin-core)
+if(EMSCRIPTEN)
+    # emu.js under Node as an executable, for the test scripts
+    # (run_diff_test.py --emu build/emu-node).
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/emu-node
+         "#!/bin/sh\nexec \"${CMAKE_CROSSCOMPILING_EMULATOR}\" \"${CMAKE_CURRENT_BINARY_DIR}/emu.js\" \"$@\"\n")
+    execute_process(COMMAND chmod +x ${CMAKE_CURRENT_BINARY_DIR}/emu-node)
+    # The same emu for a browser's Worker (tools/wasm/web/): a module that
+    # createEmu() makes, its files in memory (FS), main run by callMain.
+    add_executable(emu-web tools/emu.cpp)
+    target_link_libraries(emu-web PRIVATE bfin-core)
+    target_include_directories(emu-web PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set_target_properties(emu-web PROPERTIES LINK_OPTIONS
+        "-fwasm-exceptions;-O1;-sALLOW_MEMORY_GROWTH=1;-sMAXIMUM_MEMORY=4GB;-sALLOW_TABLE_GROWTH=1;-sSTACK_SIZE=8MB;-sENVIRONMENT=worker;-sMODULARIZE=1;-sEXPORT_NAME=createEmu;-sINVOKE_RUN=0;-sEXIT_RUNTIME=0;-sEXPORTED_RUNTIME_METHODS=FS,callMain")
+endif()
 # Export symbols so JIT can find extern "C" functions at runtime
 set_target_properties(emu PROPERTIES ENABLE_EXPORTS TRUE FOLDER "Emulator")
 target_include_directories(emu PRIVATE
@@ -393,11 +458,14 @@ if(BCORE_BUILD_FAULT_TESTS)
     target_compile_definitions(bcore-tier-test PRIVATE BCORE_COPY_PATCH_TEST=$<BOOL:${BCORE_COPY_PATCH}>)
     target_include_directories(bcore-tier-test PRIVATE ${LLVM_INCLUDE_DIRS})
     add_test(NAME bcore-tier-test COMMAND bcore-tier-test)
-    add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
-    target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
-    # It also builds an LLJIT of its own over the arena's memory managers.
-    target_include_directories(bcore-code-arena-test PRIVATE ${LLVM_INCLUDE_DIRS})
-    add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
+    # The native loader's code arenas (none on WebAssembly). It also builds
+    # an LLJIT of its own over the arena's memory managers.
+    if(NOT EMSCRIPTEN)
+        add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
+        target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
+        target_include_directories(bcore-code-arena-test PRIVATE ${LLVM_INCLUDE_DIRS})
+        add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
+    endif()
     # count_module's vectorized loops, from fixed IR; and, on x86-64, a MAC
     # loop block compiled (not run) for Zen 4's AVX-512 and for x86-64-v3.
     add_executable(bcore-vectorize-count-test tests/vectorize_count_test.cpp)

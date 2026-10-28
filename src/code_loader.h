@@ -34,4 +34,8 @@ using BbFunc = void (*)(CpuState*, Memory*);
 
 }  // namespace bcore
 
+#if defined(__EMSCRIPTEN__)
+#include "code_loader_wasm.h"
+#else
 #include "code_loader_native.h"
+#endif
