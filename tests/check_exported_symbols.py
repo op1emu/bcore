@@ -12,7 +12,7 @@ a host's 20-byte `struct Access` made a pass's std::vector<Access> throw).
 A global function, extern "C" or not, is a duplicate definition or, worse,
 the host's version.
 
-  check_exported_symbols.py --nm llvm-nm libbcore-lift.a libbfin-core.a
+  check_exported_symbols.py --nm llvm-nm libbcore-runtime.a libbcore-lift.a libbcore-engine.a libbfin-core.a
 
 Each demangled symbol's names (a qualified name, or a name in its template
 arguments or parameters) must begin with `bcore`, `std`, `llvm` or
