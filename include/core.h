@@ -120,8 +120,16 @@ public:
     // so that which code runs when does not depend on the host's speed
     // (deterministic guest time needs that: SteadyLoopSkip, for one, skips
     // a loop's device reads only in its tier-1 code). on_start runs first on
-    // the worker thread. Before init() or between runs.
-    void set_tier_background(bool background, uint64_t publish_after = 0,
+    // the worker thread. Before init() or between runs. False, and nothing
+    // set, for a worker where this build has no threads (WebAssembly without
+    // pthreads, kHasThreads).
+    static constexpr bool kHasThreads =
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+        false;
+#else
+        true;
+#endif
+    bool set_tier_background(bool background, uint64_t publish_after = 0,
                              std::function<void()> on_start = {});
     // Blocks compiled from now on end at an IDLE and return to the host with
     // CpuState::idle set, so it can let guest time pass until a wakeup (off
