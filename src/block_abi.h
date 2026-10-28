@@ -28,7 +28,8 @@
 // musttail call there is a return_call, which the engine's tail calls
 // feature makes, and LLVM's WebAssembly backend has no swifttailcc (LLVM
 // 19's). A block is exported under its own name, which the engine looks it
-// up by. A module with no triple is the host's.
+// up by. A module with no triple is the host's: WebAssembly in a
+// WebAssembly build.
 
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -47,8 +48,14 @@ inline constexpr unsigned kMemArg = 1;
 inline constexpr const char* kNoCalleeSaved = "no_callee_saved_registers";
 inline constexpr const char* kWasmExportName = "wasm-export-name";
 
-// Whether mod is compiled for WebAssembly (see above).
-inline bool is_wasm(const llvm::Module& mod) { return llvm::Triple(mod.getTargetTriple()).isWasm(); }
+// Whether mod is compiled for WebAssembly (see above): its triple's, or
+// with none, the host's.
+inline bool is_wasm(const llvm::Module& mod) {
+#ifdef __EMSCRIPTEN__
+    if (mod.getTargetTriple().empty()) return true;
+#endif
+    return llvm::Triple(mod.getTargetTriple()).isWasm();
+}
 
 // void (CpuState*, Memory*), in kCpuArg and kMemArg.
 inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {

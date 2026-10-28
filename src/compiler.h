@@ -113,5 +113,6 @@ private:
     llvm::SmallVector<char, 0> object_;
     std::unique_ptr<llvm::raw_svector_ostream> stream_;
     std::unique_ptr<llvm::legacy::PassManager> backend_;
+    bool makeBackend();
     llvm::MCContext* mc_ = nullptr;
 };

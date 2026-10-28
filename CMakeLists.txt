@@ -8,6 +8,27 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 # Include directories
 # (no global include_directories — per-target PRIVATE/PUBLIC below)
 
+# ---- WebAssembly (Emscripten) ----
+# bcore in the browser and in Node (tools/wasm/README.md): its blocks run on
+# the WebAssembly engine (wasm_engine.h), with no copy-and-patch tier, no
+# profiling and no promotion worker; LLVM is emscripten-forge's for this
+# Emscripten. C++ exceptions are WebAssembly's; a host's exception is caught
+# where a helper reaches host code (host_bridge.h). Every executable may
+# grow its memory and its function table (each block is a function in it),
+# has a stack deep enough for LLVM's passes, and as a Node program reads
+# the files of the machine it runs on. Linked at -O1 whatever the build
+# type: wasm-opt at -O2 and -O3 takes a minute an executable and makes
+# LLVM's functions ones V8 takes longer to tier up (a small program's run
+# 1.4 s against 0.5 s at -O1, the same once warm).
+if(EMSCRIPTEN)
+    add_compile_options(-fwasm-exceptions)
+    add_link_options(-fwasm-exceptions -sALLOW_MEMORY_GROWTH=1 -sALLOW_TABLE_GROWTH=1
+        -sSTACK_SIZE=8MB -sNODERAWFS=1 -sEXIT_RUNTIME=1)
+    foreach(config RELEASE RELWITHDEBINFO MINSIZEREL)
+        set(CMAKE_EXE_LINKER_FLAGS_${config} "-O1")
+    endforeach()
+endif()
+
 # ---- LLVM ----
 set(LLVM_DIR "" CACHE PATH
     "Path to LLVM CMake config directory (LLVMConfig.cmake). \
@@ -32,8 +53,13 @@ llvm_map_components_to_libnames(LLVM_LIBS core support orcjit native passes)
 # Standalone default ON: the code map, event sink and counters cost a null
 # check and a few increments per dispatch. Hosts can compile them out (see
 # bcore_profile.h).
+if(EMSCRIPTEN)
+    set(BCORE_ENABLE_PROFILE_DEFAULT OFF)
+else()
+    set(BCORE_ENABLE_PROFILE_DEFAULT ON)
+endif()
 option(BCORE_ENABLE_PROFILE
-    "JIT observability API: code map, typed event sink, counters" ON)
+    "JIT observability API: code map, typed event sink, counters" ${BCORE_ENABLE_PROFILE_DEFAULT})
 # OFF by default: emits jitdump files on disk whenever blocks are compiled.
 option(BCORE_PERF_JIT_EVENTS
     "Register LLVM's PerfJITEventListener (enables 'perf inject --jit')" OFF)
@@ -103,23 +129,43 @@ target_link_libraries(bcore-lift PUBLIC bcore-runtime ${LLVM_LIBS})
 target_compile_options(bcore-lift PRIVATE ${BCORE_WARNINGS})
 set_target_properties(bcore-lift PROPERTIES FOLDER "Core")
 
-add_library(bcore-native-engine STATIC
-    src/code_arena.cpp
-    src/jit_engine.cpp
-    src/compile_worker.cpp
-    src/profile.cpp
-)
-target_include_directories(bcore-native-engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
+if(EMSCRIPTEN)
+    # The WebAssembly engine instead, with the promotion worker and the
+    # profiling code as Core links them, which here neither starts nor
+    # attaches.
+    set(BCORE_ENGINE bcore-wasm-engine)
+    add_library(bcore-wasm-engine STATIC
+        src/wasm_engine.cpp
+        src/compile_worker.cpp
+        src/profile.cpp
+    )
+else()
+    set(BCORE_ENGINE bcore-native-engine)
+    add_library(bcore-native-engine STATIC
+        src/code_arena.cpp
+        src/jit_engine.cpp
+        src/compile_worker.cpp
+        src/profile.cpp
+    )
+endif()
+target_include_directories(${BCORE_ENGINE} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
 find_package(Threads REQUIRED)  # the promotion worker (Core::set_tier_background)
-target_link_libraries(bcore-native-engine PUBLIC bcore-lift Threads::Threads)
-target_compile_options(bcore-native-engine PRIVATE ${BCORE_WARNINGS})
-set_target_properties(bcore-native-engine PROPERTIES FOLDER "Core")
+target_link_libraries(${BCORE_ENGINE} PUBLIC bcore-lift Threads::Threads)
+target_compile_options(${BCORE_ENGINE} PRIVATE ${BCORE_WARNINGS})
+# Classes of bcore's derive from LLVM's, in these two: as LLVM was built,
+# with or without RTTI (emscripten-forge's has none; the distributions' have
+# it).
+if(NOT LLVM_ENABLE_RTTI)
+    target_compile_options(bcore-lift PRIVATE -fno-rtti)
+    target_compile_options(${BCORE_ENGINE} PRIVATE -fno-rtti)
+endif()
+set_target_properties(${BCORE_ENGINE} PROPERTIES FOLDER "Core")
 
 # ---- Copy-and-patch stencils (cp_format.h): x86-64 and AArch64 hosts ----
 # Built from the lifter by bcore-stencilgen whenever bcore-lift changes.
 # On by default where the stencils run (x86-64, AArch64); OFF builds the
 # core without them anywhere (Core::set_copy_patch then does nothing).
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$" AND NOT EMSCRIPTEN)
     set(BCORE_COPY_PATCH_DEFAULT ON)
 else()
     set(BCORE_COPY_PATCH_DEFAULT OFF)
@@ -199,7 +245,7 @@ target_compile_definitions(bfin-core PRIVATE
     CP_STENCILS_BIN="${BCORE_CP_GEN}/cp_stencils.bin"
     CP_TABLES_BIN="${BCORE_CP_GEN}/cp_tables.bin"
 )
-target_link_libraries(bfin-core PUBLIC bcore-native-engine)
+target_link_libraries(bfin-core PUBLIC ${BCORE_ENGINE})
 target_compile_options(bfin-core PRIVATE ${BCORE_WARNINGS})
 set_target_properties(bfin-core PROPERTIES FOLDER "Core")
 
@@ -372,11 +418,13 @@ if(BCORE_BUILD_FAULT_TESTS)
     target_compile_definitions(bcore-tier-test PRIVATE BCORE_COPY_PATCH_TEST=$<BOOL:${BCORE_COPY_PATCH}>)
     target_include_directories(bcore-tier-test PRIVATE ${LLVM_INCLUDE_DIRS})
     add_test(NAME bcore-tier-test COMMAND bcore-tier-test)
-    add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
-    target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
-    # It also builds an LLJIT of its own over the arena's memory managers.
-    target_include_directories(bcore-code-arena-test PRIVATE ${LLVM_INCLUDE_DIRS})
-    add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
+    if(NOT EMSCRIPTEN)  # the native engine's arenas
+        add_executable(bcore-code-arena-test tests/code_arena_test.cpp)
+        target_link_libraries(bcore-code-arena-test PRIVATE bfin-core)
+        # It also builds an LLJIT of its own over the arena's memory managers.
+        target_include_directories(bcore-code-arena-test PRIVATE ${LLVM_INCLUDE_DIRS})
+        add_test(NAME bcore-code-arena-test COMMAND bcore-code-arena-test)
+    endif()
     # count_module's vectorized loops, from fixed IR; and, on x86-64, a MAC
     # loop block compiled (not run) for Zen 4's AVX-512 and for x86-64-v3.
     add_executable(bcore-vectorize-count-test tests/vectorize_count_test.cpp)

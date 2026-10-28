@@ -14,6 +14,9 @@
 #include "decoder.h"
 #include "disasm_visitor.h"
 #include "jit_engine.h"
+#ifdef __EMSCRIPTEN__
+#include "wasm_engine.h"
+#endif
 #include "mmr.h"
 #include "profile_state.h"
 // Also without BCORE_COPY_PATCH: Core holds the (then unused) translator.
@@ -53,14 +56,31 @@ void Core::attachProfiler() {
 #endif
 }
 
-// The engine blocks run on: this process's.
-static std::shared_ptr<ExecBackend> make_engine() { return std::make_shared<JitEngine>(); }
+// The engine blocks run on, and a compiler of blocks for it: this process's,
+// or in a WebAssembly build the WebAssembly engine's (wasm_engine.h), with
+// its tail calls.
+static std::shared_ptr<ExecBackend> make_engine() {
+#ifdef __EMSCRIPTEN__
+    return std::make_shared<WasmEngine>();
+#else
+    return std::make_shared<JitEngine>();
+#endif
+}
+
+static std::unique_ptr<Compiler> make_compiler() {
+    auto compiler = std::make_unique<Compiler>();
+#ifdef __EMSCRIPTEN__
+    compiler->set_target_triple("wasm32-unknown-emscripten");
+    compiler->set_target_cpu("generic", "+tail-call,+bulk-memory,+simd128");
+#endif
+    return compiler;
+}
 
 bool Core::init(int opt_level, int codegen_level) {
     opt_level_ = opt_level;
     codegen_level_ = codegen_level;
 
-    compiler_ = std::make_unique<Compiler>();
+    compiler_ = make_compiler();
     if (!compiler_->init(opt_level_, codegen_level_) || !compiler_->set_post_pipeline(post_pipeline_))
         return false;
     compiler_->set_steady_skip(steady_skip_);
@@ -778,7 +798,7 @@ void Core::set_loop_blocks(bool loop) {
 
 void Core::set_tiering(uint32_t threshold, uint32_t size_ref) {
     if (threshold && !tier0_compiler_) {
-        auto compiler = std::make_unique<Compiler>();
+        auto compiler = make_compiler();
         // Neither the IR pipeline nor the splitter: tier-0 code runs too
         // rarely for its layout to matter.
         if (!compiler->init(/*opt_level=*/0, /*codegen_level=*/0, /*split=*/false)) return;
@@ -804,11 +824,13 @@ void Core::stopWorker() {
 }
 
 void Core::startWorker() {
-    auto compiler = std::make_unique<Compiler>();
+#ifndef __EMSCRIPTEN__  // no threads in a WebAssembly build: promotions compile in the run
+    auto compiler = make_compiler();
     if (!compiler->init(opt_level_, codegen_level_) || !compiler->set_post_pipeline(post_pipeline_)) return;
     compiler->set_steady_skip(steady_skip_);
     worker_ = std::make_unique<CompileWorker>(std::move(compiler), worker_start_);
     worker_->set_generation(generation_);
+#endif
 }
 
 void Core::set_verify(bool verify) {

@@ -94,7 +94,7 @@ inline constexpr bool kHelpersCatch = BCORE_HELPERS_CATCH;  // host_bridge.h
 
 // The convention a helper is called in (see above).
 inline constexpr llvm::CallingConv::ID kHelperCC =
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__EMSCRIPTEN__)
     llvm::CallingConv::C;
 #else
     llvm::CallingConv::PreserveMost;

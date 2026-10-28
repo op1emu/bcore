@@ -146,7 +146,7 @@ class Runner:
         """Runs emu on elf, hashing stdout and stderr line by line as they
         come: --dump output reaches gigabytes, all of it compared without
         being kept (only the first keep_lines lines are, for -v)."""
-        cmd = [emu, str(elf)] + flags
+        cmd = emu_command(emu) + [str(elf)] + flags
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         streams, host = {}, {}
 
@@ -210,6 +210,12 @@ def first_difference(a: List[str], b: List[str]) -> Optional[Tuple[int, str, str
     return None
 
 
+def emu_command(emu: str) -> List[str]:
+    """The command that runs emu: a WebAssembly build's emu.js under Node
+    (tools/wasm/README.md), any other directly."""
+    return [os.environ.get("NODE", "node"), emu] if emu.endswith(".js") else [emu]
+
+
 def compare(name: str, runner: Runner, base_emu: str, emu: str, base_flags: List[str], flags: List[str],
             files: List[Path], jobs: int, verbose: bool) -> Tuple[int, int, int]:
     """(compared, differing, both timed out) for one configuration."""
@@ -251,7 +257,7 @@ def main() -> None:
     build_dir = script_dir.parent / "build"
     parser = argparse.ArgumentParser(description="Blackfin emulator differential test: two runs of every ELF compared",
                                      formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    parser.add_argument("--emu", default=str(build_dir / "emu"), help="the emulator under test (default: build/emu)")
+    parser.add_argument("--emu", default=str(build_dir / "emu"), help="the emulator under test (default: build/emu); an emu.js runs under Node ($NODE)")
     parser.add_argument("--base-emu", help="the emulator to compare with (default: --emu)")
     parser.add_argument("--flags", help="emu flags of the side under test (default: --base-flags)")
     parser.add_argument("--base-flags", help="emu flags of the base side (default: --flags)")

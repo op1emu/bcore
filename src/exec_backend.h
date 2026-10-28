@@ -76,7 +76,7 @@ public:
     void clear_executing()          { executing_bb_pc_ = 0; }
 
     // Iterate all cached blocks as fn(host_addr, guest_pc). Addresses are
-    // the functions', sizes are not tracked here -- use the load listener
+    // the functions' (table indices on WebAssembly), sizes are not tracked here -- use the load listener
     // (via Core::forEachCompiledBlock) when exact sizes are needed.
     template <typename Fn>
     void forEachCompiled(Fn&& fn) const {

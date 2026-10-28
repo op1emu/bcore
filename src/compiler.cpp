@@ -16,6 +16,7 @@
 #include <llvm/Support/Error.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Transforms/Vectorize/LoopVectorize.h>
 
@@ -133,12 +134,27 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     // paths' counts fall under the threshold set here.
     builder->getOptions().EnableMachineFunctionSplitter = split;
     if (split) split_by_counts();
-    auto machine = builder->createTargetMachine();
-    if (!machine) {
-        llvm::errs() << "Failed to create TargetMachine: " << machine.takeError() << "\n";
-        return false;
+    if (!stencil && !triple_.empty()) {
+        // Another engine's (set_target_triple), which may have no JIT
+        // (WebAssembly), which JITTargetMachineBuilder wants: the target's
+        // own TargetMachine, as the builder would make it.
+        std::string error;
+        const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple.str(), error);
+        if (!target) {
+            llvm::errs() << "Failed to create TargetMachine: " << error << "\n";
+            return false;
+        }
+        machine_.reset(target->createTargetMachine(triple.str(), builder->getCPU(),
+                                                   builder->getFeatures().getString(), builder->getOptions(),
+                                                   builder->getRelocationModel(), builder->getCodeModel(), cg_level));
+    } else {
+        auto machine = builder->createTargetMachine();
+        if (!machine) {
+            llvm::errs() << "Failed to create TargetMachine: " << machine.takeError() << "\n";
+            return false;
+        }
+        machine_ = std::move(*machine);
     }
-    machine_ = std::move(*machine);
 
     // The IR pipeline's TTI describes exactly the CPU and features the code is
     // generated for. Without a TargetMachine, PassBuilder's TargetIRAnalysis
@@ -164,6 +180,10 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     pb_->crossRegisterProxies(lam_, fam_, cgam_, mam_);
 
     stream_ = std::make_unique<llvm::raw_svector_ostream>(object_);
+    return makeBackend();
+}
+
+bool Compiler::makeBackend() {
     backend_ = std::make_unique<llvm::legacy::PassManager>();
     if (machine_->addPassesToEmitMC(*backend_, mc_, *stream_, /*DisableVerify=*/true)) {
         llvm::errs() << "The target cannot emit object files\n";
@@ -274,6 +294,10 @@ std::unique_ptr<llvm::MemoryBuffer> Compiler::emit(llvm::Module& mod) {
         for (llvm::Function& function : mod)
             if (!function.isDeclaration() && !function.hasFnAttribute(kNoSplitAttr)) function.setEntryCount(kEntryCount);
     object_.clear();
+    // WebAssembly's AsmPrinter writes the module's declarations (its
+    // imports' types, its exports) once in its life: a new one for each
+    // module there.
+    if (machine_->getTargetTriple().isWasm() && !makeBackend()) return nullptr;
     backend_->run(mod);
     if (object_.empty()) return nullptr;
     return llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(object_.data(), object_.size()),
