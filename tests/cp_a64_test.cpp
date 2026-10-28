@@ -29,6 +29,8 @@
 #include "cp_format.h"
 #include "cp_patch.h"
 
+using namespace bcore;
+
 using namespace llvm;
 using namespace bcore_cp;
 

@@ -1,17 +1,19 @@
 #pragma once
 
-// The extern "C" helpers generated code calls (JitEngine registers them;
-// cp_format.h's kHelpers names the same for the stencils), with the LLVM
-// signature of each and the convention blocks and stencils call them in.
+// The helpers generated code calls (JitEngine registers each by its
+// address under its name here, a name no linker sees: they are C++
+// functions in namespace bcore; cp_format.h's kHelpers names the same for
+// the stencils), with the LLVM signature of each and the convention blocks
+// and stencils call them in.
 //
 // On AArch64, LLVM's preserve_most: the callee keeps every register but
 // X16-X18, so that a block keeps its values in registers across a call on
 // a rare path, whichever registers they are, and saves nothing for it; a
 // block there keeps C's callee-saved registers (block_abi.h), and C's own
 // would cost it a save at its entry for every value it keeps across a
-// call. The helpers are C functions: each is called through a trampoline
-// in preserve_most (JitEngine::makeTrampolines), which saves what C may
-// change around the call.
+// call. The helpers are in C's convention: each is called through a
+// trampoline in preserve_most (JitEngine::makeTrampolines), which saves
+// what C may change around the call.
 //
 // On x86-64, C's convention, called directly: a block there keeps no
 // callee-saved register (block_abi.h), and so, as with GHC's convention,
@@ -46,6 +48,8 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
+
+namespace bcore {
 
 namespace bcore_abi {
 
@@ -164,3 +168,5 @@ inline llvm::Function* declare_helper(llvm::Module& mod, const char* name) {
 }
 
 }  // namespace bcore_abi
+
+}  // namespace bcore

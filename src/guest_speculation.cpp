@@ -19,6 +19,8 @@
 #include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 
+namespace bcore {
+
 using namespace llvm;
 using namespace llvm::PatternMatch;
 
@@ -569,3 +571,5 @@ PreservedAnalyses SatReductionSpeculation::run(Function& f, FunctionAnalysisMana
     }
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
+
+}  // namespace bcore

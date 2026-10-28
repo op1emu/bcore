@@ -16,6 +16,8 @@ namespace llvm {
 class JITEventListener;
 namespace object { class ObjectFile; class SectionRef; }
 }
+
+namespace bcore {
 class JitEngine;
 
 namespace bcore_profile {
@@ -118,3 +120,5 @@ bool attach_perf_listener(ProfileState& state, JitEngine& jit);
 void detach_perf_listener(ProfileState& state, JitEngine& jit);
 
 } // namespace bcore_profile
+
+}  // namespace bcore

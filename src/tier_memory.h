@@ -7,6 +7,8 @@
 
 #include "mem.h"
 
+namespace bcore {
+
 // The instructions a translation read (Core::set_tiering). A tier-0
 // compilation reads the block's code through a RecordingMemory, and its
 // promotion to tier 1 reads the same halfwords again through a
@@ -101,3 +103,5 @@ private:
 };
 
 }  // namespace bcore_tier
+
+}  // namespace bcore

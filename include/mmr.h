@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+namespace bcore {
+
 // ── CEC MMR region ──────────────────────────────────────────────────────────
 
 static constexpr uint32_t CEC_MMR_BASE          = 0xFFE02100u;
@@ -55,10 +57,10 @@ uint32_t evt_read(uint32_t addr);
 void     evt_write(uint32_t addr, uint32_t val);
 
 // CEC exception dispatch (called by FlatMemory::fault)
-extern "C" void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem);
+void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem);
 
 // User-mode MMR access check (called by FlatMemory for all reads/writes)
-extern "C" bool user_mmr_check(CpuState* cpu, uint32_t addr);
+bool user_mmr_check(CpuState* cpu, uint32_t addr);
 
 // CEC initialization
 void cec_init();
@@ -69,3 +71,5 @@ int cec_current_ivg();
 // Dispatches per IVG level (0 = EMU ... 15 = IVG15) since cec_init(); all
 // zero unless BCORE_ENABLE_PROFILE. Hosts read them through Core::stats().
 void cec_entry_counts(uint64_t out[16]);
+
+}  // namespace bcore

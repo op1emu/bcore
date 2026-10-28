@@ -14,6 +14,8 @@
 #include "cpu_state.h"
 #include "mem.h"
 
+namespace bcore {
+
 class JitEngine;
 class Compiler;
 class CompileWorker;
@@ -254,3 +256,5 @@ private:
     const uint8_t* idle_wake_ = nullptr;
     std::string post_pipeline_ = kDefaultPostPipeline;
 };
+
+}  // namespace bcore

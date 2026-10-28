@@ -71,7 +71,8 @@
 #include "tier_table.h"
 
 using namespace llvm;
-using namespace bcore_cp;
+using namespace bcore;
+using namespace bcore::bcore_cp;
 
 namespace {
 
@@ -1227,7 +1228,7 @@ int main(int argc, char** argv) {
             Triple(g_triple).isAArch64() ? 1 : 0);
     for (const Table& table : tables)
         fprintf(f, "#define CP_TABLE_%s %zu, %zu\n", table.name, table.at, table.size);
-    fprintf(f, "namespace bcore_cp {\n");
+    fprintf(f, "namespace bcore::bcore_cp {\n");
     fprintf(f, "const uint32_t kCodeSize = %zu;\n", blob.code.size());
     fprintf(f, "const Pattern32 kPatterns32[] = {\n");
     for (size_t i = 0; i < patterns.size(); ++i) {
@@ -1255,7 +1256,7 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
     fprintf(f, "const uint32_t kUndef32 = %u;\n", undef32);
     fprintf(f, "const uint32_t kParallelTail[2] = {%u, %u};  // [CEC check]\n", parallel_tail[0], parallel_tail[1]);
-    fprintf(f, "}  // namespace bcore_cp\n");
+    fprintf(f, "}  // namespace bcore::bcore_cp\n");
     fclose(f);
 
     // cp_stencils.txt

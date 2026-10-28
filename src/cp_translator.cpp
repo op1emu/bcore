@@ -15,6 +15,8 @@
 #include "syscall_emu.h"
 #include "tier_table.h"
 
+namespace bcore {
+
 using namespace bcore_cp;
 
 namespace {
@@ -541,3 +543,5 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     out.cold_size = cold_size;
     return out;
 }
+
+}  // namespace bcore

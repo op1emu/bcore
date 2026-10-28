@@ -2,6 +2,8 @@
 
 #include <llvm/IR/PassManager.h>
 
+namespace bcore {
+
 // Speculative copies of saturating accumulations, so that a loop the
 // vectorizers cannot touch -- each step clamps a running sum, which is no
 // associative reduction -- gets one they can.
@@ -40,3 +42,5 @@ constexpr const char* kSpeculatedLoopMD = "bcore.speculated";
 struct SatReductionSpeculation : llvm::PassInfoMixin<SatReductionSpeculation> {
     llvm::PreservedAnalyses run(llvm::Function& f, llvm::FunctionAnalysisManager& am);
 };
+
+}  // namespace bcore

@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+namespace bcore {
+
 // IVG level constants (mirrors dv-bfin_cec.h)
 static constexpr uint32_t IVG_EMU    = 0;
 static constexpr uint32_t IVG_RST    = 1;
@@ -44,7 +46,7 @@ static uint32_t s_cec_mmr[5];  // EVT_OVERRIDE, IMASK, IPEND, ILAT, IPRIO
 // by cec_check_pending). Generated code reads it, through
 // CpuState::cec_pending, to call cec_check_pending only when there is
 // something to check.
-extern "C" { bool bcore_cec_pending; }
+bool bcore_cec_pending;
 #if BCORE_ENABLE_PROFILE
 // Dispatches per IVG level since cec_init(), for BcoreStats: one increment
 // per interrupt or exception taken, nothing per block.
@@ -308,7 +310,7 @@ static void _cec_raise_internal(CpuState* cpu, int ivg) {
 
 // ── EXCPT ─────────────────────────────────────────────────────────────────────
 
-extern "C" void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem) {
+void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem) {
     // Every exception returns to the host, the libgloss syscall included.
     cpu->chain_budget = 0;
     // Set SEQSTAT.EXCAUSE (bits 5:0).
@@ -330,7 +332,7 @@ extern "C" void cec_exception(CpuState* cpu, uint32_t excp, Memory* mem) {
 
 // ── RAISE ─────────────────────────────────────────────────────────────────────
 
-extern "C" void cec_raise(CpuState* cpu, uint32_t ivg) {
+void cec_raise(CpuState* cpu, uint32_t ivg) {
     if (ivg > IVG15)
         return;
     // RAISE is a supervisor-mode instruction. In user mode it causes VEC_ILL_RES.
@@ -459,25 +461,25 @@ static uint32_t cec_return_common(CpuState* cpu, int ivg) {
     return newpc;
 }
 
-extern "C" uint32_t cec_return_rti(CpuState* cpu) {
+uint32_t cec_return_rti(CpuState* cpu) {
     return cec_return_common(cpu, -1);
 }
 
-extern "C" uint32_t cec_return_rtx(CpuState* cpu) {
+uint32_t cec_return_rtx(CpuState* cpu) {
     return cec_return_common(cpu, static_cast<int>(IVG_EVX));
 }
 
-extern "C" uint32_t cec_return_rtn(CpuState* cpu) {
+uint32_t cec_return_rtn(CpuState* cpu) {
     return cec_return_common(cpu, static_cast<int>(IVG_NMI));
 }
 
-extern "C" uint32_t cec_return_rte(CpuState* cpu) {
+uint32_t cec_return_rte(CpuState* cpu) {
     return cec_return_common(cpu, static_cast<int>(IVG_EMU));
 }
 
 // ── CLI / STI ─────────────────────────────────────────────────────────────────
 
-extern "C" uint32_t cec_cli(CpuState* cpu) {
+uint32_t cec_cli(CpuState* cpu) {
     require_supervisor(cpu);
     if (cpu->did_jump) return 0;  // Exception was raised; don't continue.
     uint32_t old_mask = imask();
@@ -486,7 +488,7 @@ extern "C" uint32_t cec_cli(CpuState* cpu) {
     return old_mask;
 }
 
-extern "C" void cec_sti(CpuState* cpu, uint32_t mask) {
+void cec_sti(CpuState* cpu, uint32_t mask) {
     require_supervisor(cpu);
     // Write maskable bits from value; preserve unmaskable bits.
     imask() = (mask & IVG_MASKABLE_B) | (imask() & IVG_UNMASKABLE_B);
@@ -496,7 +498,7 @@ extern "C" void cec_sti(CpuState* cpu, uint32_t mask) {
 
 // ── Push/Pop RETI ─────────────────────────────────────────────────────────────
 
-extern "C" void cec_push_reti(CpuState* cpu) {
+void cec_push_reti(CpuState* cpu) {
     require_supervisor(cpu);
     if (cpu->did_jump) return;  // Exception was raised; don't continue.
     // Clear IRPTEN: enable nested interrupts.
@@ -504,7 +506,7 @@ extern "C" void cec_push_reti(CpuState* cpu) {
     bcore_cec_pending = true;
 }
 
-extern "C" void cec_pop_reti(CpuState* cpu) {
+void cec_pop_reti(CpuState* cpu) {
     require_supervisor(cpu);
     if (cpu->did_jump) return;  // Exception was raised; don't continue.
     // Set IRPTEN: restore global interrupt mask.
@@ -513,24 +515,24 @@ extern "C" void cec_pop_reti(CpuState* cpu) {
 
 // ── Supervisor check ──────────────────────────────────────────────────────────
 
-extern "C" bool cec_is_user_mode() {
+bool cec_is_user_mode() {
     return is_user_mode();
 }
 
-extern "C" void cec_check_sup(CpuState* cpu) {
+void cec_check_sup(CpuState* cpu) {
     require_supervisor(cpu);
 }
 
 // ── Pending interrupt check ───────────────────────────────────────────────────
 
-extern "C" void cec_check_pending(CpuState* cpu) {
+void cec_check_pending(CpuState* cpu) {
     if (bcore_cec_pending) {
         _cec_raise_internal(cpu, -1);
         bcore_cec_pending = false;
     }
 }
 
-extern "C" __attribute__((hot)) bool user_mmr_check(CpuState* cpu, uint32_t addr) {
+__attribute__((hot)) bool user_mmr_check(CpuState* cpu, uint32_t addr) {
     if (is_user_mode() && addr >= 0xFFC00000u) {
         cec_exception(cpu, VEC_DCPLB_MISS, nullptr);
         return true;
@@ -539,10 +541,12 @@ extern "C" __attribute__((hot)) bool user_mmr_check(CpuState* cpu, uint32_t addr
 }
 
 // BF5xx DCPLB fault status: write bit 16, supervisor bit 17, DAG1 bit 18.
-extern "C" void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc,
+void cec_data_alignment(CpuState* cpu, Memory* mem, uint32_t pc,
                                     uint32_t addr, uint32_t flags) {
     const uint32_t status = flags | (cec_is_user_mode() ? 0u : (1u << 17));
     cpu->pc = pc;
     mem->data_alignment_fault(pc, addr, status);
     cec_exception(cpu, 0x24u, mem);
 }
+
+}  // namespace bcore

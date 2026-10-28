@@ -2,6 +2,7 @@
 #include "block_abi.h"
 #include "helper_abi.h"
 #include "host_bridge.h"
+#include "mem_helpers.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -25,6 +26,8 @@
 #include "syscall_emu.h"
 #include "cec.h"
 #include "cpu_state.h"
+
+namespace bcore {
 
 JitEngine::JitEngine() = default;
 JitEngine::~JitEngine() = default;
@@ -76,7 +79,8 @@ bool JitEngine::init() {
     chain_ = area_->slots;
     for (size_t i = 0; i < (size_t(1) << kChainBits); ++i) chain_[i] = {kChainEmpty, 0, nullptr};
 
-    // Manually register all extern "C" symbols that JIT'd code may call.
+    // Manually register every function JIT'd code may call, by its address
+    // under the name the code calls it by (none of them has a C name).
     // This is more reliable than DynamicLibrarySearchGenerator which depends
     // on -rdynamic / ENABLE_EXPORTS.
     auto& es = jit_->getExecutionSession();
@@ -302,3 +306,5 @@ void JitEngine::unregisterJITEventListener(llvm::JITEventListener& L) {
     if (auto* rtdyld = llvm::dyn_cast<llvm::orc::RTDyldObjectLinkingLayer>(&jit_->getObjLinkingLayer()))
         rtdyld->unregisterJITEventListener(L);
 }
+
+}  // namespace bcore

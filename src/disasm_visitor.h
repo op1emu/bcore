@@ -8,6 +8,8 @@
 
 #include "mem.h"
 
+namespace bcore {
+
 // Register types
 struct DREG {
     uint32_t value;
@@ -579,3 +581,5 @@ private:
     int _parallel_slot = 0;
     bool _in_parallel_slot = false;
 };
+
+}  // namespace bcore

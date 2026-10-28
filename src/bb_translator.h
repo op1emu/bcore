@@ -11,8 +11,11 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 
-class Memory;
 #include "lift_visitor.h"
+
+namespace bcore {
+
+class Memory;
 struct CpuState;
 
 struct BBTranslateResult {
@@ -243,3 +246,5 @@ private:
     std::string data_layout_;
     std::string target_triple_;
 };
+
+}  // namespace bcore

@@ -40,6 +40,8 @@
 
 #endif
 
+namespace bcore {
+
 namespace bcore_profile {
 
 uint64_t monotonic_ns() {
@@ -444,3 +446,5 @@ void detach_perf_listener(ProfileState&, JitEngine&) {}
 #endif
 
 } // namespace bcore_profile
+
+}  // namespace bcore

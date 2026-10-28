@@ -7,6 +7,8 @@
 
 #include <llvm/Support/Memory.h>
 
+namespace bcore {
+
 namespace {
 constexpr size_t kAlign = size_t(2) << 20;
 // Room an object needs beyond the sizes RuntimeDyld reports, for the padding
@@ -158,3 +160,5 @@ bool ArenaMemoryManager::finalizeMemory(std::string* error) {
     code_.clear();
     return false;
 }
+
+}  // namespace bcore

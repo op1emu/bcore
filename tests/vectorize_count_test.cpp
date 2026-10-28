@@ -25,6 +25,8 @@
 #include <memory>
 #include <string>
 
+using namespace bcore;
+
 namespace {
 
 void require(bool ok, const char* what) {

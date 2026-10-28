@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstring>
 
+namespace bcore {
+
 struct CpuState {
     // dpregs[0..7] = R0-R7, dpregs[8..15] = P0-P5, SP(14), FP(15)
     uint32_t dpregs[16];
@@ -222,16 +224,16 @@ inline void set_acc_from_reg(CpuState* cpu, int which, uint32_t val) {
     cpu->ax[which] = (val >> 31) ? 0xFF : 0x00;
 }
 
-// extern "C" wrappers for JIT (defined in cpu_state.cpp — must NOT be inline)
-extern "C" {
-    uint32_t cpu_astat_compose(CpuState* cpu);
-    void cpu_astat_decompose(CpuState* cpu, uint32_t astat);
-    // Per-instruction hw-loop probe: update pc (Phase A) and decrement counters
-    // (Phase B). Called from JIT'd code once per Blackfin instruction.
-    void bfin_hwloop_step(CpuState* cpu, uint32_t insn_pc, uint32_t fallthrough_pc);
-}
+// Out of line (cpu_state.cpp), for generated code to call
+uint32_t cpu_astat_compose(CpuState* cpu);
+void cpu_astat_decompose(CpuState* cpu, uint32_t astat);
+// Per-instruction hw-loop probe: update pc (Phase A) and decrement counters
+// (Phase B). Called from JIT'd code once per Blackfin instruction.
+void bfin_hwloop_step(CpuState* cpu, uint32_t insn_pc, uint32_t fallthrough_pc);
 
 // Initialize CpuState to zero
 void cpu_state_init(CpuState* cpu);
 
 uint32_t hwloop_get_next_pc(CpuState* cpu, uint32_t insn_pc, uint32_t next_pc);
+
+}  // namespace bcore

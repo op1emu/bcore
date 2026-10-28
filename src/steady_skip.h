@@ -2,6 +2,8 @@
 
 #include <llvm/IR/PassManager.h>
 
+namespace bcore {
+
 // Loops that wait. A loop block's loop that polls -- a device register, a
 // flag in memory -- does the same thing every iteration until something
 // outside it changes, and nothing outside it changes while the run lasts:
@@ -43,3 +45,5 @@ private:
 
 // The function attribute counting the loops given the test (BcoreStats).
 constexpr const char* kLoopsSteadyAttr = "bcore-loops-steady";
+
+}  // namespace bcore

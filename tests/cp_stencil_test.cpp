@@ -41,6 +41,8 @@
 #include <string>
 #include <vector>
 
+using namespace bcore;
+
 namespace {
 
 void require(bool ok, const std::string& why) {

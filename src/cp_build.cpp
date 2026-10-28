@@ -27,6 +27,8 @@
 #include "helper_abi.h"
 #include "lift_visitor.h"
 
+namespace bcore {
+
 using namespace llvm;
 
 namespace bcore_cp {
@@ -547,3 +549,5 @@ bool tail_exit(const Code& c) { return tail_jump(c, kHoleExit) != 0; }
 uint16_t code_flags(const Code& c) { return (tail_cont(c) ? kTailCont : 0) | (tail_exit(c) ? kTailExit : 0); }
 
 }  // namespace bcore_cp
+
+}  // namespace bcore

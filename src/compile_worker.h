@@ -17,6 +17,8 @@
 
 #include "compiler.h"
 
+namespace bcore {
+
 // Compiles promotions (Core::set_tier_background) on a thread of its own: the
 // IR pipeline and the backend, with a Compiler of its own. It never touches
 // the JIT: the thread that runs Core::run lifts every module, and takes the
@@ -79,3 +81,5 @@ private:
     bool stop_ = false;
     std::thread thread_;
 };
+
+}  // namespace bcore

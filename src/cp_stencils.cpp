@@ -1,5 +1,5 @@
 // The copy-and-patch stencils (cp_format.h) bcore-stencilgen built: its
-// code blob as bcore_cp::kCode, its big tables (kStencils, kRelocs,
+// code blob as bcore::bcore_cp::kCode, its big tables (kStencils, kRelocs,
 // kIndex16, kKeys32, kSlots) from cp_tables.bin, the rest from cp_stencils.inc.
 
 #include <cstdint>
@@ -12,10 +12,10 @@
 #endif
 
 #if defined(__APPLE__)
-#define CP_SYMBOL(name) "__ZN8bcore_cp" name "E"
+#define CP_SYMBOL(name) "__ZN5bcore8bcore_cp" name "E"
 #define CP_SECTION ".section __TEXT,__const"
 #else
-#define CP_SYMBOL(name) "_ZN8bcore_cp" name "E"
+#define CP_SYMBOL(name) "_ZN5bcore8bcore_cp" name "E"
 #define CP_SECTION ".section .rodata"
 #endif
 #define CP_STR2(...) #__VA_ARGS__

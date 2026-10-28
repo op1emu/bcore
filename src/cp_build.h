@@ -25,6 +25,8 @@ class Function;
 class Module;
 class Type;
 }  // namespace llvm
+
+namespace bcore {
 class Compiler;
 
 namespace bcore_cp {
@@ -155,7 +157,7 @@ struct Code {
 // target's convention, the IR pipeline, on AArch64 the value holes made
 // (materialize_holes), the backend, extract(). A function whose code cannot
 // be a stencil has its error set.
-std::map<std::string, Code> compile_stencils(::Compiler& compiler, llvm::Module& mod);
+std::map<std::string, Code> compile_stencils(bcore::Compiler& compiler, llvm::Module& mod);
 
 // The hole a relocation's symbol names, or -1.
 int hole_of(llvm::StringRef name);
@@ -175,3 +177,5 @@ bool tail_exit(const Code& code);
 uint16_t code_flags(const Code& code);
 
 }  // namespace bcore_cp
+
+}  // namespace bcore

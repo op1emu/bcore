@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+namespace bcore {
+
 // Sign-extend an N-bit value to int32_t.
 // Example: signextend<4>(0x8) == -8, signextend<10>(0x3ff) == -1
 template <unsigned N>
@@ -10,3 +12,5 @@ inline int32_t signextend(uint32_t x) {
     constexpr uint32_t mask = 1u << (N - 1);
     return static_cast<int32_t>((x ^ mask) - mask);
 }
+
+}  // namespace bcore

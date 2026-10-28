@@ -9,6 +9,8 @@
 #include <llvm/ExecutionEngine/RTDyldMemoryManager.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
 
+namespace bcore {
+
 // One mapping that a JIT's objects are placed in, code next to code. LLJIT's
 // default gives every object a SectionMemoryManager of its own, which maps
 // each section separately and rounds it up to whole pages: every compiled
@@ -152,3 +154,5 @@ private:
     std::unique_ptr<llvm::SectionMemoryManager> own_;
     std::vector<std::pair<uint8_t*, uintptr_t>> code_;  // to flush at finalizeMemory
 };
+
+}  // namespace bcore

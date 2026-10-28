@@ -3,6 +3,8 @@
 #include <cstdint>
 #include "mmr.h"
 
+namespace bcore {
+
 // Event Vector Table (EVT) device.
 //
 // Semantics derived from refs/dv-bfin_evt.c (GNU binutils simulator).
@@ -37,3 +39,5 @@ void     evt_write(uint32_t addr, uint32_t val);
 // in the reference implementation (refs/dv-bfin_evt.h).
 uint32_t evt_get(uint32_t ivg);
 void     evt_set(uint32_t ivg, uint32_t handler_addr);
+
+}  // namespace bcore

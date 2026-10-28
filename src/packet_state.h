@@ -8,6 +8,8 @@ class Function;
 class Value;
 }
 
+namespace bcore {
+
 // Writes CpuState::pc, insn_len and packets only where something can read
 // them.
 //
@@ -37,3 +39,5 @@ void sink_packet_state(llvm::Function& fn, llvm::Value* cpu);
 // The CpuState offset ptr addresses, if it is cpu plus a constant (the
 // single-index i8 GEP generated code uses for every field).
 std::optional<size_t> cpu_field_offset(llvm::Value* ptr, llvm::Value* cpu);
+
+}  // namespace bcore

@@ -11,22 +11,22 @@
 #include <sys/mman.h>
 #include <vector>
 
-class FlatMemory : public Memory {
+class FlatMemory : public bcore::Memory {
 public:
     // Normal constructor: flat buffer backed by std::vector
-    FlatMemory(uint32_t base, uint32_t size, CpuState* cpu)
+    FlatMemory(uint32_t base, uint32_t size, bcore::CpuState* cpu)
         : base_(base), data_(size, 0),
           fastmem_(false), mmap_base_(nullptr), mmap_size_(0), cpu_(cpu) {
     }
 
     // Fastmem constructor: mmap-backed buffer covering [0, max(program_end, EVT_END, CEC_END))
-    FlatMemory(uint32_t program_base, uint32_t program_size, bool fastmem, CpuState* cpu)
+    FlatMemory(uint32_t program_base, uint32_t program_size, bool fastmem, bcore::CpuState* cpu)
         : base_(fastmem ? 0u : program_base),
           fastmem_(fastmem), mmap_base_(nullptr), mmap_size_(0), cpu_(cpu) {
         if (fastmem) {
             uint32_t program_end = program_base + program_size;
-            uint32_t evt_end     = EVT_BASE + EVT_SIZE;
-            uint32_t cec_end     = CEC_MMR_BASE  + CEC_MMR_SIZE;
+            uint32_t evt_end     = bcore::EVT_BASE + bcore::EVT_SIZE;
+            uint32_t cec_end     = bcore::CEC_MMR_BASE  + bcore::CEC_MMR_SIZE;
             mmap_size_ = static_cast<size_t>(std::max({program_end, evt_end, cec_end}));
             long page = sysconf(_SC_PAGESIZE);
             mmap_size_ = (mmap_size_ + static_cast<size_t>(page - 1))
@@ -78,7 +78,7 @@ public:
             pages_[page >> kPageBits] = data_.data() + (page - base_);
     }
     uint32_t rawmem_limit() const override {
-        return pages_.empty() ? Memory::rawmem_limit() : 0u;
+        return pages_.empty() ? bcore::Memory::rawmem_limit() : 0u;
     }
     uint8_t* const* page_table() const override {
         return pages_.empty() ? nullptr : pages_.data();
@@ -106,7 +106,7 @@ public:
     }
 
     uint8_t read8(uint32_t addr) const override {
-        if (user_mmr_check(cpu_, addr)) return 0;
+        if (bcore::user_mmr_check(cpu_, addr)) return 0;
         if (fastmem_) return mmap_base_[addr];
         if (is_stub_mmr(addr)) return 0;
         uint32_t offset = addr - base_;
@@ -119,7 +119,7 @@ public:
     }
 
     uint16_t read16(uint32_t addr) const override {
-        if (user_mmr_check(cpu_, addr)) return 0;
+        if (bcore::user_mmr_check(cpu_, addr)) return 0;
         if (fastmem_) {
             uint16_t v; memcpy(&v, mmap_base_ + addr, 2); return v;
         }
@@ -135,14 +135,14 @@ public:
     }
 
     uint32_t read32(uint32_t addr) const override {
-        if (user_mmr_check(cpu_, addr)) return 0;
+        if (bcore::user_mmr_check(cpu_, addr)) return 0;
         if (fastmem_) {
-            if (cec_is_mmr_addr(addr)) return cec_mmr_read(cpu_, addr);
-            if (evt_is_addr(addr))     return evt_read(addr);
+            if (bcore::cec_is_mmr_addr(addr)) return bcore::cec_mmr_read(cpu_, addr);
+            if (bcore::evt_is_addr(addr))     return bcore::evt_read(addr);
             uint32_t v; memcpy(&v, mmap_base_ + addr, 4); return v;
         }
-        if (cec_is_mmr_addr(addr)) return cec_mmr_read(cpu_, addr);
-        if (evt_is_addr(addr))     return evt_read(addr);
+        if (bcore::cec_is_mmr_addr(addr)) return bcore::cec_mmr_read(cpu_, addr);
+        if (bcore::evt_is_addr(addr))     return bcore::evt_read(addr);
         if (is_stub_mmr(addr)) return 0;
         uint32_t offset = addr - base_;
         if (offset > data_.size() - 4) {
@@ -157,7 +157,7 @@ public:
     }
 
     void write8(uint32_t addr, uint8_t val) override {
-        if (user_mmr_check(cpu_, addr)) return;
+        if (bcore::user_mmr_check(cpu_, addr)) return;
         if (fastmem_) { mmap_base_[addr] = val; return; }
         if (is_stub_mmr(addr)) return;
         uint32_t offset = addr - base_;
@@ -170,7 +170,7 @@ public:
     }
 
     void write16(uint32_t addr, uint16_t val) override {
-        if (user_mmr_check(cpu_, addr)) return;
+        if (bcore::user_mmr_check(cpu_, addr)) return;
         if (fastmem_) { memcpy(mmap_base_ + addr, &val, 2); return; }
         if (is_stub_mmr(addr)) return;
         uint32_t offset = addr - base_;
@@ -184,14 +184,14 @@ public:
     }
 
     void write32(uint32_t addr, uint32_t val) override {
-        if (user_mmr_check(cpu_, addr)) return;
+        if (bcore::user_mmr_check(cpu_, addr)) return;
         if (fastmem_) {
-            if (cec_is_mmr_addr(addr)) { cec_mmr_write(cpu_, addr, val); return; }
-            if (evt_is_addr(addr))     { evt_write(addr, val); return; }
+            if (bcore::cec_is_mmr_addr(addr)) { bcore::cec_mmr_write(cpu_, addr, val); return; }
+            if (bcore::evt_is_addr(addr))     { bcore::evt_write(addr, val); return; }
             memcpy(mmap_base_ + addr, &val, 4); return;
         }
-        if (cec_is_mmr_addr(addr)) { cec_mmr_write(cpu_, addr, val); return; }
-        if (evt_is_addr(addr))     { evt_write(addr, val); return; }
+        if (bcore::cec_is_mmr_addr(addr)) { bcore::cec_mmr_write(cpu_, addr, val); return; }
+        if (bcore::evt_is_addr(addr))     { bcore::evt_write(addr, val); return; }
         if (is_stub_mmr(addr)) return;
         uint32_t offset = addr - base_;
         if (offset > data_.size() - 4) {
@@ -219,8 +219,8 @@ private:
     // need emulation for functional correctness.
     static bool is_stub_mmr(uint32_t addr) {
         if (addr < 0xFFC00000u) return false;
-        if (cec_is_mmr_addr(addr)) return false;
-        if (evt_is_addr(addr))     return false;
+        if (bcore::cec_is_mmr_addr(addr)) return false;
+        if (bcore::evt_is_addr(addr))     return false;
         return true;
     }
 
@@ -229,7 +229,7 @@ private:
     // cpu_->pc must already hold the faulting instruction address.
     void fault(uint32_t addr) const {
         if (!cpu_) return;
-        cec_exception(cpu_, VEC_DCPLB_MISS, const_cast<FlatMemory*>(this));
+        bcore::cec_exception(cpu_, bcore::VEC_DCPLB_MISS, const_cast<FlatMemory*>(this));
     }
 
     uint32_t base_;
@@ -237,6 +237,6 @@ private:
     bool fastmem_;
     uint8_t* mmap_base_;
     size_t mmap_size_;
-    CpuState* cpu_;
+    bcore::CpuState* cpu_;
     std::vector<uint8_t*> pages_;
 };

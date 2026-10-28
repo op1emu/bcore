@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <unistd.h>
 
+namespace bcore {
+
 // Libgloss syscall convention:
 //   P0 = syscall number
 //   R0 = pointer to params array (4 x uint32_t)
@@ -15,11 +17,11 @@
 //   params[1] = buf pointer
 //   params[2] = count
 
-extern "C" void bfin_putchar(uint32_t ch) {
+void bfin_putchar(uint32_t ch) {
     putchar((int)ch);
 }
 
-extern "C" void bfin_syscall(CpuState* cpu, Memory* mem) {
+void bfin_syscall(CpuState* cpu, Memory* mem) {
     uint32_t syscall_nr = cpu->dpregs[8]; // P0
     uint32_t params_ptr = cpu->dpregs[0]; // R0
 
@@ -56,3 +58,5 @@ extern "C" void bfin_syscall(CpuState* cpu, Memory* mem) {
         break;
     }
 }
+
+}  // namespace bcore

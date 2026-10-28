@@ -18,6 +18,8 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Operator.h>
 
+namespace bcore {
+
 using namespace llvm;
 
 namespace {
@@ -344,3 +346,5 @@ std::optional<size_t> cpu_field_offset(Value* ptr, Value* cpu) {
 void sink_packet_state(Function& fn, Value* cpu) {
     StateSink(fn, cpu).run();
 }
+
+}  // namespace bcore
