@@ -607,10 +607,12 @@ static Value* stored_before(Instruction* at, Value* cpu, size_t offset) {
 enum { kTailPc, kTailInsnLen, kTailPackets, kTailDidJump, kTailFields };
 static constexpr size_t kTailOffset[kTailFields] = {offsetof(CpuState, pc), offsetof(CpuState, insn_len),
                                                     offsetof(CpuState, packets), offsetof(CpuState, did_jump)};
+namespace {
 struct Tail {
     Value* value[kTailFields] = {};
     bool any() const { return value[0] || value[1] || value[2] || value[3]; }
 };
+}  // namespace
 
 static int tail_field(std::optional<size_t> offset) {
     if (offset)

@@ -362,6 +362,14 @@ if(BCORE_BUILD_FAULT_TESTS)
         add_test(NAME bcore-vectorize-count-test-pipeline
                  COMMAND bcore-vectorize-count-test pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
     endif()
+    # A host with global types named as bcore's file-local helpers are
+    # (Access, Tail) and laid out otherwise: a loop block still optimizes.
+    add_executable(bcore-host-types-test tests/host_types_test.cpp)
+    target_link_libraries(bcore-host-types-test PRIVATE bcore-lift)
+    target_include_directories(bcore-host-types-test PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_link_libraries(bcore-host-types-test PRIVATE ${LLVM_VECTORIZE_TEST_LIBS})
+    add_test(NAME bcore-host-types-test
+             COMMAND bcore-host-types-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
     # AArch64 stencils compiled (not run) on any host whose LLVM has the
     # target: their relocations, their holes' widths, how they are filled in.
     if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)

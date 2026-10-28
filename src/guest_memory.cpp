@@ -58,6 +58,7 @@ static Function* callee_of(const Instruction& inst) {
 
 // One call in a loop the guard can prove for every iteration: its address is
 // start + step * i in iteration i, start and step invariant in the loop.
+namespace {
 struct Access {
     CallInst* call;
     const SCEV* start;
@@ -69,6 +70,7 @@ struct Access {
     Value* lo = nullptr;
     Value* size = nullptr;
 };
+}  // namespace
 
 // The widest access through a bcore.guest.ptr result, or 0 where it has a
 // user other than a load, a store to it and a compare with null.
