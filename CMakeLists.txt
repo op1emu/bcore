@@ -362,14 +362,27 @@ if(BCORE_BUILD_FAULT_TESTS)
         add_test(NAME bcore-vectorize-count-test-pipeline
                  COMMAND bcore-vectorize-count-test pipeline ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
     endif()
-    # A host with global types named as bcore's file-local helpers are
-    # (Access, Tail) and laid out otherwise: a loop block still optimizes.
-    add_executable(bcore-host-types-test tests/host_types_test.cpp)
+    # A host with global types and C functions named as bcore's are (Access,
+    # BBInfo, Memory, ..., mem_read8) and laid out otherwise: it links, a
+    # loop block still optimizes and the JIT finds its blocks.
+    add_executable(bcore-host-types-test tests/host_types_test.cpp tests/host_types_bridge.cpp)
+    set_source_files_properties(tests/host_types_test.cpp PROPERTIES COMPILE_OPTIONS -O0)
     target_link_libraries(bcore-host-types-test PRIVATE bcore-lift)
     target_include_directories(bcore-host-types-test PRIVATE ${LLVM_INCLUDE_DIRS})
     target_link_libraries(bcore-host-types-test PRIVATE ${LLVM_VECTORIZE_TEST_LIBS})
     add_test(NAME bcore-host-types-test
              COMMAND bcore-host-types-test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mac_loop_block.ll)
+    # Every symbol the libraries export names only bcore's, the standard
+    # library's and LLVM's names: a host may have any global of its own.
+    find_program(BCORE_LLVM_NM llvm-nm HINTS ${LLVM_TOOLS_BINARY_DIR} NO_DEFAULT_PATH)
+    if(BCORE_LLVM_NM)
+        add_test(NAME bcore-exported-symbols-test
+                 COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_exported_symbols.py --nm ${BCORE_LLVM_NM}
+                         $<TARGET_FILE:bcore-lift> $<TARGET_FILE:bfin-core>)
+    endif()
+    add_test(NAME bcore-exported-symbols-unittest
+             COMMAND python3 -m unittest tests/test_check_exported_symbols.py
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     # AArch64 stencils compiled (not run) on any host whose LLVM has the
     # target: their relocations, their holes' widths, how they are filled in.
     if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
