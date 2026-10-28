@@ -211,7 +211,7 @@ static void jit_exhaust(Layout layout) {
     require(pool->arenas() == 2, "two arenas, then managers of their own");
 }
 
-// Code placed in an engine's arena directly (JitEngine::codeArena) stays
+// Code placed in an engine's arena directly (CodeLoader::codeArena) stays
 // mapped as long as the engine, when nothing else holds the arena any more
 // and the pool has moved on to another (found in review: such code went
 // with the copy-and-patch translator that had held its arena).
@@ -221,13 +221,13 @@ static void placed_code_lives() {
     // Fill the hot region (address space only: nothing is touched), so the
     // next request maps another arena.
     const size_t rest = CodeArena::hotSize(CodeArena::kDefaultHalf, CodeArena::kDefaultLayout) - (64 << 10);
-    auto first = jit.codeArena(64);  // the engine's own code (bcore_enter) holds this one
+    auto first = jit.loader().codeArena(64);  // the engine's own code (bcore_enter) holds this one
     require(first && first->allocate(CodeArena::Region::Hot, rest, 16) != nullptr, "most of the first arena");
-    auto second = jit.codeArena(128 << 10);
+    auto second = jit.loader().codeArena(128 << 10);
     require(second && second != first, "a second arena");
     uint8_t* code = second->allocate(CodeArena::Region::Hot, 64, 16);
     require(code && second->allocate(CodeArena::Region::Hot, rest, 16) != nullptr, "most of the second arena");
-    auto third = jit.codeArena(128 << 10);
+    auto third = jit.loader().codeArena(128 << 10);
     require(third && third != second, "a third arena");
     first.reset();
     second.reset();

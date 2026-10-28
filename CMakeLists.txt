@@ -60,6 +60,8 @@ add_library(bcore-lift STATIC
     src/lift_visitor.cpp
     src/code_arena.cpp
     src/jit_engine.cpp
+    src/code_loader_native.cpp
+    src/helper_functions.cpp
     src/host_bridge.cpp
     src/compiler.cpp
     src/compile_worker.cpp
