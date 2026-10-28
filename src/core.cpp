@@ -48,9 +48,13 @@ Core::~Core() = default;
 
 void Core::attachProfiler() {
 #if BCORE_ENABLE_PROFILE
-    profile_->listener_ok = bcore_profile::attach_listeners(*profile_, *jit_);
+    JitEngine* native = jit_->native();
+    profile_->listener_ok = native && bcore_profile::attach_listeners(*profile_, *native);
 #endif
 }
+
+// The engine blocks run on: this process's.
+static std::shared_ptr<ExecBackend> make_engine() { return std::make_shared<JitEngine>(); }
 
 bool Core::init(int opt_level, int codegen_level) {
     opt_level_ = opt_level;
@@ -60,7 +64,7 @@ bool Core::init(int opt_level, int codegen_level) {
     if (!compiler_->init(opt_level_, codegen_level_) || !compiler_->set_post_pipeline(post_pipeline_))
         return false;
     compiler_->set_steady_skip(steady_skip_);
-    jit_ = std::make_shared<JitEngine>();
+    jit_ = make_engine();
     if (!jit_->init())
         return false;
     jit_->setChainFilter(chain_filter_);
@@ -644,8 +648,9 @@ void Core::set_copy_patch(bool enable) {
 #if BCORE_COPY_PATCH
     // One translator per engine (init, invalidate): turning stencils off
     // keeps it, and the blocks already made of them run on.
-    if (enable && jit_ && !cp_) {
-        cp_ = std::make_unique<CpTranslator>(*jit_);
+    // The native engine's only: stencils are its host's code.
+    if (enable && jit_ && jit_->native() && !cp_) {
+        cp_ = std::make_unique<CpTranslator>(*jit_->native());
         if (copy_patch_reach_) cp_->set_reach(copy_patch_reach_);
 #if BCORE_ENABLE_PROFILE
         cp_->set_code_listener([this](const char* name, const void* code, size_t size) {
@@ -678,7 +683,7 @@ void Core::invalidate() {
         worker_->set_generation(++generation_);
         collect_promotions(/*all=*/true);
     }
-    jit_ = std::make_shared<JitEngine>();
+    jit_ = make_engine();
     // Init cannot fail here unless it failed in Core::init already (same host,
     // same levels); if it ever does, stop rather than dereference a null LLJIT.
     if (!jit_->init())
@@ -886,11 +891,12 @@ bool Core::profileHasBlockSizes() const {
 void Core::set_perf_jitdump(bool enable) {
 #if BCORE_ENABLE_PROFILE
     profile_->want_perf_jitdump = enable;
-    if (!jit_) return;
+    JitEngine* native = jit_ ? jit_->native() : nullptr;
+    if (!native) return;
     if (enable)
-        bcore_profile::attach_perf_listener(*profile_, *jit_);
+        bcore_profile::attach_perf_listener(*profile_, *native);
     else
-        bcore_profile::detach_perf_listener(*profile_, *jit_);
+        bcore_profile::detach_perf_listener(*profile_, *native);
 #else
     (void)enable;
 #endif

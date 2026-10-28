@@ -14,7 +14,7 @@
 #include "cpu_state.h"
 #include "mem.h"
 
-class JitEngine;
+class ExecBackend;
 class Compiler;
 class CompileWorker;
 class BBTranslator;
@@ -204,7 +204,7 @@ private:
     // objects through the registered listener, which writes into profile_ --
     // so profile_ must outlive any engine.
     std::unique_ptr<bcore_profile::ProfileState> profile_;
-    std::shared_ptr<JitEngine> jit_;
+    std::shared_ptr<ExecBackend> jit_;
     // Kept across invalidate(): it holds no compiled code.
     std::unique_ptr<Compiler> compiler_;
     std::shared_ptr<BBTranslator> translator_;

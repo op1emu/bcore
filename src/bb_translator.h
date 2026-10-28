@@ -186,7 +186,7 @@ public:
     // block_pc goes on to self, the block's start, without the table.
     llvm::Function* emit_stencil_exit(llvm::Module& mod, const char* name, llvm::Constant* block_pc = nullptr,
                                       llvm::Function* self = nullptr);
-    // A function of the blocks' type and convention (BbFunc, jit_engine.h).
+    // A function of the blocks' type and convention (BbFunc, exec_backend.h).
     static llvm::Function* declare_block(llvm::Module& mod, const char* name);
     static void declare_externs(llvm::Module& mod);
 

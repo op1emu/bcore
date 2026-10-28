@@ -1,7 +1,7 @@
 #pragma once
 
 // How generated code calls generated code: the type and calling convention
-// of every block and stencil (BbFunc, jit_engine.h) and the tail call by
+// of every block and stencil (BbFunc, exec_backend.h) and the tail call by
 // which one runs the next. Every block function is made by make_block and
 // every call of one by call_block, so that the convention and the
 // arguments' attributes, which a musttail call needs the same on both

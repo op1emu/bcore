@@ -55,7 +55,8 @@ endif()
 
 # ---- The core in three parts, all but Core ----
 # The runtime: the guest state, memory, the CEC and the helpers generated code
-# calls, the disassembler; no LLVM. The lifter and the compilers, which make
+# calls, the disassembler, what every engine keeps beside its code
+# (exec_backend.h); no LLVM. The lifter and the compilers, which make
 # blocks into objects: bcore-stencilgen links them to build the stencils
 # bfin-core then holds. The native engine, which runs the objects in this
 # process (LLVM's ORC JIT), the promotion worker and the profiling listeners.
@@ -72,6 +73,7 @@ add_library(bcore-runtime STATIC
     src/memory.cpp
     src/cpu_state.cpp
     src/host_bridge.cpp
+    src/exec_backend.cpp
 )
 target_include_directories(bcore-runtime
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src

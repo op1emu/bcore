@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <algorithm>
-#include <atomic>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -80,12 +79,7 @@ bool JitEngine::init() {
     }
     jit_ = std::move(*jit_or_err);
 
-    // Pre-allocate hash buckets to avoid rehash overhead during execution.
-    cache_.reserve(1024);
-    static_assert(offsetof(ChainArea, tier) == kTierTableOffset, "generated code finds the tier table there");
-    area_ = std::make_unique<ChainArea>();  // value-initialized: the tier table all zero
-    chain_ = area_->slots;
-    for (size_t i = 0; i < (size_t(1) << kChainBits); ++i) chain_[i] = {kChainEmpty, 0, nullptr};
+    makeTables();
 
     // Manually register all extern "C" symbols that JIT'd code may call.
     // This is more reliable than DynamicLibrarySearchGenerator which depends
@@ -250,51 +244,14 @@ bool JitEngine::addObject(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> objec
         llvm::errs() << "Failed to lookup " << name << ": " << sym.takeError() << "\n";
         return false;
     }
-    auto fn = reinterpret_cast<BbFunc>(sym->getValue());
-    cache_[pc] = BBInfo{fn, fallthrough_pc};
-    publishChain(pc, fn);
+    addCode(pc, reinterpret_cast<BbFunc>(sym->getValue()), fallthrough_pc);
     return true;
-}
-
-void JitEngine::addCode(uint32_t pc, BbFunc fn, uint32_t fallthrough_pc) {
-    cache_[pc] = BBInfo{fn, fallthrough_pc};
-    publishChain(pc, fn);
 }
 
 std::shared_ptr<CodeArena> JitEngine::codeArena(uintptr_t code) {
     auto arena = pool_ ? pool_->arenaFor(code, 0) : nullptr;
     if (arena && (placed_.empty() || placed_.back() != arena)) placed_.push_back(arena);
     return arena;
-}
-
-// The function before the PC: generated code that matches the PC calls the
-// function, so it must never see a new PC with the old function. Single
-// threaded, so ordering the compiler's stores is enough.
-void JitEngine::publishChain(uint32_t pc, BbFunc fn) {
-    if (chain_filter_ && !chain_filter_(pc)) return;
-    ChainSlot& slot = chain_[chainIndex(pc)];
-    slot.pc = kChainEmpty;
-    std::atomic_signal_fence(std::memory_order_release);
-    slot.fn = fn;
-    std::atomic_signal_fence(std::memory_order_release);
-    slot.pc = pc;
-}
-
-void JitEngine::setChainFilter(std::function<bool(uint32_t)> filter) {
-    chain_filter_ = std::move(filter);
-    if (chain_)
-        for (size_t i = 0; i < (size_t(1) << kChainBits); ++i) chain_[i] = {kChainEmpty, 0, nullptr};
-}
-
-BbFunc JitEngine::lookup(uint32_t pc) {
-    const ChainSlot& slot = chain_[chainIndex(pc)];
-    if (slot.pc == pc) return slot.fn;
-    auto it = cache_.find(pc);
-    if (it == cache_.end())
-        return nullptr;
-    // Lost its slot to a block with the same index, or filtered.
-    publishChain(pc, it->second.fn);
-    return it->second.fn;
 }
 
 bool JitEngine::registerJITEventListener(llvm::JITEventListener& L) {
