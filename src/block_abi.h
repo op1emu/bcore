@@ -23,6 +23,12 @@
 // keeps none, as GHC's convention did, and the one C-ABI caller,
 // bcore_enter, saves them all once per entry. LLVM's AArch64 backend knows
 // no such attribute: there a block keeps them.
+//
+// On WebAssembly (a module whose triple is wasm32's) the C convention: a
+// musttail call there is a return_call, which the engine's tail calls
+// feature makes, and LLVM's WebAssembly backend has no swifttailcc (LLVM
+// 19's). A block is exported under its own name, which the engine looks it
+// up by. A module with no triple is the host's.
 
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -31,12 +37,18 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include "llvm_compat.h"
+
 namespace bcore_abi {
 
 inline constexpr llvm::CallingConv::ID kBlockCC = llvm::CallingConv::SwiftTail;
 inline constexpr unsigned kCpuArg = 0;
 inline constexpr unsigned kMemArg = 1;
 inline constexpr const char* kNoCalleeSaved = "no_callee_saved_registers";
+inline constexpr const char* kWasmExportName = "wasm-export-name";
+
+// Whether mod is compiled for WebAssembly (see above).
+inline bool is_wasm(const llvm::Module& mod) { return llvm::Triple(mod.getTargetTriple()).isWasm(); }
 
 // void (CpuState*, Memory*), in kCpuArg and kMemArg.
 inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {
@@ -48,6 +60,10 @@ inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {
 // convention.
 inline llvm::Function* make_block(llvm::Module& mod, const llvm::Twine& name) {
     auto* fn = llvm::Function::Create(block_type(mod.getContext()), llvm::Function::ExternalLinkage, name, mod);
+    if (is_wasm(mod)) {
+        fn->addFnAttr(kWasmExportName, fn->getName());
+        return fn;
+    }
     fn->setCallingConv(kBlockCC);
     fn->addParamAttr(kCpuArg, llvm::Attribute::SwiftSelf);
     fn->addParamAttr(kMemArg, llvm::Attribute::SwiftAsync);
@@ -65,6 +81,7 @@ inline llvm::CallInst* call_block(llvm::IRBuilder<>& b, llvm::Value* callee, llv
     args[kCpuArg] = cpu;
     args[kMemArg] = mem;
     llvm::CallInst* call = b.CreateCall(block_type(b.getContext()), callee, args);
+    if (is_wasm(*b.GetInsertBlock()->getModule())) return call;
     call->setCallingConv(kBlockCC);
     call->addParamAttr(kCpuArg, llvm::Attribute::SwiftSelf);
     call->addParamAttr(kMemArg, llvm::Attribute::SwiftAsync);

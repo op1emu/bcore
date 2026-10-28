@@ -26,6 +26,9 @@
 // of R0 = 0x12345678's byte gave the callback 0x12345678). A narrow return
 // value has no attribute: the caller narrows it itself.
 //
+// On WebAssembly, C's: a block's values are the function's locals, which
+// a call keeps, and the helpers are the engine's imports.
+//
 // memset, memcpy and memmove are not among the helpers: the backend calls
 // those for an intrinsic, in the C convention.
 //
@@ -106,7 +109,13 @@ inline constexpr llvm::CallingConv::ID kHelperCC =
 // The convention a helper is called in on triple's architecture: kHelperCC
 // where that is this host's.
 inline llvm::CallingConv::ID helper_cc(const llvm::Triple& triple) {
-    return triple.isX86() ? llvm::CallingConv::C : llvm::CallingConv::PreserveMost;
+    return triple.isX86() || triple.isWasm() ? llvm::CallingConv::C : llvm::CallingConv::PreserveMost;
+}
+
+// The convention a helper is called in from mod: its triple's, or this
+// host's where it has none.
+inline llvm::CallingConv::ID helper_cc(const llvm::Module& mod) {
+    return mod.getTargetTriple().empty() ? kHelperCC : helper_cc(llvm::Triple(mod.getTargetTriple()));
 }
 
 inline llvm::FunctionType* helper_type(llvm::LLVMContext& ctx, const Helper& h) {
@@ -132,7 +141,7 @@ inline llvm::Function* declare_helper(llvm::Module& mod, const char* name, llvm:
     if (ft != helper_type(mod.getContext(), *h))
         llvm::report_fatal_error(llvm::Twine("a call of ") + name + " with another signature than its own");
     auto* fn = llvm::cast<llvm::Function>(mod.getOrInsertFunction(name, ft).getCallee());
-    fn->setCallingConv(kHelperCC);
+    fn->setCallingConv(helper_cc(mod));
     extend_narrow_params(*h, *fn);
     return fn;
 }

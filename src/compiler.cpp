@@ -64,9 +64,9 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
     const int cg = codegen_level < 0 ? opt_level : codegen_level;
     const auto cg_level = bcore_llvm::codegen_opt_level(cg);
 
-    auto builder = stencil
+    auto builder = stencil || !triple_.empty()
         ? llvm::Expected<llvm::orc::JITTargetMachineBuilder>(
-              llvm::orc::JITTargetMachineBuilder(llvm::Triple(stencil_triple)))
+              llvm::orc::JITTargetMachineBuilder(llvm::Triple(stencil ? stencil_triple : triple_.c_str())))
         : llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!builder) {
         llvm::errs() << "Failed to detect host: " << builder.takeError() << "\n";

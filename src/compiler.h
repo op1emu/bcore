@@ -67,6 +67,11 @@ public:
         cpu_ = std::move(cpu);
         features_ = std::move(features);
     }
+    // Before init: blocks for that triple's engine rather than this host's
+    // (wasm32-unknown-emscripten: a WebAssembly build's blocks, with the
+    // CPU and features of set_target_cpu), whose target the caller has
+    // initialized. The splitter is off there.
+    void set_target_triple(std::string triple) { triple_ = std::move(triple); }
     // The IR pipeline, in place; at opt_level 0 only a loop block's guest
     // memory lowered (guest_memory.h). Every module goes through it before
     // emit. light: a module without a loop block gets kLightPipeline instead
@@ -95,7 +100,7 @@ private:
     bool split_ = true;
     int steady_skip_ = 0;
     std::string post_pipeline_;
-    std::string cpu_, features_;
+    std::string cpu_, features_, triple_;
     std::unique_ptr<llvm::TargetMachine> machine_;
     // The IR pipeline. The analysis managers hold results for the module
     // being optimized only: optimize clears them before it returns.
