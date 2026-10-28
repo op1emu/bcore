@@ -1,13 +1,18 @@
 name: Set up the bcore build
 description: >
-  LLVM 15 and ccache (with the cache under the given key), the Blackfin
-  toolchain (cached) on PATH, or either alone. On Linux (apt) or macOS
-  (Homebrew); the toolchain is Linux's only.
+  LLVM (15, or 23 on Linux) and ccache (with the cache under the given key),
+  the Blackfin toolchain (cached) on PATH, or either alone. On Linux (apt)
+  or macOS (Homebrew); the toolchain is Linux's only.
 
 inputs:
   llvm:
-    description: Install LLVM 15 and ccache
+    description: Install LLVM and ccache
     default: "false"
+  llvm-version:
+    description: >
+      The LLVM: 15 (Ubuntu's, Homebrew's), or 23 (apt.llvm.org's, Linux
+      only), which builds bcore without the copy-and-patch tier
+    default: "15"
   ccache-key:
     description: >
       The ccache cache's key prefix, one per build configuration (with llvm);
@@ -41,15 +46,29 @@ runs:
         echo "CPU: $cpu, $threads threads, AVX-512: $avx512"
         echo "Runner CPU: $cpu, $threads threads, AVX-512: $avx512" >> "$GITHUB_STEP_SUMMARY"
 
-    # Ubuntu's packages on Linux, Homebrew's on macOS.
-    - name: Install LLVM 15 and ccache
+    # Ubuntu's packages on Linux (LLVM 23 from apt.llvm.org), Homebrew's on
+    # macOS.
+    - name: Install LLVM ${{ inputs.llvm-version }} and ccache
       if: inputs.llvm == 'true'
       shell: bash
       run: |
+        version=${{ inputs.llvm-version }}
         if [ "$RUNNER_OS" = Linux ]; then
+          if [ "$version" != 15 ]; then
+            codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+            # The key for apt.llvm.org's packages only (signed-by), not for
+            # every source.
+            sudo install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/keyrings/apt.llvm.org.asc > /dev/null
+            echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.asc] http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$version main" |
+              sudo tee /etc/apt/sources.list.d/llvm-$version.list > /dev/null
+          fi
           sudo apt-get update -qq
-          sudo apt-get install -y llvm-15 llvm-15-dev ccache
-          llvm_dir=/usr/lib/llvm-15/lib/cmake/llvm
+          sudo apt-get install -y llvm-$version llvm-$version-dev ccache
+          llvm_dir=/usr/lib/llvm-$version/lib/cmake/llvm
+        elif [ "$version" != 15 ]; then
+          echo "LLVM $version is installed on Linux only" >&2
+          exit 1
         else
           brew install llvm@15 ccache
           llvm_dir=$(brew --prefix llvm@15)/lib/cmake/llvm

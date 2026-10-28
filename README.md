@@ -68,7 +68,7 @@ Native code  ◄──► helpers (mem_read/write, CEC, hwloop)
 |---|---|
 | CMake ≥ 3.10 | |
 | C++17 compiler | GCC or Clang |
-| LLVM 15 | `llvm-15` + `llvm-dev` packages, or built from source |
+| LLVM 15 (or 23) | `llvm-15` + `llvm-dev` packages, or built from source; LLVM 23 (the WebAssembly build's) builds the core without the copy-and-patch tier |
 | `bfin-elf-gcc` / `bfin-elf-ld` | Optional — only required to assemble and run the test suite |
 
 **Installing LLVM 15 on Ubuntu/Debian:**
@@ -82,6 +82,13 @@ runs on AArch64 (macOS and Linux) as on x86-64, the copy-and-patch tier too
 (`BCORE_COPY_PATCH`, with stencils for AArch64), but the perf JIT listener,
 which is Linux only (`BCORE_PERF_JIT_EVENTS`); CI runs the tests on macos-15
 and ubuntu-22.04-arm.
+
+**LLVM 23:** `-DLLVM_DIR=/usr/lib/llvm-23/lib/cmake/llvm` (apt.llvm.org's
+`llvm-23-dev`). The copy-and-patch tier is off there: its stencils are LLVM
+15's. Where the two LLVMs differ, `src/llvm_compat.h` says it once; what
+LLVM 23 does differently (its InstCombine, its code model) is in
+`LLVM_VERSION_MAJOR` conditions that leave LLVM 15's code as it was. CI
+runs the C++ tests and two emulator suites with it.
 
 **Blackfin cross-toolchain** is searched in this order:
 1. CMake variable `BFIN_TOOLCHAIN_DIR`

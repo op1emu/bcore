@@ -266,6 +266,60 @@ jobs:
         run: ${{ matrix.run }}
 
   # ──────────────────────────────────────────────────────────────────────────
+  # Job 3b: LLVM 23, the WebAssembly build's LLVM, on Linux x86-64 (without
+  # the copy-and-patch tier, whose stencils are LLVM 15's): the C++ tests,
+  # and the emulator suite in op1emu's mode and at O0 on test-elfs'
+  # programs. What LLVM 23 does differently shows here first, apart from
+  # what WebAssembly does.
+  # ──────────────────────────────────────────────────────────────────────────
+  llvm23:
+    name: linux (LLVM 23)
+    needs: test-elfs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          llvm: "true"
+          llvm-version: "23"
+          ccache-key: llvm23
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR="$BCORE_LLVM_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+
+      - name: ccache statistics
+        run: ccache -s
+
+      - name: C++ tests
+        run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
+
+      - name: Download test programs
+        if: success() || failure()
+        uses: actions/download-artifact@v4
+        with:
+          name: test-elfs
+          path: build/test_linked/
+
+      - name: O1-page-table-chain
+        if: success() || failure()
+        run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
+
+      - name: O0
+        if: success() || failure()
+        run: python3 tests/run_emu_test.py --no-fail-fast --ignore-list .github/emu-ignore.txt
+
+  # ──────────────────────────────────────────────────────────────────────────
   # Job 4: macOS on Apple silicon (AArch64, Mach-O, MAP_JIT)
   # With the AArch64 stencils (the copy-and-patch tier 0). A macOS runner
   # has three cores, and an account runs five macOS jobs at a time: one
