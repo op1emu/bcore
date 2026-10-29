@@ -24,6 +24,19 @@
 // bcore_enter, saves them all once per entry. LLVM's AArch64 backend knows
 // no such attribute: there a block keeps them.
 //
+// From LLVM 19 on, preserve_none: the callee keeps no register for its
+// caller (but the frame pointer), so no block saves one, on AArch64 too;
+// its first arguments are R12, R13 (X20, X21), which C keeps, so the
+// Memory and the CpuState stay where they are across the helpers. The
+// Memory comes first: as a base register R12 takes a SIB byte in every
+// access, R13 none. swifttailcc would not do there: LLVM 18's
+// SelectionDAGISel gives a function with a swiftasync argument no FastISel
+// (dontUseFastISelFor), and at O0 a block took the whole SelectionDAG,
+// twice LLVM 15's backend time; without swiftasync the Memory came in RDI
+// and a loop block kept it on the stack. FastISel selects neither a
+// preserve_none return nor a musttail call: at O0 they are put in a block
+// of their own (Compiler::emit).
+//
 // On WebAssembly, whose functions keep their values in locals and take
 // their arguments as they are, C's convention: a musttail call is a
 // return_call (with the target's tail-call feature), and C++ calls a block
@@ -57,12 +70,29 @@ inline bool is_wasm(const llvm::Module& mod) {
 #endif
 }
 
-inline constexpr llvm::CallingConv::ID kBlockCC = llvm::CallingConv::SwiftTail;
 inline constexpr unsigned kCpuArg = 0;
 inline constexpr unsigned kMemArg = 1;
 inline constexpr const char* kNoCalleeSaved = "no_callee_saved_registers";
+inline constexpr bool kPreserveNone = LLVM_VERSION_MAJOR >= 19;
 
-// void (CpuState*, Memory*), in kCpuArg and kMemArg.
+// Whether mod's blocks are preserve_none's (LLVM 19 on, not on WebAssembly).
+inline bool preserve_none(const llvm::Module& mod) { return kPreserveNone && !is_wasm(mod); }
+
+// The blocks' convention in mod (C's on WebAssembly, which make_block and
+// call_block leave as it is).
+inline llvm::CallingConv::ID block_cc(const llvm::Module& mod) {
+#if LLVM_VERSION_MAJOR >= 19
+    if (preserve_none(mod)) return llvm::CallingConv::PreserveNone;
+#endif
+    return llvm::CallingConv::SwiftTail;
+}
+
+// Where mod's blocks take their CpuState* and Memory*: kCpuArg and kMemArg,
+// or swapped in preserve_none (see above).
+inline unsigned cpu_arg(const llvm::Module& mod) { return preserve_none(mod) ? kMemArg : kCpuArg; }
+inline unsigned mem_arg(const llvm::Module& mod) { return preserve_none(mod) ? kCpuArg : kMemArg; }
+
+// void (ptr, ptr): a CpuState* and a Memory*, in cpu_arg's and mem_arg's places.
 inline llvm::FunctionType* block_type(llvm::LLVMContext& ctx) {
     auto* ptr = llvm::PointerType::getUnqual(ctx);
     return llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {ptr, ptr}, false);
@@ -79,7 +109,8 @@ inline llvm::Function* make_block(llvm::Module& mod, const llvm::Twine& name) {
         fn->addFnAttr("no-jump-tables", "true");
         return fn;
     }
-    fn->setCallingConv(kBlockCC);
+    fn->setCallingConv(block_cc(mod));
+    if (preserve_none(mod)) return fn;
     fn->addParamAttr(kCpuArg, llvm::Attribute::SwiftSelf);
     fn->addParamAttr(kMemArg, llvm::Attribute::SwiftAsync);
     fn->addFnAttr(kNoCalleeSaved);
@@ -87,17 +118,19 @@ inline llvm::Function* make_block(llvm::Module& mod, const llvm::Twine& name) {
 }
 
 // A block function's arguments: its CpuState* and its Memory*.
-inline llvm::Argument* block_cpu(llvm::Function* fn) { return fn->getArg(kCpuArg); }
-inline llvm::Argument* block_mem(llvm::Function* fn) { return fn->getArg(kMemArg); }
+inline llvm::Argument* block_cpu(llvm::Function* fn) { return fn->getArg(cpu_arg(*fn->getParent())); }
+inline llvm::Argument* block_mem(llvm::Function* fn) { return fn->getArg(mem_arg(*fn->getParent())); }
 
 // A call of `callee`, a block function, with the block's arguments.
 inline llvm::CallInst* call_block(llvm::IRBuilder<>& b, llvm::Value* callee, llvm::Value* cpu, llvm::Value* mem) {
+    const llvm::Module& mod = *b.GetInsertBlock()->getModule();
     llvm::Value* args[2];
-    args[kCpuArg] = cpu;
-    args[kMemArg] = mem;
+    args[cpu_arg(mod)] = cpu;
+    args[mem_arg(mod)] = mem;
     llvm::CallInst* call = b.CreateCall(block_type(b.getContext()), callee, args);
-    if (is_wasm(*b.GetInsertBlock()->getModule())) return call;
-    call->setCallingConv(kBlockCC);
+    if (is_wasm(mod)) return call;
+    call->setCallingConv(block_cc(mod));
+    if (preserve_none(mod)) return call;
     call->addParamAttr(kCpuArg, llvm::Attribute::SwiftSelf);
     call->addParamAttr(kMemArg, llvm::Attribute::SwiftAsync);
     call->addFnAttr(llvm::Attribute::get(b.getContext(), kNoCalleeSaved));

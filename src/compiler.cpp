@@ -1,5 +1,6 @@
 #include "compiler.h"
 #include "bb_translator.h"
+#include "block_abi.h"
 #include "guest_memory.h"
 #include "guest_speculation.h"
 #include "llvm_compat.h"
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <mutex>
 #include <set>
+#include <vector>
 
 #include <llvm/Analysis/TargetTransformInfo.h>
 #if !defined(__EMSCRIPTEN__)
@@ -317,7 +319,28 @@ void Compiler::optimize(llvm::Module& mod, bool light) {
     forget();
 }
 
+// Every return, with the musttail call before it, in a basic block of its
+// own. FastISel selects neither in preserve_none (X86FastISel's calls and
+// returns are C's and a few others'), and it selects a block bottom up: a
+// block whose return it could not select went to SelectionDAG whole, the
+// stores a block commits at its exit with it.
+static void isolate_returns(llvm::Module& mod) {
+    for (llvm::Function& fn : mod) {
+        std::vector<llvm::Instruction*> cuts;
+        for (llvm::BasicBlock& bb : fn) {
+            auto* ret = llvm::dyn_cast_or_null<llvm::ReturnInst>(terminator(bb));
+            if (!ret) continue;
+            llvm::Instruction* cut = ret;
+            if (auto* call = llvm::dyn_cast_or_null<llvm::CallInst>(ret->getPrevNode()); call && call->isMustTailCall())
+                cut = call;
+            if (cut->getPrevNode() && !llvm::isa<llvm::PHINode>(cut->getPrevNode())) cuts.push_back(cut);
+        }
+        for (llvm::Instruction* cut : cuts) cut->getParent()->splitBasicBlock(cut, "exit");
+    }
+}
+
 std::unique_ptr<llvm::MemoryBuffer> Compiler::emit(llvm::Module& mod) {
+    if (machine_->getOptLevel() == kCodeGenNone && bcore_abi::preserve_none(mod)) isolate_returns(mod);
     // For the splitter only, after the IR pipeline (see init()).
     if (split_)
         for (llvm::Function& function : mod)
