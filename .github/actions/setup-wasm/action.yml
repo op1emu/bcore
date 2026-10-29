@@ -1,11 +1,11 @@
 name: Set up the WebAssembly build
 description: >
   Node 24, Emscripten 4.0.9 and emscripten-forge's LLVM 23 (cached, as
-  tools/wasm/setup.sh fetches them), ccache with the last run's cache, and
-  build-wasm configured (tools/wasm/README.md). Build in it with
+  tools/wasm/setup.sh fetches them), ccache and the stencils with the last
+  run's cache, and build-wasm configured (tools/wasm/README.md). Build in it with
   `source "$BCORE_EMSDK_ENV"` first. Only the job given save-tools saves
   the tools, so that the jobs that set up at once do not race to save them;
-  the ccache cache a job saves itself, after its build.
+  the ccache and stencils cache a job saves itself, after its build.
 
 inputs:
   save-tools:
@@ -51,12 +51,17 @@ runs:
           echo "CCACHE_DIR=$HOME/.cache/ccache"
           echo "CCACHE_MAXSIZE=400M"
           echo "BCORE_EMSDK_ENV=$HOME/.cache/bcore-wasm/emsdk-4.0.9/emsdk_env.sh"
+          echo "BCORE_STENCIL_CACHE_DIR=$HOME/.cache/bcore-stencils"
         } >> "$GITHUB_ENV"
 
+    # With ccache's objects go the stencils of the last bcore-stencilgen
+    # (cmake/StencilCache.cmake), which take minutes to build here.
     - name: Restore ccache
       uses: actions/cache/restore@v4
       with:
-        path: ~/.cache/ccache
+        path: |
+          ~/.cache/ccache
+          ~/.cache/bcore-stencils
         key: ccache-wasm-${{ github.sha }}
         restore-keys: ccache-wasm-
 
@@ -70,4 +75,5 @@ runs:
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CROSSCOMPILING_EMULATOR=$node \
+          -DBCORE_STENCIL_CACHE_DIR=$BCORE_STENCIL_CACHE_DIR \
           -DBCORE_BUILD_FAULT_TESTS=ON

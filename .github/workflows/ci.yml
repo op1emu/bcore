@@ -314,25 +314,54 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   # Job 3c: WebAssembly (tools/wasm/README.md), in Node 24: the core built
   # with Emscripten 4.0.9 and emscripten-forge's LLVM 23
-  # (.github/actions/setup-wasm). Its C++ tests from the start, and its emu
-  # against the build job's native one, every test's exit code, output and
-  # packets the same, at O0 (raw memory) and O1 paged chained: the tests
-  # on three runners, a third of their cost each (run_diff_test.py --shard
-  # by .github/wasm-diff-costs.txt; a new test costs the median), which
-  # build the emu themselves (seconds, from the ccache). The C++ tests' job,
-  # which builds everything, saves the tools and the ccache, as soon as they
-  # are there: a job that times out still leaves them for the next.
+  # (.github/actions/setup-wasm). First its copy-and-patch stencils, which
+  # its own bcore-stencilgen makes in Node (about 19 minutes on a runner when
+  # the lifter changed, seconds from the cache otherwise), saved with the
+  # ccache and the tools for the jobs after it. Then its C++ tests, and its
+  # emu against the build job's native one, every test's exit code, output
+  # and packets the same, at O0 (raw memory), O1 paged chained and with the
+  # copy-and-patch tier 0 (against LLVM's): the tests on three runners, a
+  # third of their cost each (run_diff_test.py --shard by
+  # .github/wasm-diff-costs.txt; a new test costs the median), which build
+  # the emu themselves (seconds, from the ccache and the stencils). The C++
+  # tests' job, which builds everything, saves the ccache again.
   # ──────────────────────────────────────────────────────────────────────────
-  wasm-unit:
-    name: wasm (Node, unit-test)
+  wasm-stencils:
+    name: wasm (stencils)
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-wasm
         with:
           save-tools: "true"
+
+      - name: Build the core and its stencils
+        run: |
+          source "$BCORE_EMSDK_ENV"
+          ccache -z
+          cmake --build build-wasm -j$(getconf _NPROCESSORS_ONLN) --target bfin-core
+          ccache -s
+
+      # The jobs after it restore the newest entry: this one.
+      - name: Save ccache and stencils
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.cache/bcore-stencils
+          key: ccache-wasm-stencils-${{ github.sha }}
+
+  wasm-unit:
+    name: wasm (Node, unit-test)
+    needs: wasm-stencils
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-wasm
 
       - name: Build
         run: |
@@ -345,15 +374,17 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: ~/.cache/ccache
+          path: |
+            ~/.cache/ccache
+            ~/.cache/bcore-stencils
           key: ccache-wasm-${{ github.sha }}
 
       - name: C++ tests
         run: ctest --test-dir build-wasm -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
 
   wasm-emu:
-    name: wasm (Node, O0 + O1-paged-chain ${{ matrix.shard }}/3)
-    needs: build
+    name: wasm (Node, O0 + O1-paged-chain + copy-patch ${{ matrix.shard }}/3)
+    needs: [build, wasm-stencils]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
@@ -383,6 +414,13 @@ jobs:
           chmod +x build/emu build-wasm/emu-node
           python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
             --matrix standard --only O0,O1-paged-chain --count-packets \
+            --shard ${{ matrix.shard }}/3 --costs .github/wasm-diff-costs.txt \
+            -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
+
+      - name: Copy-and-patch's tier 0 against the native emu's LLVM tier 0
+        run: |
+          python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
+            --matrix copy-patch --only tier0 --count-packets \
             --shard ${{ matrix.shard }}/3 --costs .github/wasm-diff-costs.txt \
             -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
 
@@ -571,6 +609,7 @@ jobs:
       - emu-test
       - llvm23-unit
       - llvm23-emu
+      - wasm-stencils
       - wasm-unit
       - wasm-emu
       - macos-unit
