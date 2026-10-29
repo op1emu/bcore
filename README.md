@@ -68,7 +68,7 @@ Native code  ◄──► helpers (mem_read/write, CEC, hwloop)
 |---|---|
 | CMake ≥ 3.10 | |
 | C++17 compiler | GCC or Clang |
-| LLVM 15 (or 23) | `llvm-15` + `llvm-dev` packages, or built from source; LLVM 23 (the WebAssembly build's) builds the core without the copy-and-patch tier |
+| LLVM 15 (or 23) | `llvm-15` + `llvm-dev` packages, or built from source; a native LLVM 23 builds the core without the copy-and-patch tier (the WebAssembly build, LLVM 23, has stencils of its own) |
 | `bfin-elf-gcc` / `bfin-elf-ld` | Optional — only required to assemble and run the test suite |
 
 **Installing LLVM 15 on Ubuntu/Debian:**
@@ -88,8 +88,8 @@ with Emscripten and LLVM 23 for wasm32, each block a module of its own;
 see `tools/wasm/README.md`.
 
 **LLVM 23:** `-DLLVM_DIR=/usr/lib/llvm-23/lib/cmake/llvm` (apt.llvm.org's
-`llvm-23-dev`). The copy-and-patch tier is off there: its stencils are LLVM
-15's. Where the two LLVMs differ, `src/llvm_compat.h` says it once; what
+`llvm-23-dev`). The copy-and-patch tier is off there: the native stencils
+are LLVM 15's (WebAssembly's are 23's, `tools/wasm/README.md`). Where the two LLVMs differ, `src/llvm_compat.h` says it once; what
 LLVM 23 does differently (its InstCombine, its code model) is in
 `LLVM_VERSION_MAJOR` conditions that leave LLVM 15's code as it was. CI
 runs the C++ tests and two emulator suites with it.
