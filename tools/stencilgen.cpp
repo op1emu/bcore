@@ -65,6 +65,7 @@
 #include "compiler.h"
 #include "cp_build.h"
 #include "cp_format.h"
+#include "cp_wasm.h"
 #include "cpu_state.h"
 #include "llvm_compat.h"
 #include "mem.h"
@@ -246,6 +247,17 @@ bool g_split = true;
 // Its LLVM target, with the assembler parser the AArch64 holes' inline
 // assembly needs (materialize_holes); false if this build has none.
 bool init_target(const char* triple) {
+    if (Triple(triple).isWasm()) {
+#if BCORE_STENCILGEN_WEBASSEMBLY
+        LLVMInitializeWebAssemblyTargetInfo();
+        LLVMInitializeWebAssemblyTarget();
+        LLVMInitializeWebAssemblyTargetMC();
+        LLVMInitializeWebAssemblyAsmPrinter();
+        return true;
+#else
+        return false;
+#endif
+    }
     if (Triple(triple).isAArch64()) {
 #if BCORE_STENCILGEN_AARCH64
         LLVMInitializeAArch64TargetInfo();
@@ -695,6 +707,17 @@ void infer_regs(Worker& worker, const std::vector<Pattern>& patterns, SelectedIn
 // A slot 0 piece runs between the slots and their commits: it may go on
 // only (to the next piece), touch no memory and leave nothing to the
 // block's exits.
+// A stencil's code as the target takes it: on WebAssembly a piece of a
+// block's function, or for an exit a function of its own (cp_wasm.h).
+bool as_piece(Code& code) {
+    if (!code.error.empty()) return false;
+    return !Triple(g_triple).isWasm() || wasm_piece(code);
+}
+bool as_exit(Code& code) {
+    if (!code.error.empty()) return false;
+    return !Triple(g_triple).isWasm() || wasm_piece(code, true);
+}
+
 bool body_relocs_ok(const Code& code) {
     for (const auto* relocs : {&code.relocs, &code.cold_relocs})
         for (const bcore_cp::Reloc& r : *relocs) {
@@ -738,6 +761,140 @@ void probe_body(Worker& worker, const std::vector<Pattern>& patterns, SelectedIn
     }
 }
 
+// ---- Shards ----
+//
+// A shard (--shard K/N) builds every Nth batch of items and writes what it
+// found of each item it built; --merge N reads them back into the items the
+// enumeration made, and goes on as if it had built them itself.
+
+struct ShardWriter {
+    std::vector<uint8_t> out;
+    template <typename T> void pod(const T& v) {
+        const auto* p = reinterpret_cast<const uint8_t*>(&v);
+        out.insert(out.end(), p, p + sizeof v);
+    }
+    template <typename T> void vec(const std::vector<T>& v) {
+        pod(uint64_t(v.size()));
+        const auto* p = reinterpret_cast<const uint8_t*>(v.data());
+        out.insert(out.end(), p, p + v.size() * sizeof(T));
+    }
+    void str(const std::string& s) { vec(std::vector<char>(s.begin(), s.end())); }
+    void code(const Code& c) {
+        vec(c.bytes);
+        vec(c.relocs);
+        vec(c.cold);
+        vec(c.cold_relocs);
+        str(c.error);
+    }
+};
+
+struct ShardReader {
+    const std::vector<uint8_t>& in;
+    size_t at = 0;
+    bool ok = true;
+    template <typename T> void pod(T& v) {
+        if (at + sizeof v > in.size()) {
+            ok = false;
+            return;
+        }
+        memcpy(&v, in.data() + at, sizeof v);
+        at += sizeof v;
+    }
+    template <typename T> void vec(std::vector<T>& v) {
+        uint64_t n = 0;
+        pod(n);
+        if (!ok || n > (in.size() - at) / sizeof(T)) {
+            ok = false;
+            return;
+        }
+        v.resize(n);
+        memcpy(v.data(), in.data() + at, n * sizeof(T));
+        at += n * sizeof(T);
+    }
+    void str(std::string& s) {
+        std::vector<char> v;
+        vec(v);
+        s.assign(v.begin(), v.end());
+    }
+    void code(Code& c) {
+        vec(c.bytes);
+        vec(c.relocs);
+        vec(c.cold);
+        vec(c.cold_relocs);
+        str(c.error);
+    }
+};
+
+// What build() sets of an item, for those it built here.
+bool write_shard(const std::string& file, const std::vector<Item>& items) {
+    ShardWriter w;
+    for (size_t i = 0; i < items.size(); ++i) {
+        const Item& item = items[i];
+        if (item.error == "another shard's") continue;
+        w.pod(uint64_t(i));
+        w.pod(item.kind);
+        w.str(item.error);
+        w.pod(item.flags);
+        w.pod(item.bytes);
+        w.pod(item.no_float);
+        w.code(item.code);
+        for (int v = 0; v < Item::kVariants; ++v) {
+            w.pod(item.has[v]);
+            w.pod(uint64_t(item.writes[v].size()));
+            for (const auto& sw : item.writes[v]) {
+                w.pod(uint64_t(sw.offset));
+                w.pod(sw.half);
+            }
+            w.pod(item.slot_flags[v]);
+            w.pod(item.same_as[v]);
+            w.code(item.variant_code[v]);
+        }
+    }
+    FILE* f = fopen(file.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = fwrite(w.out.data(), 1, w.out.size(), f) == w.out.size();
+    return fclose(f) == 0 && ok;
+}
+
+bool read_shard(const std::string& file, std::vector<Item>& items) {
+    std::vector<uint8_t> in;
+    FILE* f = fopen(file.c_str(), "rb");
+    if (!f) return false;
+    uint8_t buf[1 << 16];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) in.insert(in.end(), buf, buf + n);
+    fclose(f);
+    ShardReader r{in};
+    while (r.ok && r.at < in.size()) {
+        uint64_t i = 0;
+        r.pod(i);
+        if (!r.ok || i >= items.size()) return false;
+        Item& item = items[i];
+        r.pod(item.kind);
+        r.str(item.error);
+        r.pod(item.flags);
+        r.pod(item.bytes);
+        r.pod(item.no_float);
+        r.code(item.code);
+        for (int v = 0; v < Item::kVariants; ++v) {
+            r.pod(item.has[v]);
+            uint64_t n = 0;
+            r.pod(n);
+            item.writes[v].clear();
+            for (uint64_t k = 0; k < n && r.ok; ++k) {
+                uint64_t offset = 0;
+                int half = 0;
+                r.pod(offset);
+                r.pod(half);
+                item.writes[v].push_back({size_t(offset), half});
+            }
+            r.pod(item.slot_flags[v]);
+            r.pod(item.same_as[v]);
+            r.code(item.variant_code[v]);
+        }
+    }
+    return r.ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -746,7 +903,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string out_dir = argv[1];
+#if defined(__EMSCRIPTEN__)
+    unsigned jobs = 1;  // no threads
+#else
     unsigned jobs = std::max(1u, std::thread::hardware_concurrency());
+#endif
+    unsigned shard = 0, shards = 1;  // --shard K/N: every Nth batch, from the Kth
+    unsigned merge = 0;              // --merge N: the items N shards built
     long dump = -1;  // --dump WORD: print a 16-bit word's lifts at both PCs, and stop
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--no-split")) {
@@ -755,6 +918,13 @@ int main(int argc, char** argv) {
         }
         if (i + 1 == argc) break;
         if (!strcmp(argv[i], "--jobs")) jobs = std::max(1, atoi(argv[++i]));
+        else if (!strcmp(argv[i], "--merge")) merge = unsigned(std::max(1, atoi(argv[++i])));
+        else if (!strcmp(argv[i], "--shard")) {
+            if (sscanf(argv[++i], "%u/%u", &shard, &shards) != 2 || shards == 0 || shard >= shards) {
+                fprintf(stderr, "stencilgen: --shard K/N with K < N\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--dump")) dump = strtol(argv[++i], nullptr, 0);
         else if (!strcmp(argv[i], "--target")) {
             const char* arch = argv[++i];
@@ -766,6 +936,9 @@ int main(int argc, char** argv) {
         }
     }
 
+#if defined(__EMSCRIPTEN__)
+    jobs = 1;  // no threads: tools/wasm/stencilgen.mjs runs shards instead
+#endif
     if (!init_target(g_triple)) {
         fprintf(stderr, "stencilgen: this build has no %s target\n", g_triple);
         return 2;
@@ -933,16 +1106,20 @@ int main(int argc, char** argv) {
     }
 
     // Lift, check and compile, in batches of 64 per module.
-    auto build = [&](const std::vector<size_t>& todo) {
+    auto build = [&](const std::vector<size_t>& todo, bool sharded) {
         constexpr size_t kBatch = 64;
         std::atomic<size_t> next{0};
         std::vector<std::thread> threads;
-        for (unsigned t = 0; t < jobs; ++t)
-            threads.emplace_back([&] {
+        auto work = [&] {
                 Worker worker;
                 for (;;) {
                     const size_t start = next.fetch_add(kBatch);
                     if (start >= todo.size()) break;
+                    if (sharded && (start / kBatch) % shards != shard) {
+                        for (size_t j = start; j < std::min(todo.size(), start + kBatch); ++j)
+                            if (items[todo[j]].error.empty()) items[todo[j]].error = "another shard's";
+                        continue;
+                    }
                     const size_t end = std::min(todo.size(), start + kBatch);
                     LLVMContext ctx;
                     Module mod("stencils", ctx);
@@ -963,7 +1140,7 @@ int main(int argc, char** argv) {
                                 if (!item.has[v] || item.same_as[v] != v) continue;
                                 auto it = code.find(names[j - start] + "_" + std::to_string(v));
                                 if (it == code.end()) item.error = "no code";
-                                else if (!it->second.error.empty()) item.error = it->second.error;
+                                else if (!as_piece(it->second)) item.error = it->second.error;
                                 else item.variant_code[v] = std::move(it->second);
                             }
                             continue;
@@ -973,20 +1150,31 @@ int main(int argc, char** argv) {
                         else if (!it->second.error.empty()) item.error = it->second.error;
                         else if ((item.flags & kBody) && !body_relocs_ok(it->second))
                             item.error = "slot 0 has a way out or calls a helper";
+                        else if (!as_piece(it->second)) item.error = it->second.error;
                         else item.code = std::move(it->second);
                     }
                 }
-            });
+            };
+        if (jobs == 1) work();
+        for (unsigned t = 0; t < jobs && jobs > 1; ++t) threads.emplace_back(work);
         for (auto& t : threads) t.join();
     };
-    {
+    const std::string shard_file = out_dir + "/shard-" + std::to_string(shard) + "-of-" + std::to_string(shards);
+    if (merge) {
+        // The shards' items, each from the shard that built it.
+        for (unsigned k = 0; k < merge; ++k) {
+            const std::string file = out_dir + "/shard-" + std::to_string(k) + "-of-" + std::to_string(merge);
+            if (!read_shard(file, items)) {
+                fprintf(stderr, "stencilgen: cannot read %s\n", file.c_str());
+                return 1;
+            }
+        }
+    } else {
         std::vector<size_t> all(items.size());
         for (size_t i = 0; i < items.size(); ++i) all[i] = i;
-        build(all);
-    }
-    // Code that loads a constant from a pool (vector code the lifter's
-    // stores turned into) is no stencil: again without vector code.
-    {
+        build(all, true);
+        // Code that loads a constant from a pool (vector code the lifter's
+        // stores turned into) is no stencil: again without vector code.
         std::vector<size_t> again;
         for (size_t i = 0; i < items.size(); ++i)
             if (items[i].error.rfind("relocation against '.LCPI", 0) == 0) {
@@ -994,7 +1182,15 @@ int main(int argc, char** argv) {
                 items[i].no_float = true;
                 again.push_back(i);
             }
-        if (!again.empty()) build(again);
+        if (!again.empty()) build(again, false);
+    }
+    if (shards > 1) {
+        // A shard: its items for --merge, and nothing else.
+        if (!write_shard(shard_file, items)) {
+            fprintf(stderr, "stencilgen: cannot write %s\n", shard_file.c_str());
+            return 1;
+        }
+        return 0;
     }
 
     // The prologues and exits.
@@ -1066,8 +1262,9 @@ int main(int argc, char** argv) {
         for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
         std::map<std::string, Code> code;
         worker.compile(mod, code);
-        auto add = [&](const char* name) -> uint32_t {
+        auto add = [&](const char* name, bool exit = false) -> uint32_t {
             auto it = code.find(name);
+            if (it != code.end()) exit ? as_exit(it->second) : as_piece(it->second);
             if (it == code.end() || !it->second.error.empty()) {
                 special_error += std::string(name) + ": " + (it == code.end() ? "no code" : it->second.error) + "\n";
                 return 0;
@@ -1076,8 +1273,8 @@ int main(int argc, char** argv) {
         };
         prologue[0] = add("prologue");
         prologue[1] = add("prologue_cycles");
-        for (int e = 0; e < 5; ++e) exits[e] = add(names[e]);
-        for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e]);
+        for (int e = 0; e < 5; ++e) exits[e] = add(names[e], true);
+        for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e], true);
         fallthrough = add("fallthrough");
         for (int t = 0; t < 2; ++t) parallel_tail[t] = add(tail_names[t]);
     }
@@ -1114,6 +1311,7 @@ int main(int argc, char** argv) {
         worker.compile(mod, code);
         for (size_t j = 0; j < commits.size(); ++j) {
             auto it = code.find("commit_" + std::to_string(j));
+            if (it != code.end()) as_piece(it->second);
             if (it == code.end() || !it->second.error.empty()) {
                 fprintf(stderr, "stencilgen: a commit: %s\n", it == code.end() ? "no code" : it->second.error.c_str());
                 return 1;
@@ -1226,6 +1424,10 @@ int main(int argc, char** argv) {
     fprintf(f, "// Generated by bcore-stencilgen (tools/stencilgen.cpp). Do not edit.\n");
     fprintf(f, "#define CP_STENCILS_AARCH64 %d  // the architecture the code is for\n",
             Triple(g_triple).isAArch64() ? 1 : 0);
+    if (Triple(g_triple).isWasm()) {
+        fprintf(f, "#define CP_STENCILS_WASM 1  // WebAssembly pieces (cp_wasm.h)\n");
+        fprintf(f, "#define CP_CODE_SIZE %zu  // for the assembler (cp_stencils.cpp)\n", blob.code.size());
+    }
     for (const Table& table : tables)
         fprintf(f, "#define CP_TABLE_%s %zu, %zu\n", table.name, table.at, table.size);
     fprintf(f, "namespace bcore::bcore_cp {\n");
