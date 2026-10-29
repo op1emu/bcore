@@ -563,6 +563,12 @@ if(BCORE_BUILD_FAULT_TESTS)
         add_test(NAME bcore-cp-a64-test COMMAND bcore-cp-a64-test)
     endif()
     if(BCORE_COPY_PATCH)
+        # That the translator makes blocks of stencils, without the profiling
+        # counter the other tests see that by (none on WebAssembly).
+        add_executable(bcore-cp-translator-test tests/cp_translator_test.cpp)
+        target_link_libraries(bcore-cp-translator-test PRIVATE bfin-core)
+        target_include_directories(bcore-cp-translator-test PRIVATE ${LLVM_INCLUDE_DIRS})
+        add_test(NAME bcore-cp-translator-test COMMAND bcore-cp-translator-test)
         add_executable(bcore-cp-stencil-test tests/cp_stencil_test.cpp)
         target_link_libraries(bcore-cp-stencil-test PRIVATE bfin-core)
         # Every third of the build's stencils' samples (a 32-bit key has four:
