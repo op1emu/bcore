@@ -1097,3 +1097,8 @@ execution -20.3%. Work the same at every mark.
 - cp_stencil_test's long mode does not run on WebAssembly: LLVM's tier 0
   code for 250 of the largest stencils has more locals than V8 takes in a
   function (50000).
+- The tests that see a block made of stencils see it through a profiling
+  counter (Core::stats' copy_patch_blocks), and WebAssembly has no
+  profiling: there they passed all the same were every block compiled with
+  LLVM (found in review). cp_translator_test calls the translator itself
+  and requires its blocks.
