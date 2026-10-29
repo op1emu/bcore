@@ -15,6 +15,9 @@ inputs:
 runs:
   using: composite
   steps:
+    # The runner's CPU (the setup action with nothing else to install).
+    - uses: ./.github/actions/setup
+
     - uses: actions/setup-node@v4
       with:
         node-version: "24"

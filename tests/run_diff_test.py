@@ -125,17 +125,43 @@ def strip_flags(flags: Sequence[str], names: Sequence[str]) -> List[str]:
     return out
 
 
-def shard(files: Sequence[Path], spec: str) -> List[Path]:
-    """The K-th of N shards ("K/N", K from 1) of the sorted tests: every
-    N-th, as ctest -I K,,N, so that neighbours, often alike in cost, go to
-    different shards."""
+def shard(files: Sequence[Path], spec: str, costs: Optional[Dict[str, float]] = None) -> List[Path]:
+    """The K-th of N shards ("K/N", K from 1) of the sorted tests. Without
+    costs every N-th, as ctest -I K,,N, so that neighbours, often alike in
+    cost, go to different shards. With costs (seconds by test name, as
+    --write-costs writes them) the most costly first, each to the shard with
+    the least so far; a test the costs do not name costs their median."""
     try:
         k, n = (int(x) for x in spec.split("/"))
     except ValueError:
         sys.exit(f"error: --shard takes K/N, not {spec}")
     if not 1 <= k <= n:
         sys.exit(f"error: --shard {spec}: K is from 1 to N")
-    return list(files[k - 1::n])
+    if not costs:
+        return list(files[k - 1::n])
+    known = sorted(costs.values())
+    default = known[len(known) // 2]
+    cost = {f: costs.get(f.name, default) for f in files}
+    loads = [0.0] * n
+    mine = []
+    for f in sorted(files, key=lambda f: (-cost[f], f.name)):
+        i = loads.index(min(loads))
+        loads[i] += cost[f]
+        if i == k - 1:
+            mine.append(f)
+    return sorted(mine)
+
+
+def read_costs(path: str) -> Dict[str, float]:
+    """--write-costs' file: a test's name and its seconds a line, # comments."""
+    costs = {}
+    for raw in Path(path).read_text().splitlines():
+        entry = raw.split("#", 1)[0].split()
+        if entry:
+            if len(entry) != 2:
+                sys.exit(f"error: {path}: not a name and seconds: {raw}")
+            costs[entry[0]] = float(entry[1])
+    return costs
 
 
 @dataclass
@@ -224,18 +250,22 @@ def first_difference(a: List[str], b: List[str]) -> Optional[Tuple[int, str, str
 
 
 def compare(name: str, runner: Runner, base_emu: str, emu: str, base_flags: List[str], flags: List[str],
-            files: List[Path], jobs: int, verbose: bool) -> Tuple[int, int, int]:
-    """(compared, differing, both timed out) for one configuration."""
+            files: List[Path], jobs: int, verbose: bool, costs: Dict[str, float]) -> Tuple[int, int, int]:
+    """(compared, differing, both timed out) for one configuration; each
+    test's seconds, both sides, added to costs."""
     print(f"--- {name}: base {base_emu} {' '.join(base_flags)}")
     print(f"    {'':>{len(name)}}  new  {emu} {' '.join(flags)}")
     t0 = time.monotonic()
 
     def one(elf: Path):
-        return elf, runner.run(base_emu, elf, base_flags), runner.run(emu, elf, flags)
+        start = time.monotonic()
+        a, b = runner.run(base_emu, elf, base_flags), runner.run(emu, elf, flags)
+        return elf, a, b, time.monotonic() - start
 
     differing = timeouts = 0
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for elf, a, b in pool.map(one, files):
+        for elf, a, b, took_one in pool.map(one, files):
+            costs[elf.name] = costs.get(elf.name, 0.0) + took_one
             if a.status == "timeout" and b.status == "timeout":
                 timeouts += 1
             if same(a, b):
@@ -283,7 +313,12 @@ def main() -> None:
                         help="ELF basenames to skip (one per line, # comments), as run_emu_test.py")
     parser.add_argument("--filter", help="glob of the test names to run")
     parser.add_argument("--shard", metavar="K/N",
-                        help="only the K-th of N shards of the tests (every N-th), for runners that share a suite")
+                        help="only the K-th of N shards of the tests (every N-th, or by --costs), "
+                             "for runners that share a suite")
+    parser.add_argument("--costs", metavar="FILE",
+                        help="with --shard: shards about as costly as each other, by --write-costs' seconds")
+    parser.add_argument("--write-costs", metavar="FILE",
+                        help="write each test's seconds, both sides of every configuration, for --costs")
     parser.add_argument("-j", "--jobs", type=int, default=0,
                         help="tests run at once, each runs both sides (default: half the CPUs)")
     parser.add_argument("-t", "--timeout", type=float, default=60.0, help="seconds per run (default: 60)")
@@ -309,8 +344,10 @@ def main() -> None:
             if entry:
                 skip.add(entry)
         files = [f for f in files if f.name not in skip]
+    if args.costs and not args.shard:
+        sys.exit("error: --costs balances --shard: give both")
     if args.shard:
-        files = shard(files, args.shard)
+        files = shard(files, args.shard, read_costs(args.costs) if args.costs else None)
     if not files:
         sys.exit("error: no tests to run")
 
@@ -342,9 +379,15 @@ def main() -> None:
     jobs = args.jobs or max(1, (os.cpu_count() or 2) // 2)
     print(f"=== Blackfin emulator differential test: {len(files)} tests, {jobs} at once ===\n")
     total_diff = 0
+    costs: Dict[str, float] = {}
     for name, base_flags, flags in configs:
-        _, differing, _ = compare(name, runner, base_emu, args.emu, base_flags, flags, files, jobs, args.verbose)
+        _, differing, _ = compare(name, runner, base_emu, args.emu, base_flags, flags, files, jobs, args.verbose,
+                                  costs)
         total_diff += differing
+    if args.write_costs:
+        with open(args.write_costs, "w") as out:
+            for test in sorted(costs):
+                out.write(f"{test} {costs[test]:.1f}\n")
     if total_diff:
         print(c(Colors.RED, f"FAIL: {total_diff} runs differ"))
         sys.exit(1)
