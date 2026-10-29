@@ -1047,3 +1047,53 @@ execution -20.3%. Work the same at every mark.
   stencils took 0.57 of LLVM's wall time on an Apple M1 runner (4.69 s
   against 8.23 s) and on a Linux arm64 runner (6.70 against 11.78), as on
   x86-64 (0.59); every block of the programs was made of stencils.
+
+## Copy-and-patch on WebAssembly
+
+- The stencils must be the WebAssembly build's own: the lifter writes
+  CpuState's offsets as the compiler sees them, and on wasm32 everything
+  after the first pointer (page_table) moves; a ChainSlot is 12 bytes, not
+  16 (the prologue's count offset is 12 << 16). So bcore-stencilgen is built
+  for WebAssembly too and runs in Node. It has no threads: shards, one
+  process each (`--shard K/N`), and `--merge N` reads back what each built
+  and goes on as one run. Natively 4 shards and a merge make the same bytes
+  as one run. 16 shards: 112 to 130 s, 89035 stencils, 30.4 MB of code
+  (gzip: 0.67 MB) and 12.6 MB of tables; the same encodings have stencils
+  as natively.
+- LLVM's WebAssembly object leaves every hole a 5-byte LEB128: a value
+  hole an i32.const (R_WASM_MEMORY_ADDR_SLEB; none was a load's offset),
+  the next packet, the exit and a helper function indices, the chain exit's
+  call_indirect a type index and a table number. Nothing used the stack
+  pointer.
+- One function per packet, the next one reached by return_call, is what
+  the native stencils are, and it ran: a block of 8 packets made and run
+  once took 118 + 69 µs in V8 against 40 + 20 µs for one function
+  (synthetic, rc-cold.mjs), and a boot runs 40% of its blocks once. V8
+  compiles a function when it is first called (lazy compilation, since
+  2022), and pays for each. So a stencil is a piece of the block's one
+  function (cp_wasm.h): the generator rewrites its code (locals into one
+  layout, the tail calls of the next packet and of the exit into br, the
+  header's indices filled in), and the translator only copies it and fills
+  in value holes.
+- The exits are code after the pieces, not functions of a module every
+  block imports: a tail call into another instance cost a few percent on
+  bench.s. The fixed locals (20 i32, 6 i64: the most any stencil has) cost
+  nothing measurable.
+- LLVM 23 folded a stencil's compare of two holes: LSETUP with its loop
+  bottom at its own PC stores the field hole into lb[0], and the packet's
+  end compares lb[0] with the PC hole; with both stored values forwarded,
+  `icmp eq @bcore_hole_pc, @bcore_hole_field1` is false for two globals
+  that are not weak. LLVM 15's native stencils kept the compare.
+  cp_stencil_test found it (LC0 one more than LLVM's tier 0). The holes are
+  extern_weak on WebAssembly: two weak globals may be the same.
+- Execution: the boot to main-display runs as fast as LLVM's tier 0 did
+  (op1emu, Node: generated code 6.9 against 6.6 s), and takes 9.9 s
+  instead of 44 to 49. Blocks that run a hardware loop in a packet or two
+  run slower than LLVM's (bench.s 4.1 against 3.2 s, natively 2.0 against
+  2.2): every packet compares the loop bottoms and steps the loop through
+  bfin_hwloop_step, and V8's optimizing tier, which recompiles LLVM's
+  -O0 blocks as well as the stencils, closes the gap -O2 gives them
+  natively. Liftoff alone: 9.0 s against 5.6.
+- cp_stencil_test's long mode does not run on WebAssembly: LLVM's tier 0
+  code for 250 of the largest stencils has more locals than V8 takes in a
+  function (50000).
