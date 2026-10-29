@@ -125,5 +125,35 @@ class CompareTest(unittest.TestCase):
         self.assertFalse(rd.same(self.outcome(a), self.outcome(b)))
 
 
+class ShardTest(unittest.TestCase):
+    FILES = [Path(f"t{i}.elf") for i in range(7)]
+
+    def test_every_nth(self):
+        self.assertEqual(rd.shard(self.FILES, "2/3"), [Path("t1.elf"), Path("t4.elf")])
+
+    def test_shards_cover_every_test_once(self):
+        shards = [rd.shard(self.FILES, f"{k}/3") for k in (1, 2, 3)]
+        self.assertEqual(sorted(sum(shards, [])), sorted(self.FILES))
+
+    def test_costs_balance_the_shards(self):
+        costs = {"t0.elf": 9, "t1.elf": 5, "t2.elf": 4, "t3.elf": 3, "t4.elf": 1, "t5.elf": 1}
+        shards = [rd.shard(self.FILES, f"{k}/2", costs) for k in (1, 2)]
+        self.assertEqual(sorted(sum(shards, [])), sorted(self.FILES))
+        # t6.elf, unnamed, costs the median (3): 9+3+1 = 13, 5+4+3+1 = 13.
+        loads = [sum(costs.get(f.name, 3) for f in s) for s in shards]
+        self.assertEqual(loads, [13, 13])
+
+    def test_read_costs(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt") as f:
+            f.write("# seconds\nt0.elf 9.5\n\nt1.elf 2  # fast\n")
+            f.flush()
+            self.assertEqual(rd.read_costs(f.name), {"t0.elf": 9.5, "t1.elf": 2.0})
+
+    def test_bad_spec(self):
+        for spec in ["0/2", "3/2", "2", "a/b"]:
+            with self.assertRaises(SystemExit):
+                rd.shard(self.FILES, spec)
+
+
 if __name__ == "__main__":
     unittest.main()

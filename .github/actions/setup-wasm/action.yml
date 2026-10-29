@@ -1,0 +1,73 @@
+name: Set up the WebAssembly build
+description: >
+  Node 24, Emscripten 4.0.9 and emscripten-forge's LLVM 23 (cached, as
+  tools/wasm/setup.sh fetches them), ccache with the last run's cache, and
+  build-wasm configured (tools/wasm/README.md). Build in it with
+  `source "$BCORE_EMSDK_ENV"` first. Only the job given save-tools saves
+  the tools, so that the jobs that set up at once do not race to save them;
+  the ccache cache a job saves itself, after its build.
+
+inputs:
+  save-tools:
+    description: Save the tools when they were not in the cache
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The runner's CPU (the setup action with nothing else to install).
+    - uses: ./.github/actions/setup
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "24"
+
+    - name: Restore the WebAssembly tools
+      id: wasm-tools
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/bcore-wasm
+        key: wasm-tools-${{ hashFiles('tools/wasm/setup.sh') }}
+
+    - name: Fetch the WebAssembly tools
+      if: steps.wasm-tools.outputs.cache-hit != 'true'
+      shell: bash
+      run: tools/wasm/setup.sh
+
+    # As soon as they are there: a job that times out still leaves them for
+    # the next.
+    - name: Save the WebAssembly tools
+      if: steps.wasm-tools.outputs.cache-hit != 'true' && inputs.save-tools == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/bcore-wasm
+        key: wasm-tools-${{ hashFiles('tools/wasm/setup.sh') }}
+
+    - name: Install ccache
+      shell: bash
+      run: |
+        sudo apt-get install -y ccache
+        {
+          echo "CCACHE_DIR=$HOME/.cache/ccache"
+          echo "CCACHE_MAXSIZE=400M"
+          echo "BCORE_EMSDK_ENV=$HOME/.cache/bcore-wasm/emsdk-4.0.9/emsdk_env.sh"
+        } >> "$GITHUB_ENV"
+
+    - name: Restore ccache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/ccache
+        key: ccache-wasm-${{ github.sha }}
+        restore-keys: ccache-wasm-
+
+    - name: Configure (CMake)
+      shell: bash
+      run: |
+        node=$(command -v node)  # setup-node's, before emsdk's goes on PATH
+        source "$BCORE_EMSDK_ENV"
+        emcmake cmake -B build-wasm \
+          -DLLVM_DIR=$HOME/.cache/bcore-wasm/llvm-23.1.2/lib/cmake/llvm \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CROSSCOMPILING_EMULATOR=$node \
+          -DBCORE_BUILD_FAULT_TESTS=ON

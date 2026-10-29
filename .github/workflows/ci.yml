@@ -19,12 +19,22 @@ concurrency:
 permissions:
   contents: read
 
+# An account on the free plan runs 20 jobs at a time, macOS's, Linux arm64's
+# and the last ones of this run included (5 of them on macOS), and GitHub
+# does not say which of those waiting goes first. So no job waits for more
+# than the one it takes its input from, the long C++ tests start with the
+# run, and when the build job is done no more than 20 jobs are left to run:
+# one more would wait minutes, for another to end. A configuration's C++
+# tests take one job wherever that ends before the WebAssembly diff does
+# (~9 min in all). The emulator suites go by name (.github/run-suites.sh):
+# a job lists those it runs.
 jobs:
   # ──────────────────────────────────────────────────────────────────────────
   # Job 1: Build
   # Installs LLVM 15 and the Blackfin toolchain (cached), builds emu, disasm
   # and the test ELFs (assembled and linked), and uploads them for the jobs
-  # that run them. The C++ tests build and run in unit-test, alongside.
+  # that run them, and nothing else: they all wait for it. The C++ tests
+  # build and run in unit-test, alongside.
   # ──────────────────────────────────────────────────────────────────────────
   build:
     runs-on: ubuntu-22.04
@@ -65,6 +75,7 @@ jobs:
             build/test_linked/
             build/test_objects/
             build/test_config.py
+          retention-days: 3
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 1b: The test programs alone, for the macOS runners, which build their
@@ -94,15 +105,16 @@ jobs:
         with:
           name: test-elfs
           path: build/test_linked/
+          retention-days: 3
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 2: C++ tests, one build configuration each
   # Each configuration builds every test and runs them at once (ctest -j);
   # the slow ones carry a COST in CMakeLists.txt so that they start first.
   # Every test runs in every configuration but default, which leaves out
-  # those labelled slow; a new test needs no entry here. full and noprof
-  # take two runners each (ctest -I: every other test). No bfin toolchain
-  # here, so comparison_test is not registered.
+  # those labelled slow; a new test needs no entry here. full takes two
+  # runners (ctest -I: every other test), the others one, ~7 min at most
+  # (noprof). No bfin toolchain here, so comparison_test is not registered.
   # ──────────────────────────────────────────────────────────────────────────
   unit-test:
     name: unit-test (${{ matrix.config }} ${{ matrix.shard }}/${{ matrix.shards }})
@@ -130,14 +142,7 @@ jobs:
           # The same tests with the instrumentation compiled out.
           - config: noprof
             shard: 1
-            shards: 2
-            cmake-args: >-
-              -DBCORE_ENABLE_PROFILE=OFF
-              -DBCORE_BUILD_PROFILE_TESTS=ON
-              -DBCORE_BUILD_FAULT_TESTS=ON
-          - config: noprof
-            shard: 2
-            shards: 2
+            shards: 1
             cmake-args: >-
               -DBCORE_ENABLE_PROFILE=OFF
               -DBCORE_BUILD_PROFILE_TESTS=ON
@@ -190,68 +195,30 @@ jobs:
             -I ${{ matrix.shard }},,${{ matrix.shards }} ${{ matrix.ctest-args }}
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 3: Emulator test suite, one suite per job
-  # Every suite skips the tests in .github/emu-ignore.txt; a warning
-  # (non-failing) is printed for any ignored test that unexpectedly passes,
-  # prompting cleanup of the list.
+  # Job 3: Emulator test suites (.github/run-suites.sh) on the build job's
+  # emu, in three jobs about as long as each other (~6.5 min; a suite's
+  # time varies by a third with the runner's CPU): the longest suite alone,
+  # the others three or more to a job. The disassembler's comparison with
+  # bfin-elf-objdump and the benchmark, seconds each, go with the shortest.
   # ──────────────────────────────────────────────────────────────────────────
   emu-test:
-    name: emu-test (${{ matrix.suite }})
+    name: emu-test (${{ join(matrix.suites, ' + ') }})
     needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - suite: O0
-            run: python3 tests/run_emu_test.py --no-fail-fast --ignore-list .github/emu-ignore.txt
-          # The same suite through the O1 IR pass pipeline, the level op1emu
-          # runs. -O 0 never invokes the pipeline, so only this catches IR
-          # that the passes miscompile (e.g. poison the backend alone
-          # tolerated). Compile-heavy tests take ~15 s at O1, hence the
-          # longer timeout.
-          - suite: O1
-            run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --ignore-list .github/emu-ignore.txt
-          # The O1 suite again with every whole RAM page in
-          # Memory::page_table(), so loads and stores take the JIT's inline
-          # page-table path (op1emu's) and only partial pages, MMRs and
-          # faults call FlatMemory.
-          - suite: O1-page-table
-            run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --ignore-list .github/emu-ignore.txt
-          # The same with chaining (op1emu's mode): blocks run the next block
-          # themselves, through native loops and the chain table.
-          - suite: O1-page-table-chain
-            run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
-          # Tiered compilation (promotions on the worker) against untiered,
-          # and (diff-copy-patch) the copy-and-patch tier 0 against LLVM's:
-          # every test's exit code, output, packets and returns the same (one
-          # binary, two sets of flags). A few configurations of each matrix:
-          # the whole matrices take about 40 CPU-minutes.
-          - suite: diff-tiers
-            run: |
-              python3 -m unittest tests/test_run_diff.py tests/test_capped_run.py
-              python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-          # op1emu's tiering: size-scaled thresholds, and the light tier-1
-          # pipeline over copy-and-patch tier 0.
-          - suite: diff-tiers-ref-light
-            run: |
-              python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-          - suite: diff-copy-patch
-            run: |
-              python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-          # CpuState::packets against single-stepping (--max-steps 1), where
-          # every run enters one packet. Long tests time out single-stepped
-          # and are reported as skipped.
-          - suite: packet-count
-            run: python3 tests/run_packet_count_test.py -t 60 --ignore-list .github/emu-ignore.txt
+        suites:
+          - [diff-tiers-ref-light]
+          - [O1-page-table-chain, packet-count, diff-copy-patch, O0, disasm, benchmark]
+          - [O1, O1-page-table, script-tests, diff-tiers]
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup
+        with:
+          toolchain: "true"
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -262,19 +229,20 @@ jobs:
       - name: Fix binary permissions
         run: chmod +x build/disasm build/emu
 
-      - name: Run ${{ matrix.suite }}
-        run: ${{ matrix.run }}
+      - name: ${{ join(matrix.suites, ' + ') }}
+        run: .github/run-suites.sh ${{ join(matrix.suites, ' ') }}
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 3b: LLVM 23, the WebAssembly build's LLVM, on Linux x86-64 (without
-  # the copy-and-patch tier, whose stencils are LLVM 15's): the C++ tests,
-  # and the emulator suite in op1emu's mode and at O0 on test-elfs'
-  # programs. What LLVM 23 does differently shows here first, apart from
-  # what WebAssembly does.
+  # the copy-and-patch tier, whose stencils are LLVM 15's): the C++ tests
+  # from the start, and the emulator suite in op1emu's mode and at O0 on
+  # test-elfs' programs, in a job of its own (they took as long again after
+  # the C++ tests). What LLVM 23 does differently shows here first, apart
+  # from what WebAssembly does. Both jobs configured alike, so that they
+  # share one ccache; the C++ tests' job, which builds everything, saves it.
   # ──────────────────────────────────────────────────────────────────────────
-  llvm23:
-    name: linux (LLVM 23)
-    needs: test-elfs
+  llvm23-unit:
+    name: linux (LLVM 23, unit-test)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -304,85 +272,71 @@ jobs:
       - name: C++ tests
         run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
 
+  llvm23-emu:
+    name: linux (LLVM 23, O1-page-table-chain + O0)
+    needs: test-elfs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          llvm: "true"
+          llvm-version: "23"
+          ccache-key: llvm23
+          ccache-save: "false"
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+            -DLLVM_DIR="$BCORE_LLVM_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBCORE_BUILD_PROFILE_TESTS=ON \
+            -DBCORE_BUILD_FAULT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN) --target emu
+
+      - name: ccache statistics
+        run: ccache -s
+
       - name: Download test programs
-        if: success() || failure()
         uses: actions/download-artifact@v4
         with:
           name: test-elfs
           path: build/test_linked/
 
-      - name: O1-page-table-chain
-        if: success() || failure()
-        run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
-
-      - name: O0
-        if: success() || failure()
-        run: python3 tests/run_emu_test.py --no-fail-fast --ignore-list .github/emu-ignore.txt
+      - name: O1-page-table-chain + O0
+        run: .github/run-suites.sh O1-page-table-chain O0
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 3c: WebAssembly (tools/wasm/README.md), in Node 24: the core built
-  # with Emscripten 4.0.9 and emscripten-forge's LLVM 23 (cached, as
-  # setup.sh fetches them), its C++ tests, and its emu against the build
-  # job's native one, every test's exit code, output and packets the same:
-  # O1 paged chained here, O0 (raw memory) in wasm-o0 on this job's emu.
-  # The tools and ccache are restored, and saved as soon as they are there:
-  # a job that times out still leaves them for the next.
+  # with Emscripten 4.0.9 and emscripten-forge's LLVM 23
+  # (.github/actions/setup-wasm). Its C++ tests from the start, and its emu
+  # against the build job's native one, every test's exit code, output and
+  # packets the same, at O0 (raw memory) and O1 paged chained: the tests
+  # on three runners, a third of their cost each (run_diff_test.py --shard
+  # by .github/wasm-diff-costs.txt; a new test costs the median), which
+  # build the emu themselves (seconds, from the ccache). The C++ tests' job,
+  # which builds everything, saves the tools and the ccache, as soon as they
+  # are there: a job that times out still leaves them for the next.
   # ──────────────────────────────────────────────────────────────────────────
-  wasm:
-    name: wasm (Node, O1-paged-chain)
-    needs: build
+  wasm-unit:
+    name: wasm (Node, unit-test)
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-wasm
         with:
-          node-version: "24"
-
-      - name: Restore the WebAssembly tools
-        id: wasm-tools
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/bcore-wasm
-          key: wasm-tools-${{ hashFiles('tools/wasm/setup.sh') }}
-
-      - name: Fetch the WebAssembly tools
-        if: steps.wasm-tools.outputs.cache-hit != 'true'
-        run: tools/wasm/setup.sh
-
-      - name: Save the WebAssembly tools
-        if: steps.wasm-tools.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/bcore-wasm
-          key: wasm-tools-${{ hashFiles('tools/wasm/setup.sh') }}
-
-      - name: Install ccache
-        run: sudo apt-get install -y ccache
-
-      - name: Restore ccache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-wasm-${{ github.sha }}
-          restore-keys: ccache-wasm-
-
-      - name: Configure (CMake)
-        run: |
-          node=$(command -v node)  # setup-node's, before emsdk's goes on PATH
-          source ~/.cache/bcore-wasm/emsdk-4.0.9/emsdk_env.sh
-          emcmake cmake -B build-wasm \
-            -DLLVM_DIR=$HOME/.cache/bcore-wasm/llvm-23.1.2/lib/cmake/llvm \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CROSSCOMPILING_EMULATOR=$node \
-            -DBCORE_BUILD_FAULT_TESTS=ON
+          save-tools: "true"
 
       - name: Build
         run: |
-          source ~/.cache/bcore-wasm/emsdk-4.0.9/emsdk_env.sh
-          export CCACHE_DIR=$HOME/.cache/ccache CCACHE_MAXSIZE=400M
+          source "$BCORE_EMSDK_ENV"
           ccache -z
           cmake --build build-wasm -j$(getconf _NPROCESSORS_ONLN)
           ccache -s
@@ -394,43 +348,29 @@ jobs:
           path: ~/.cache/ccache
           key: ccache-wasm-${{ github.sha }}
 
-      - name: Upload the WebAssembly emu
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-emu
-          path: |
-            build-wasm/emu.js
-            build-wasm/emu.wasm
-
       - name: C++ tests
         run: ctest --test-dir build-wasm -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
 
-      - name: Download build artifacts
-        if: success() || failure()
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: build/
-
-      - name: Against the native emu, O1-paged-chain
-        if: success() || failure()
-        run: |
-          chmod +x build/emu build-wasm/emu-node
-          python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
-            --matrix standard --only O1-paged-chain --count-packets \
-            -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
-
-  wasm-o0:
-    name: wasm (Node, O0)
-    needs: [build, wasm]
+  wasm-emu:
+    name: wasm (Node, O0 + O1-paged-chain ${{ matrix.shard }}/3)
+    needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
+      - uses: ./.github/actions/setup-wasm
+
+      - name: Build
+        run: |
+          source "$BCORE_EMSDK_ENV"
+          ccache -z
+          cmake --build build-wasm -j$(getconf _NPROCESSORS_ONLN) --target emu
+          ccache -s
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -438,31 +378,24 @@ jobs:
           name: build-artifacts
           path: build/
 
-      - name: Download the WebAssembly emu
-        uses: actions/download-artifact@v4
-        with:
-          name: wasm-emu
-          path: build-wasm/
-
-      - name: Against the native emu, O0
+      - name: Against the native emu, O0 and O1-paged-chain
         run: |
-          chmod +x build/emu
-          printf '#!/bin/sh\nexec node "%s/build-wasm/emu.js" "$@"\n' "$PWD" > build-wasm/emu-node
-          chmod +x build-wasm/emu-node
+          chmod +x build/emu build-wasm/emu-node
           python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
-            --matrix standard --only O0 --count-packets \
+            --matrix standard --only O0,O1-paged-chain --count-packets \
+            --shard ${{ matrix.shard }}/3 --costs .github/wasm-diff-costs.txt \
             -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 4: macOS on Apple silicon (AArch64, Mach-O, MAP_JIT)
   # With the AArch64 stencils (the copy-and-patch tier 0). A macOS runner
   # has three cores, and an account runs five macOS jobs at a time: one
-  # runs the C++ tests (from the start), four the emulator suites on
-  # test-elfs' programs, about as long as each other (each suite takes ~2
-  # min there). Every job builds what it runs, configured alike so that all
-  # share one ccache and stencil cache, the last run's (they run at once):
-  # the suites' jobs build only emu and restore it, the C++ tests' job,
-  # which builds everything, saves it.
+  # runs the C++ tests (from the start, ~8 min), three the emulator suites
+  # on test-elfs' programs, about as long as each other (~5.5 min there).
+  # Every job builds what it runs, configured alike so that all share one
+  # ccache and stencil cache, the last run's (they run at once): the
+  # suites' jobs build only emu and restore it, the C++ tests' job, which
+  # builds everything, saves it.
   # ──────────────────────────────────────────────────────────────────────────
   macos-unit:
     name: macos (arm64, unit-test)
@@ -496,37 +429,17 @@ jobs:
         run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
 
   macos-emu:
-    name: macos (arm64, ${{ matrix.a-name }}${{ matrix.b-name && format(' + {0}', matrix.b-name) || '' }})
+    name: macos (arm64, ${{ join(matrix.suites, ' + ') }})
     needs: test-elfs
     runs-on: macos-15
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - a-name: O1-page-table-chain
-            a-run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
-            b-name: O0
-            b-run: python3 tests/run_emu_test.py --no-fail-fast --ignore-list .github/emu-ignore.txt
-          - a-name: O1-page-table
-            a-run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --ignore-list .github/emu-ignore.txt
-            b-name: packet-count
-            b-run: python3 tests/run_packet_count_test.py -t 60 --ignore-list .github/emu-ignore.txt
-          - a-name: O1
-            a-run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --ignore-list .github/emu-ignore.txt
-            b-name: diff-copy-patch
-            b-run: |
-              python3 tests/run_diff_test.py --matrix copy-patch --only tier0 --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-          - a-name: diff-tiers
-            a-run: |
-              python3 -m unittest tests/test_run_diff.py tests/test_capped_run.py
-              python3 tests/run_diff_test.py --matrix tiers --only O1-t2-bg5 --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-            b-name: diff-tiers-ref-light
-            b-run: |
-              python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
+        suites:
+          - [diff-tiers-ref-light, O0]
+          - [script-tests, diff-tiers, O1-page-table-chain, diff-copy-patch]
+          - [O1, O1-page-table, packet-count]
     steps:
       - uses: actions/checkout@v4
 
@@ -558,27 +471,19 @@ jobs:
           name: test-elfs
           path: build/test_linked/
 
-      - name: ${{ matrix.a-name }}
-        run: ${{ matrix.a-run }}
-      - name: ${{ matrix.b-name }}
-        if: matrix.b-name && (success() || failure())
-        run: ${{ matrix.b-run || 'true' }}
+      - name: ${{ join(matrix.suites, ' + ') }}
+        run: .github/run-suites.sh ${{ join(matrix.suites, ' ') }}
 
   # ──────────────────────────────────────────────────────────────────────────
   # Job 4b: Linux on AArch64 (ELF, no MAP_JIT): the AArch64 stencils on
-  # another host than Apple's. Two jobs run the C++ tests (every other one,
-  # the stencils' differential test too), two the emulator suites that run
-  # the copy-and-patch tier 0, on test-elfs' programs. Shared caches as
-  # macOS's (both test jobs save; either is a whole build).
+  # another host than Apple's. One job runs the C++ tests (the stencils'
+  # differential test too, ~7.5 min), two the emulator suites that run the
+  # copy-and-patch tier 0, on test-elfs' programs. Shared caches as macOS's.
   # ──────────────────────────────────────────────────────────────────────────
   linux-arm64-unit:
-    name: linux (arm64, unit-test ${{ matrix.shard }}/2)
+    name: linux (arm64, unit-test)
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
 
@@ -604,29 +509,19 @@ jobs:
         run: ccache -s
 
       - name: C++ tests
-        run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure -I ${{ matrix.shard }},,2
+        run: ctest --test-dir build -j$(getconf _NPROCESSORS_ONLN) --output-on-failure
 
   linux-arm64-emu:
-    name: linux (arm64, ${{ matrix.a-name }} + ${{ matrix.b-name }})
+    name: linux (arm64, ${{ join(matrix.suites, ' + ') }})
     needs: test-elfs
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - a-name: diff-copy-patch
-            a-run: |
-              python3 tests/run_diff_test.py --matrix copy-patch --only tier0,t2-bg1 --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-            b-name: O1-page-table-chain
-            b-run: python3 tests/run_emu_test.py --no-fail-fast -O 1 -t 60 --page-table --chain --ignore-list .github/emu-ignore.txt
-          - a-name: diff-tiers-ref-light
-            a-run: |
-              python3 tests/run_diff_test.py --matrix tiers --only O1-cp-t2-ref2,O1-cp-t1-light --count-packets \
-                -j $(getconf _NPROCESSORS_ONLN) -t 60 --ignore-list .github/emu-ignore.txt
-            b-name: packet-count
-            b-run: python3 tests/run_packet_count_test.py -t 60 --ignore-list .github/emu-ignore.txt
+        suites:
+          - [diff-copy-patch, diff-copy-patch-t2-bg1, O1-page-table-chain]
+          - [diff-tiers-ref-light, packet-count]
     steps:
       - uses: actions/checkout@v4
 
@@ -658,63 +553,36 @@ jobs:
           name: test-elfs
           path: build/test_linked/
 
-      - name: ${{ matrix.a-name }}
-        run: ${{ matrix.a-run }}
-      - name: ${{ matrix.b-name }}
-        if: success() || failure()
-        run: ${{ matrix.b-run }}
+      - name: ${{ join(matrix.suites, ' + ') }}
+        run: .github/run-suites.sh ${{ join(matrix.suites, ' ') }}
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Job 5: Disassembler comparison test and benchmark, a few seconds each
-  # run_comparison_test.py compares build/disasm output against
-  # bfin-elf-objdump for every assembled object file. bench.s.elf must exit
-  # 0 (CHECKREG assertions pass); its wall-clock time goes to the job
-  # summary.
+  # Job 5: Every job's result in one check, the one for a branch rule to
+  # require: jobs come and go and change their names (a matrix entry's is
+  # its suites), this one stays. Every job must succeed: none is skipped
+  # but for one it waits for failing.
   # ──────────────────────────────────────────────────────────────────────────
-  disasm-and-benchmark:
-    needs: build
+  ci-status:
+    if: always()
+    needs:
+      - build
+      - test-elfs
+      - unit-test
+      - emu-test
+      - llvm23-unit
+      - llvm23-emu
+      - wasm-unit
+      - wasm-emu
+      - macos-unit
+      - macos-emu
+      - linux-arm64-unit
+      - linux-arm64-emu
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: ./.github/actions/setup
-        with:
-          toolchain: "true"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: build/
-
-      - name: Fix binary permissions
-        run: chmod +x build/disasm build/emu
-
-      - name: Run disassembler comparison test
-        run: python3 tests/run_comparison_test.py --no-fail-fast
-
-      - name: Run benchmark
-        if: success() || failure()
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          START=$(date +%s%N)
-          EXIT_CODE=0
-          ./build/emu build/test_linked/bench.s.elf || EXIT_CODE=$?
-          END=$(date +%s%N)
-          ELAPSED_MS=$(( (END - START) / 1000000 ))
-
-          echo "Benchmark elapsed: ${ELAPSED_MS} ms"
-
-          {
-            echo "### Benchmark Result"
-            echo ""
-            echo "| Test | Wall Time | Status |"
-            echo "|------|-----------|--------|"
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "| bench.s | ${ELAPSED_MS} ms | PASS |"
-            else
-              echo "| bench.s | ${ELAPSED_MS} ms | FAIL (exit ${EXIT_CODE}) |"
-            fi
-          } >> $GITHUB_STEP_SUMMARY
-
-          exit $EXIT_CODE
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null
