@@ -1,8 +1,11 @@
 # Runs bcore-stencilgen, or copies what the same generator built before.
 #
-#   cmake -DGEN=<bcore-stencilgen> -DOUT=<cp_gen> -DCACHE=<dir> [-DARGS=<its arguments>] -P StencilCache.cmake
+#   cmake -DGEN=<bcore-stencilgen> -DOUT=<cp_gen> -DCACHE=<dir> [-DARGS=<its arguments>]
+#         [-DRUN=<what runs it>] [-DWITH=<files of it>] -P StencilCache.cmake
 #
-# The key is the generator's own SHA-256 (with its arguments, if any):
+# RUN runs GEN where it is not an executable (WebAssembly's: Node and
+# tools/wasm/stencilgen.mjs), and WITH names the rest of it (its .wasm).
+# The key is the generator's own SHA-256 (with WITH's and its arguments):
 # anything that changes the stencils (the lifter's sources, a macro, LLVM)
 # changes the binary, so an entry is never stale. A binary that changes for no reason only costs a regeneration.
 # CACHE keeps the newest entry alone.
@@ -17,6 +20,10 @@ endforeach()
 
 set(files cp_stencils.inc cp_stencils.bin cp_tables.bin cp_stencils.txt)
 file(SHA256 "${GEN}" key)
+foreach(f ${WITH})
+    file(SHA256 "${f}" with)
+    string(SHA256 key "${key};${with}")
+endforeach()
 if(ARGS)
     string(SHA256 key "${key};${ARGS}")
 endif()
@@ -49,7 +56,7 @@ if(hit)
 endif()
 
 message(STATUS "stencils: cache miss ${short}")
-execute_process(COMMAND "${GEN}" "${OUT}" ${ARGS} RESULT_VARIABLE rc)
+execute_process(COMMAND ${RUN} "${GEN}" "${OUT}" ${ARGS} RESULT_VARIABLE rc)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "bcore-stencilgen failed: ${rc}")
 endif()

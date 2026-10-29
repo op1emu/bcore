@@ -36,6 +36,10 @@ public:
 
     bool init();
     BbFunc load(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object, const std::string& name);
+    // A module the copy-and-patch translator put together (cp_wasm.h): as
+    // load, but for the object's checks, which a module made of the build's
+    // stencils needs none of; its function `name` in a slot.
+    BbFunc load_module(uint32_t pc, const uint8_t* bytes, size_t size, const char* name);
     // Its slot emptied (the module goes when nothing else holds it) and
     // free for another block's.
     void release(BbFunc fn);

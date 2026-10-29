@@ -149,18 +149,21 @@ BbFunc CodeLoader::load(uint32_t pc, std::unique_ptr<llvm::MemoryBuffer> object,
                      << "\n";
         return nullptr;
     }
+    return load_module(pc, reinterpret_cast<const uint8_t*>(object->getBufferStart()), object->getBufferSize(),
+                       name.c_str());
+}
+
+BbFunc CodeLoader::load_module(uint32_t pc, const uint8_t* bytes, size_t size, const char* name) {
     if (g_free.empty()) {
         const int first = bcore_wasm_grow(kSlotChunk);
         if (first < 0) return nullptr;
         for (uint32_t i = kSlotChunk; i-- > 0;) g_free.push_back(uint32_t(first) + i);
     }
     const uint32_t slot = g_free.back();
-    if (bcore_wasm_instantiate(reinterpret_cast<const uint8_t*>(object->getBufferStart()),
-                               uint32_t(object->getBufferSize()), name.c_str(), slot, pc) != 0)
-        return nullptr;
+    if (bcore_wasm_instantiate(bytes, uint32_t(size), name, slot, pc) != 0) return nullptr;
     g_free.pop_back();
     slots_.insert(slot);
-    object_bytes_ += object->getBufferSize();
+    object_bytes_ += size;
     return reinterpret_cast<BbFunc>(uintptr_t(slot));
 }
 
