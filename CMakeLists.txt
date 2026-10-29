@@ -99,21 +99,30 @@ if(BCORE_PERF_JIT_EVENTS)
     list(APPEND LLVM_LIBS ${LLVM_PERFJIT_LIBS})
 endif()
 
-# ---- Copy-and-patch (cp_format.h): x86-64 and AArch64 hosts ----
-# On by default where the stencils run (x86-64, AArch64); OFF builds the
-# core without them anywhere (Core::set_copy_patch then does nothing).
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$" AND NOT EMSCRIPTEN)
+# ---- Copy-and-patch (cp_format.h): x86-64, AArch64 and WebAssembly ----
+# On by default where the stencils run; OFF builds the core without them
+# anywhere (Core::set_copy_patch then does nothing). The native stencils are
+# LLVM 15's (LLVM 23 builds without them); WebAssembly's (cp_wasm.h) LLVM
+# 23's, the LLVM of its build.
+if(EMSCRIPTEN)
+    if(LLVM_VERSION_MAJOR EQUAL 23)
+        set(BCORE_COPY_PATCH_DEFAULT ON)
+    else()
+        set(BCORE_COPY_PATCH_DEFAULT OFF)
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$" AND LLVM_VERSION_MAJOR EQUAL 15)
     set(BCORE_COPY_PATCH_DEFAULT ON)
 else()
     set(BCORE_COPY_PATCH_DEFAULT OFF)
 endif()
-# The stencils are LLVM 15's: LLVM 23 builds without them.
-if(NOT LLVM_VERSION_MAJOR EQUAL 15)
-    set(BCORE_COPY_PATCH_DEFAULT OFF)
-endif()
-option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64, AArch64; LLVM 15)" ${BCORE_COPY_PATCH_DEFAULT})
+option(BCORE_COPY_PATCH "Copy-and-patch tier 0 (x86-64, AArch64 with LLVM 15; WebAssembly)" ${BCORE_COPY_PATCH_DEFAULT})
 if(BCORE_COPY_PATCH AND NOT BCORE_COPY_PATCH_DEFAULT)
-    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 or AArch64 host, and LLVM 15")
+    message(FATAL_ERROR "BCORE_COPY_PATCH needs an x86-64 or AArch64 host with LLVM 15, or WebAssembly")
+endif()
+if(EMSCRIPTEN AND BCORE_COPY_PATCH)
+    # The stencils are data in memory (cp_stencils.cpp), more than the
+    # default 16 MiB it starts with.
+    add_link_options(-sINITIAL_MEMORY=128MB)
 endif()
 
 # ---- The core in three libraries ----
@@ -204,8 +213,16 @@ if(BCORE_COPY_PATCH)
     target_include_directories(bcore-stencilgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
     target_link_libraries(bcore-stencilgen PRIVATE bcore-lift Threads::Threads)  # it lifts on threads
     # Each architecture's stencils it can make (--target), with the assembler
-    # parser AArch64's hole materialization needs.
-    foreach(arch X86 AArch64)
+    # parser AArch64's hole materialization needs; WebAssembly's only its
+    # own (they are lifted with its offsets).
+    set(BCORE_GEN_ARCHS X86 AArch64)
+    if(EMSCRIPTEN)
+        set(BCORE_GEN_ARCHS)
+        llvm_map_components_to_libnames(BCORE_GEN_WASM_LIBS webassemblycodegen webassemblydesc webassemblyinfo)
+        target_link_libraries(bcore-stencilgen PRIVATE ${BCORE_GEN_WASM_LIBS})
+        target_compile_definitions(bcore-stencilgen PRIVATE BCORE_STENCILGEN_WEBASSEMBLY=1)
+    endif()
+    foreach(arch ${BCORE_GEN_ARCHS})
         if(arch IN_LIST LLVM_TARGETS_TO_BUILD)
             string(TOLOWER ${arch} lower)
             llvm_map_components_to_libnames(BCORE_GEN_${arch}_LIBS
@@ -231,10 +248,22 @@ if(BCORE_COPY_PATCH)
     if(NOT BCORE_STENCIL_SPLIT)
         list(APPEND BCORE_STENCILGEN_ARGS --no-split)
     endif()
+    # WebAssembly's generator runs in Node, in a process per CPU (it has no
+    # threads): tools/wasm/stencilgen.mjs.
+    set(BCORE_STENCILGEN_RUN "")
+    set(BCORE_STENCILGEN_WITH "")
+    if(EMSCRIPTEN)
+        set(BCORE_STENCILGEN_RUN ${CMAKE_CROSSCOMPILING_EMULATOR} ${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm/stencilgen.mjs)
+        set(BCORE_STENCILGEN_WITH $<TARGET_FILE_DIR:bcore-stencilgen>/bcore-stencilgen.wasm)
+    endif()
     if(BCORE_STENCIL_CACHE_DIR)
         set(BCORE_STENCILGEN_COMMAND ${CMAKE_COMMAND} -DGEN=$<TARGET_FILE:bcore-stencilgen>
             -DOUT=${BCORE_CP_GEN} -DCACHE=${BCORE_STENCIL_CACHE_DIR} "-DARGS=${BCORE_STENCILGEN_ARGS}"
+            "-DRUN=${BCORE_STENCILGEN_RUN}" "-DWITH=${BCORE_STENCILGEN_WITH}"
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/StencilCache.cmake)
+    elseif(EMSCRIPTEN)
+        set(BCORE_STENCILGEN_COMMAND ${BCORE_STENCILGEN_RUN} $<TARGET_FILE:bcore-stencilgen> ${BCORE_CP_GEN}
+            ${BCORE_STENCILGEN_ARGS})
     else()
         set(BCORE_STENCILGEN_COMMAND bcore-stencilgen ${BCORE_CP_GEN} ${BCORE_STENCILGEN_ARGS})
     endif()
@@ -244,11 +273,15 @@ if(BCORE_COPY_PATCH)
         COMMAND ${CMAKE_COMMAND} -E make_directory ${BCORE_CP_GEN}
         COMMAND ${BCORE_STENCILGEN_COMMAND}
         DEPENDS bcore-stencilgen ${CMAKE_CURRENT_SOURCE_DIR}/cmake/StencilCache.cmake
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/wasm/stencilgen.mjs
         COMMENT "Building the copy-and-patch stencils"
         VERBATIM)
     set_source_files_properties(src/cp_stencils.cpp PROPERTIES
         OBJECT_DEPENDS "${BCORE_CP_GEN}/cp_stencils.inc;${BCORE_CP_GEN}/cp_stencils.bin;${BCORE_CP_GEN}/cp_tables.bin")
     set(BCORE_CP_SOURCES src/cp_stencils.cpp src/cp_translator.cpp ${BCORE_CP_GEN}/cp_stencils.inc)
+    if(EMSCRIPTEN)
+        list(APPEND BCORE_CP_SOURCES src/cp_emit_wasm.cpp)
+    endif()
 endif()
 
 # ---- Core library (disassembler + emulator) ----
@@ -298,7 +331,7 @@ if(EMSCRIPTEN)
     target_link_libraries(emu-web PRIVATE bfin-core)
     target_include_directories(emu-web PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools ${CMAKE_CURRENT_SOURCE_DIR}/include)
     set_target_properties(emu-web PROPERTIES LINK_OPTIONS
-        "-fwasm-exceptions;-O1;-sALLOW_MEMORY_GROWTH=1;-sMAXIMUM_MEMORY=4GB;-sALLOW_TABLE_GROWTH=1;-sSTACK_SIZE=8MB;-sENVIRONMENT=worker;-sMODULARIZE=1;-sEXPORT_NAME=createEmu;-sINVOKE_RUN=0;-sEXIT_RUNTIME=0;-sEXPORTED_RUNTIME_METHODS=FS,callMain")
+        "-fwasm-exceptions;-O1;-sALLOW_MEMORY_GROWTH=1;-sINITIAL_MEMORY=128MB;-sMAXIMUM_MEMORY=4GB;-sALLOW_TABLE_GROWTH=1;-sSTACK_SIZE=8MB;-sENVIRONMENT=worker;-sMODULARIZE=1;-sEXPORT_NAME=createEmu;-sINVOKE_RUN=0;-sEXIT_RUNTIME=0;-sEXPORTED_RUNTIME_METHODS=FS,callMain")
 endif()
 # Export symbols so JIT can find extern "C" functions at runtime
 set_target_properties(emu PROPERTIES ENABLE_EXPORTS TRUE FOLDER "Emulator")
@@ -520,7 +553,7 @@ if(BCORE_BUILD_FAULT_TESTS)
     # target: their relocations, their holes' widths, how they are filled in.
     # (The stencils are LLVM 15's, and their pieces of the lifter are built
     # with copy-and-patch.)
-    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD AND BCORE_COPY_PATCH)
+    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD AND BCORE_COPY_PATCH AND NOT EMSCRIPTEN)
         add_executable(bcore-cp-a64-test tests/cp_a64_test.cpp)
         target_link_libraries(bcore-cp-a64-test PRIVATE bcore-lift)
         target_include_directories(bcore-cp-a64-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LLVM_INCLUDE_DIRS})
@@ -548,7 +581,11 @@ if(BCORE_BUILD_FAULT_TESTS)
         # Every 24th at a high PC (L1 instruction SRAM, op1emu's).
         add_test(NAME bcore-cp-stencil-test-high COMMAND bcore-cp-stencil-test 24 5 high)
         set_tests_properties(bcore-cp-stencil-test-high PROPERTIES COST 100 LABELS slow)
-        add_test(NAME bcore-cp-stencil-test-long COMMAND bcore-cp-stencil-test long)
+        # Not on WebAssembly, where LLVM's tier 0 compiles no block that long:
+        # its -O0 code has more locals than V8 takes in a function (50000).
+        if(NOT EMSCRIPTEN)
+            add_test(NAME bcore-cp-stencil-test-long COMMAND bcore-cp-stencil-test long)
+        endif()
     endif()
     # Seconds each takes on a CI runner: ctest -j starts the slowest first.
     # A test that takes a minute or more is also labelled slow; CI runs every

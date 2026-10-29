@@ -21,6 +21,7 @@ using namespace bcore_cp;
 
 namespace {
 
+#if !defined(__EMSCRIPTEN__)
 // What a stencil's helper call reaches, in the order of kHelpers.
 void* const kHelperFns[] = {
     reinterpret_cast<void*>(&bcore_bridge::mem_read8),
@@ -51,6 +52,7 @@ void* const kHelperFns[] = {
     reinterpret_cast<void*>(&::memmove),
 };
 static_assert(sizeof(kHelperFns) / sizeof(kHelperFns[0]) == kHelperCount, "a function for every helper");
+#endif
 
 // ---- Decoding, as decoder.h decides ----
 
@@ -74,6 +76,7 @@ uint32_t gather(uint32_t v, uint32_t mask) {
     return out;
 }
 
+#if !defined(__EMSCRIPTEN__)
 // A jump to a helper: an absolute jump, 16 bytes. The other host
 // specifics: the jump a stencil's hot part may end in (kTailCont,
 // kTailExit), and how far a stencil's call or jump reaches (an arena's
@@ -108,6 +111,9 @@ void fill_trap(uint8_t* at, size_t size) {
     memset(at, 0xcc, size);
 #endif
 }
+#else
+constexpr size_t kReach = SIZE_MAX;  // a module's calls reach anything
+#endif
 
 }  // namespace
 
@@ -227,6 +233,7 @@ bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, co
     return true;
 }
 
+#if !defined(__EMSCRIPTEN__)
 // Where a stencil's call of each helper goes: the helper (wrapped,
 // kHelperFns) where the helpers' convention is C's, else a trampoline in
 // it to the C function (CodeLoader::makeTrampolines); memset, memcpy and
@@ -397,6 +404,8 @@ bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, con
            fill(cold_at, piece.cold_relocs, s.cold_reloc_count, s.cold_size, cold_jumps);
 }
 
+#endif
+
 bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet, uint64_t field0,
                             uint32_t counter, uint64_t& value) const {
     if (r.hole == kHolePc) {
@@ -460,6 +469,9 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
         exit_piece_ = int(pieces_.size());
         pieces_.push_back(CpTranslator::piece(kStencils[kSelfExits[config.count_chained]], pc, 0, -1));
     }
+#if defined(__EMSCRIPTEN__)
+    return emit_wasm(pc, counter, config, out);
+#else
     size_t total = 0, cold_total = 0;
     size_t open = 0;     // the first piece whose hot trampolines are not placed
     size_t pending = 0;  // and the trampolines of pieces [open, i]
@@ -542,6 +554,7 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     out.cold = cold;
     out.cold_size = cold_size;
     return out;
+#endif
 }
 
 }  // namespace bcore

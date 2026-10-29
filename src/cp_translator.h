@@ -36,7 +36,9 @@
 // On x86-64 and AArch64 (BCORE_COPY_PATCH); single-threaded, like
 // JitEngine. On Apple silicon it writes code in a JitWriteScope; on AArch64
 // it invalidates the instruction cache over what it placed before the block
-// is published.
+// is published. On WebAssembly a block is a module of its own instead
+// (cp_wasm.h, cp_emit_wasm.cpp): its pieces one function, which the
+// CodeLoader instantiates; no arena, no helper jumps.
 
 #include <cstdint>
 #include <exception>
@@ -162,6 +164,12 @@ private:
 
     // The build's stencil s as a piece.
     static Piece piece(const bcore_cp::Stencil& s, uint32_t pc, uint32_t insn, int selected);
+#if defined(__EMSCRIPTEN__)
+    // WebAssembly (cp_wasm.h, cp_emit_wasm.cpp): the scanned block as a
+    // module of its own, loaded.
+    Block emit_wasm(uint32_t pc, uint32_t counter, const Config& config, Block out);
+    std::vector<uint8_t> module_, body_;  // the last block's module, and its function's code
+#endif
 
     uint32_t threshold_ = 0;  // the last block's tier counter's (Block::threshold)
     uint64_t last_len_ = 0;   // the length of the packet the fall-through stencil follows
