@@ -145,10 +145,12 @@ std::unique_ptr<llvm::TargetMachine> Compiler::native_machine(CodeGenLevel cg_le
 
 // For WebAssembly, which JITTargetMachineBuilder refuses (it has no JIT):
 // the generic CPU with tail calls, by which blocks run the next one
-// (return_call_indirect), and SIMD, for the vectorizers' code; static
+// (return_call_indirect), and SIMD, for the vectorizers' code (none for a
+// stencil, which has none: cp_build.cpp's wasm_piece takes no SIMD); static
 // relocations, as a block's object refers to nothing but what it imports
 // (code_loader_wasm.cpp).
-static std::unique_ptr<llvm::TargetMachine> wasm_machine(const std::string& triple, CodeGenLevel cg_level) {
+static std::unique_ptr<llvm::TargetMachine> wasm_machine(const std::string& triple, CodeGenLevel cg_level,
+                                                         bool stencil) {
     std::string error;
     const llvm::Target* target = lookup_target(triple, error);
     if (!target) {
@@ -156,8 +158,8 @@ static std::unique_ptr<llvm::TargetMachine> wasm_machine(const std::string& trip
         return nullptr;
     }
     std::unique_ptr<llvm::TargetMachine> machine(create_target_machine(
-        *target, triple, "generic", "+tail-call,+simd128", llvm::TargetOptions(), llvm::Reloc::Static,
-        CodeModelChoice(), cg_level));
+        *target, triple, "generic", stencil ? "+tail-call,-simd128" : "+tail-call,+simd128", llvm::TargetOptions(),
+        llvm::Reloc::Static, CodeModelChoice(), cg_level));
     if (!machine) llvm::errs() << "Failed to create the TargetMachine for " << triple << "\n";
     return machine;
 }
@@ -181,11 +183,15 @@ bool Compiler::init(int opt_level, int codegen_level, bool split, const char* st
         cg == 3 ? kCodeGenAggressive :
                   kCodeGenDefault;
 
-    const llvm::Triple target(target_triple_.empty() ? llvm::sys::getProcessTriple() : target_triple_);
-    if (!stencil && target.isWasm()) {
+    const llvm::Triple target(stencil                  ? stencil_triple
+                              : target_triple_.empty() ? llvm::sys::getProcessTriple()
+                                                       : target_triple_);
+    // WebAssembly's stencils as its blocks: no splitter (a wasm function has
+    // no sections to split into), a fresh backend for every module.
+    if (target.isWasm()) {
         split_ = false;
         fresh_backend_ = true;
-        machine_ = wasm_machine(target.str(), cg_level);
+        machine_ = wasm_machine(target.str(), cg_level, stencil);
     } else {
         machine_ = native_machine(cg_level, split, stencil_triple);
     }

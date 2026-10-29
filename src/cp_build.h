@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <llvm/ADT/StringRef.h>
+#include <llvm/BinaryFormat/Wasm.h>
 #include <llvm/Support/MemoryBuffer.h>
 
 #include "bb_translator.h"
@@ -96,9 +97,14 @@ private:
 // extended by the caller (helper_abi.h), as Apple's ABI asks.
 inline constexpr const char* kStencilTripleX86 = "x86_64-unknown-linux-gnu";
 inline constexpr const char* kStencilTripleA64 = "aarch64-unknown-linux-gnu";
+// WebAssembly's: lifted where they run (a WebAssembly build of the
+// generator), as CpuState's offsets are the host's.
+inline constexpr const char* kStencilTripleWasm = "wasm32-unknown-emscripten";
 // This host's.
 inline constexpr const char* kStencilTripleHost =
-#if defined(__aarch64__)
+#if defined(__EMSCRIPTEN__)
+    kStencilTripleWasm;
+#elif defined(__aarch64__)
     kStencilTripleA64;
 #else
     kStencilTripleX86;
@@ -159,6 +165,15 @@ struct Code {
 // be a stencil has its error set.
 std::map<std::string, Code> compile_stencils(bcore::Compiler& compiler, llvm::Module& mod);
 
+// A WebAssembly function type as kHoleWasmType's addend (cp_wasm.h's
+// wasm_signature_id); -1 for one that does not fit.
+int32_t wasm_signature(const llvm::wasm::WasmSignature& sig);
+// WebAssembly (cp_wasm.h): the code extract() made of a stencil as a piece
+// of a block's function: the header's indices filled in, its locals the
+// block's, its tail calls of the next packet and of the exit branches out
+// of its block and the pieces' (an exit's code, kExits or kSelfExits, may
+// return). False with c.error set where the code cannot be one.
+bool wasm_piece(Code& c, bool exit = false);
 // The hole a relocation's symbol names, or -1.
 int hole_of(llvm::StringRef name);
 // The code of each function of an object, by name: its section's or its

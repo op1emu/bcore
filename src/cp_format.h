@@ -47,6 +47,14 @@ inline constexpr const char* kHelpers[] = {
 };
 inline constexpr unsigned kHelperCount = sizeof(kHelpers) / sizeof(kHelpers[0]);
 
+// WebAssembly's other indices a stencil's code names, after the helpers:
+// the blocks' stack pointer (a global), the function table, and a function
+// type (for call_indirect; its id in the addend, cp_wasm.h's
+// wasm_signature_id).
+inline constexpr unsigned kHoleWasmStack = kHoleHelper + kHelperCount;
+inline constexpr unsigned kHoleWasmTable = kHoleWasmStack + 1;
+inline constexpr unsigned kHoleWasmType = kHoleWasmStack + 2;
+
 // How a relocation fills its value in: the relocation it came from.
 enum RelocKind : uint8_t {
     // x86-64
@@ -68,6 +76,10 @@ enum RelocKind : uint8_t {
     // B the translator places beside it (cp_translator.cpp's trampolines):
     kCondBr19,  // R_AARCH64_CONDBR19, a B.cond, CBZ or CBNZ: the same in 19 bits (+-1 MiB)
     kTestBr14,  // R_AARCH64_TSTBR14, a TBZ or TBNZ: in 14 bits (+-32 KiB)
+    // WebAssembly: a LEB128 padded to 5 bytes, whatever its value
+    kWasmSleb,  // R_WASM_MEMORY_ADDR_SLEB, an i32.const: value + addend, signed
+    kWasmLeb,   // R_WASM_MEMORY_ADDR_LEB, a load's or store's offset: value + addend, unsigned
+    kWasmIndex, // R_WASM_FUNCTION_INDEX_LEB, TYPE_INDEX_LEB, GLOBAL_INDEX_LEB, TABLE_NUMBER_LEB: an index
 };
 
 struct Reloc {

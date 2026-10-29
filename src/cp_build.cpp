@@ -20,9 +20,11 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
+#include <llvm/Object/Wasm.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include "compiler.h"
+#include "cp_wasm.h"
 #include "helper_abi.h"
 #include "lift_visitor.h"
 #include "llvm_compat.h"
@@ -63,7 +65,16 @@ Constant* value_hole(Module& mod, Hole hole, uint64_t lo, uint64_t hi, Type* ty)
     auto* i8 = Type::getInt8Ty(ctx);
     auto* g = mod.getNamedGlobal(kHoleNames[hole]);
     if (!g) {
-        g = new GlobalVariable(mod, i8, true, GlobalValue::ExternalLinkage, nullptr, kHoleNames[hole]);
+        // On WebAssembly (whose stencils are LLVM 23's) weak: two holes may
+        // hold the same value, as two globals that are not weak never do
+        // (LLVM 23 folds the PC hole's compare with a loop bottom a field
+        // hole made to false, found by cp_stencil_test).
+#if defined(__EMSCRIPTEN__)
+        const auto linkage = GlobalValue::ExternalWeakLinkage;
+#else
+        const auto linkage = GlobalValue::ExternalLinkage;
+#endif
+        g = new GlobalVariable(mod, i8, true, linkage, nullptr, kHoleNames[hole]);
         g->setDSOLocal(true);
         auto* i64 = Type::getInt64Ty(ctx);
         g->setMetadata(LLVMContext::MD_absolute_symbol,
@@ -346,6 +357,109 @@ int a64_kind(uint32_t type) {
 
 }  // namespace
 
+int32_t wasm_signature(const wasm::WasmSignature& sig) {
+    std::vector<uint8_t> params, results;
+    for (wasm::ValType t : sig.Params) params.push_back(uint8_t(t));
+    for (wasm::ValType t : sig.Returns) results.push_back(uint8_t(t));
+    return wasm_signature_id(params.data(), unsigned(params.size()), results.data(), unsigned(results.size()));
+}
+
+namespace {
+
+// A WebAssembly object's functions (wasm_object.h's kind: llc's, unlinked):
+// each one's body, its locals' declarations and its code, and the
+// relocations in it, as Code.
+std::map<std::string, Code> extract_wasm(const object::WasmObjectFile& wasm) {
+    std::map<std::string, Code> out;
+    const object::WasmSection* code_section = nullptr;
+    for (const object::SectionRef& section : wasm.sections()) {
+        const object::WasmSection& s = wasm.getWasmSection(section);
+        if (s.Type == wasm::WASM_SEC_CODE) code_section = &s;
+        // Data the code would reach (a switch's lookup table, a constant).
+        else if (s.Type == wasm::WASM_SEC_DATA || s.Type == wasm::WASM_SEC_ELEM)
+            for (const wasm::WasmFunction& fn : wasm.functions())
+                out[fn.SymbolName.str()].error = "a data section";
+    }
+    if (!code_section) return out;
+    const ArrayRef<uint8_t> payload = code_section->Content;
+    std::vector<const object::WasmSymbol*> symbols;  // by index, as relocations name them
+    for (const object::SymbolRef& sym : wasm.symbols()) symbols.push_back(&wasm.getWasmSymbol(sym));
+    struct Range { uint64_t start, end; std::string name; };
+    std::vector<Range> ranges;
+    for (const wasm::WasmFunction& fn : wasm.functions()) {
+        // The body: after its size, its locals' declarations and its code.
+        uint64_t at = fn.CodeSectionOffset;
+        uint64_t size = 0;
+        unsigned shift = 0;
+        uint8_t byte = 0;
+        do {
+            byte = payload[at++];
+            size |= uint64_t(byte & 0x7f) << shift;
+            shift += 7;
+        } while (byte & 0x80);
+        const std::string name = fn.SymbolName.str();
+        Code& code = out[name];
+        code.bytes.assign(payload.begin() + at, payload.begin() + at + size);
+        ranges.push_back({at, at + size, name});
+    }
+    for (const wasm::WasmRelocation& r : code_section->Relocations) {
+        const Range* range = nullptr;
+        for (const Range& candidate : ranges)
+            if (r.Offset >= candidate.start && r.Offset < candidate.end) range = &candidate;
+        if (!range) continue;
+        Code& code = out[range->name];
+        std::string name;
+        int hole = -1;
+        int kind = -1;
+        int64_t add = r.Addend;
+        if (r.Type == wasm::R_WASM_TYPE_INDEX_LEB) {
+            hole = int(kHoleWasmType);
+            kind = kWasmIndex;
+            add = wasm_signature(wasm.types()[r.Index]);
+            name = "a type";
+            if (add < 0) {
+                if (code.error.empty()) code.error = "a function type of more than the stencils' value types";
+                continue;
+            }
+        } else {
+            name = symbols[r.Index]->Info.Name.str();
+            hole = hole_of(name);
+            if (name == "__stack_pointer") hole = int(kHoleWasmStack);
+            if (name == "__indirect_function_table") hole = int(kHoleWasmTable);
+            switch (r.Type) {
+            case wasm::R_WASM_MEMORY_ADDR_SLEB: kind = kWasmSleb; break;
+            case wasm::R_WASM_MEMORY_ADDR_LEB: kind = kWasmLeb; break;
+            case wasm::R_WASM_FUNCTION_INDEX_LEB:
+            case wasm::R_WASM_GLOBAL_INDEX_LEB:
+            case wasm::R_WASM_TABLE_NUMBER_LEB: kind = kWasmIndex; break;
+            }
+        }
+        const bool value = hole >= 0 && hole < int(kHoleCont);
+        char why[160] = {};
+        if (hole < 0)
+            snprintf(why, sizeof why, "relocation against '%s'", name.c_str());
+        else if (kind < 0)
+            snprintf(why, sizeof why, "relocation type %u against %s", unsigned(r.Type), name.c_str());
+        else if (value != (kind != kWasmIndex))
+            snprintf(why, sizeof why, "relocation kind %d against %s", kind, name.c_str());
+        else if (add < INT32_MIN || add > INT32_MAX)
+            snprintf(why, sizeof why, "addend %lld", (long long)add);
+        if (why[0]) {
+            if (code.error.empty()) code.error = why;
+            continue;
+        }
+        code.relocs.push_back({uint16_t(r.Offset - range->start), uint8_t(hole), uint8_t(kind), int32_t(add)});
+    }
+    for (auto& [name, code] : out) {
+        if (code.bytes.size() > 0xffff && code.error.empty()) code.error = "too large";
+        std::sort(code.relocs.begin(), code.relocs.end(),
+                  [](const Reloc& a, const Reloc& b) { return a.offset < b.offset; });
+    }
+    return out;
+}
+
+}  // namespace
+
 std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
     std::map<std::string, Code> out;
     auto file = object::ObjectFile::createObjectFile(buffer.getMemBufferRef());
@@ -353,6 +467,7 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
         consumeError(file.takeError());
         return out;
     }
+    if (auto* wasm = dyn_cast<object::WasmObjectFile>(file->get())) return extract_wasm(*wasm);
     auto* elf = dyn_cast<object::ELFObjectFileBase>(file->get());
     if (!elf) return out;
     const bool a64 = elf->getEMachine() == ELF::EM_AARCH64;
@@ -499,6 +614,189 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
     }
     return out;
 }
+
+// ---- WebAssembly pieces (cp_wasm.h) ----
+
+namespace {
+
+bool read_leb(const std::vector<uint8_t>& b, size_t& p, uint64_t& v) {
+    v = 0;
+    for (unsigned shift = 0; p < b.size() && shift < 64; shift += 7) {
+        const uint8_t byte = b[p++];
+        v |= uint64_t(byte & 0x7f) << shift;
+        if (!(byte & 0x80)) return true;
+    }
+    return false;
+}
+
+void write_padded(std::vector<uint8_t>& out, size_t at, uint32_t v) {
+    for (int i = 0; i < 5; ++i) {
+        out[at + i] = uint8_t(v & 0x7f) | (i < 4 ? 0x80 : 0);
+        v >>= 7;
+    }
+}
+
+// Where the immediates of the instruction at op end, from p (after the
+// opcode), for the instructions LLVM emits without SIMD; false for another.
+bool skip_immediates(const std::vector<uint8_t>& b, size_t& p, uint8_t op) {
+    uint64_t v = 0;
+    switch (op) {
+    case 0x00: case 0x01: case 0x05: case 0x0b: case 0x0f: case 0x1a: case 0x1b: return true;
+    case 0x02: case 0x03: case 0x04:  // a block type: empty, a value type, or a type index
+        if (p >= b.size()) return false;
+        if (b[p] == 0x40 || (b[p] >= 0x7b && b[p] <= 0x7f)) {
+            ++p;
+            return true;
+        }
+        return read_leb(b, p, v);
+    case 0x0c: case 0x0d: case 0x10: case 0x12:
+    case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26:
+    case 0x41: case 0x42:
+        return read_leb(b, p, v);
+    case 0x0e: {
+        uint64_t n = 0;
+        if (!read_leb(b, p, n)) return false;
+        for (uint64_t i = 0; i <= n; ++i)
+            if (!read_leb(b, p, v)) return false;
+        return true;
+    }
+    case 0x11: case 0x13: return read_leb(b, p, v) && read_leb(b, p, v);
+    case 0x3f: case 0x40: return read_leb(b, p, v);
+    case 0x43: p += 4; return p <= b.size();
+    case 0x44: p += 8; return p <= b.size();
+    case 0xfc: {
+        uint64_t sub = 0;
+        if (!read_leb(b, p, sub)) return false;
+        if (sub <= 7) return true;                                       // trunc_sat
+        if (sub == 8) return read_leb(b, p, v) && read_leb(b, p, v);     // memory.init
+        if (sub == 9) return read_leb(b, p, v);                          // data.drop
+        if (sub == 10) return read_leb(b, p, v) && read_leb(b, p, v);    // memory.copy
+        if (sub == 11) return read_leb(b, p, v);                         // memory.fill
+        return false;
+    }
+    }
+    if (op >= 0x28 && op <= 0x3e) return read_leb(b, p, v) && read_leb(b, p, v);  // a memarg
+    return op >= 0x45 && op <= 0xc4;  // numeric, no immediates
+}
+
+// wasm_piece (cp_build.h); exit_code: an exit's, which may return.
+bool wasm_rewrite(Code& c, bool exit_code) {
+    const std::vector<uint8_t>& b = c.bytes;
+    auto fail = [&](const char* why) {
+        if (c.error.empty()) c.error = why;
+        return false;
+    };
+    // The locals: their types, by index from 2 (after cpu and mem).
+    size_t p = 0;
+    uint64_t groups = 0;
+    if (!read_leb(b, p, groups)) return fail("a malformed body");
+    std::vector<uint32_t> map = {0, 1};  // a local's index in the block's function
+    uint32_t used[4] = {};
+    for (uint64_t g = 0; g < groups; ++g) {
+        uint64_t n = 0;
+        if (!read_leb(b, p, n) || p >= b.size()) return fail("a malformed body");
+        const uint8_t type = b[p++];
+        int k = -1;
+        for (int i = 0; i < 4; ++i)
+            if (kWasmValueTypes[i] == type) k = i;
+        if (k < 0) return fail("a local of a type stencils do not take");
+        for (uint64_t i = 0; i < n; ++i) {
+            uint32_t at = 2 + used[k]++;
+            for (int j = 0; j < k; ++j) at += kWasmLocals[j];
+            map.push_back(at);
+        }
+    }
+    for (int k = 0; k < 4; ++k)
+            if (used[k] > kWasmLocals[k]) {
+                char why[96];
+                snprintf(why, sizeof why, "too many locals (%u i32, %u i64, %u f32, %u f64)", used[0], used[1],
+                         used[2], used[3]);
+                return fail(why);
+            }
+    std::vector<uint8_t> out = {0x02, 0x40};  // the piece's own block
+    std::vector<Reloc> relocs;
+    size_t next_reloc = 0;
+    // The relocation at offset at, if any.
+    auto reloc_at = [&](size_t at) -> const Reloc* {
+        while (next_reloc < c.relocs.size() && c.relocs[next_reloc].offset < at) ++next_reloc;
+        return next_reloc < c.relocs.size() && c.relocs[next_reloc].offset == at ? &c.relocs[next_reloc] : nullptr;
+    };
+    uint32_t depth = 0;
+    size_t prev = 0, prev2 = 0;  // where the last two instructions start in out
+    while (p < b.size()) {
+        const size_t start = p, out_start = out.size();
+        const uint8_t op = b[p++];
+        size_t imm = p;
+        if (!skip_immediates(b, p, op)) return fail("an instruction stencils do not take");
+        if (op == 0x0f && !exit_code) return fail("a return");
+        if (op == 0x20 || op == 0x21 || op == 0x22) {
+            uint64_t index = 0;
+            read_leb(b, imm, index);
+            if (index >= map.size()) return fail("a local out of range");
+            out.push_back(op);
+            wasm_leb(out, map[index]);
+        } else if (op == 0x12 && reloc_at(imm) &&
+                   (reloc_at(imm)->hole == kHoleCont || reloc_at(imm)->hole == kHoleExit)) {
+            // The next packet: out of the piece's block; the block's exit:
+            // out of the block around the pieces, after which the exit's
+            // code follows (cp_wasm.h). Without the arguments (local.get 0,
+            // local.get 1) the tail call took.
+            const bool exit = reloc_at(imm)->hole == kHoleExit;
+            static const uint8_t kArgs[] = {0x20, 0x00, 0x20, 0x01};
+            const bool args = out_start >= 4 && prev2 == out_start - 4 && prev == out_start - 2 &&
+                              std::equal(out.end() - 4, out.end(), kArgs);
+            if (args) out.resize(out_start - 4);
+            // At the piece's end it runs on into the next one.
+            const bool last = !exit && depth == 0 && p + 1 == b.size() && b[p] == 0x0b;
+            if (!last || !args) {
+                out.push_back(0x0c);
+                wasm_leb(out, depth + (exit ? 1 : 0));
+            }
+            prev = prev2 = SIZE_MAX;
+            continue;
+        } else {
+            out.insert(out.end(), b.begin() + long(start), b.begin() + long(p));
+            // Its relocations: the indices the header fixes made, the value
+            // holes and the exit moved.
+            for (size_t at = imm; at < p; ++at) {
+                const Reloc* r = reloc_at(at);
+                if (!r) continue;
+                const size_t to = out_start + (at - start);
+                if (r->kind != kWasmIndex) {
+                    relocs.push_back({uint16_t(to), r->hole, r->kind, r->addend});
+                    continue;
+                }
+                int64_t value = -1;
+                if (r->hole >= kHoleHelper && r->hole < kHoleHelper + kHelperCount) value = r->hole - kHoleHelper;
+                else if (r->hole == kHoleWasmTable) value = 0;
+                else if (r->hole == kHoleWasmType) value = wasm_type_index(r->addend);
+                else if (r->hole == kHoleSelf) value = kWasmBlockFunction;
+                if (value < 0)
+                    return fail(r->hole == kHoleWasmStack ? "the stack pointer"
+                                : r->hole == kHoleExit    ? "the exit, other than in a tail call"
+                                                          : "an index the header has not");
+                write_padded(out, to, uint32_t(value));
+            }
+        }
+        if (op == 0x02 || op == 0x03 || op == 0x04) ++depth;
+        if (op == 0x0b) {
+            if (depth == 0 && p != b.size()) return fail("code after the function's end");
+            if (depth > 0) --depth;
+        }
+        if (out.size() != out_start) {
+            prev2 = prev;
+            prev = out_start;
+        }
+    }
+    if (out.size() > 0xffff) return fail("too large");
+    c.bytes = std::move(out);
+    c.relocs = std::move(relocs);
+    return true;
+}
+
+}  // namespace
+
+bool wasm_piece(Code& c, bool exit) { return c.error.empty() && wasm_rewrite(c, exit); }
 
 size_t tail_jump(const Code& c, Hole hole) {
     if (c.relocs.empty()) return 0;
