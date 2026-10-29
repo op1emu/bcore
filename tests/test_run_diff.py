@@ -125,5 +125,21 @@ class CompareTest(unittest.TestCase):
         self.assertFalse(rd.same(self.outcome(a), self.outcome(b)))
 
 
+class ShardTest(unittest.TestCase):
+    FILES = [Path(f"t{i}.elf") for i in range(7)]
+
+    def test_every_nth(self):
+        self.assertEqual(rd.shard(self.FILES, "2/3"), [Path("t1.elf"), Path("t4.elf")])
+
+    def test_shards_cover_every_test_once(self):
+        shards = [rd.shard(self.FILES, f"{k}/3") for k in (1, 2, 3)]
+        self.assertEqual(sorted(sum(shards, [])), sorted(self.FILES))
+
+    def test_bad_spec(self):
+        for spec in ["0/2", "3/2", "2", "a/b"]:
+            with self.assertRaises(SystemExit):
+                rd.shard(self.FILES, spec)
+
+
 if __name__ == "__main__":
     unittest.main()

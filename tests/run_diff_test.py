@@ -125,6 +125,19 @@ def strip_flags(flags: Sequence[str], names: Sequence[str]) -> List[str]:
     return out
 
 
+def shard(files: Sequence[Path], spec: str) -> List[Path]:
+    """The K-th of N shards ("K/N", K from 1) of the sorted tests: every
+    N-th, as ctest -I K,,N, so that neighbours, often alike in cost, go to
+    different shards."""
+    try:
+        k, n = (int(x) for x in spec.split("/"))
+    except ValueError:
+        sys.exit(f"error: --shard takes K/N, not {spec}")
+    if not 1 <= k <= n:
+        sys.exit(f"error: --shard {spec}: K is from 1 to N")
+    return list(files[k - 1::n])
+
+
 @dataclass
 class Outcome:
     status: str               # "exit" or "timeout"
@@ -269,6 +282,8 @@ def main() -> None:
     parser.add_argument("--ignore-list", metavar="FILE",
                         help="ELF basenames to skip (one per line, # comments), as run_emu_test.py")
     parser.add_argument("--filter", help="glob of the test names to run")
+    parser.add_argument("--shard", metavar="K/N",
+                        help="only the K-th of N shards of the tests (every N-th), for runners that share a suite")
     parser.add_argument("-j", "--jobs", type=int, default=0,
                         help="tests run at once, each runs both sides (default: half the CPUs)")
     parser.add_argument("-t", "--timeout", type=float, default=60.0, help="seconds per run (default: 60)")
@@ -294,6 +309,8 @@ def main() -> None:
             if entry:
                 skip.add(entry)
         files = [f for f in files if f.name not in skip]
+    if args.shard:
+        files = shard(files, args.shard)
     if not files:
         sys.exit("error: no tests to run")
 
