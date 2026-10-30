@@ -113,6 +113,18 @@ inline void wasm_leb(std::vector<uint8_t>& out, uint32_t v) {
     } while (v);
 }
 
+inline void wasm_sleb(std::vector<uint8_t>& out, int32_t v) {
+    for (;;) {
+        const uint8_t b = v & 0x7f;
+        v >>= 7;
+        if ((v == 0 && !(b & 0x40)) || (v == -1 && (b & 0x40))) {
+            out.push_back(b);
+            return;
+        }
+        out.push_back(b | 0x80);
+    }
+}
+
 inline void wasm_name(std::vector<uint8_t>& out, const char* name) {
     const size_t n = strlen(name);
     wasm_leb(out, uint32_t(n));

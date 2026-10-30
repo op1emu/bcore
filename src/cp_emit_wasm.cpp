@@ -4,7 +4,7 @@
 
 #include "cp_translator.h"
 
-#include <cstring>
+#include <vector>
 
 #include "cp_wasm.h"
 
@@ -14,25 +14,19 @@ using namespace bcore_cp;
 
 namespace {
 
-// value + addend in a 5-byte LEB at at: signed (kWasmSleb, an i32.const)
-// or unsigned (kWasmLeb, an offset), as 32 bits; false if it does not fit.
-bool patch_leb(uint8_t* at, const Reloc& r, uint64_t value) {
+// value + addend, in a LEB of as few bytes as it takes at out's end: signed
+// (kWasmSleb, an i32.const) or unsigned (kWasmLeb, an offset), as 32 bits;
+// false if it does not fit. The stencil's own is 5 bytes, whatever its value;
+// a piece's branches go by depth, so a shorter one moves nothing.
+bool put_leb(std::vector<uint8_t>& out, const Reloc& r, uint64_t value) {
     const int64_t v = int64_t(value) + r.addend;
     if (r.kind == kWasmSleb) {
         if (v < INT32_MIN || v > int64_t(UINT32_MAX)) return false;
-        int32_t s = int32_t(uint32_t(v));
-        for (int i = 0; i < 5; ++i) {
-            at[i] = uint8_t(s & 0x7f) | (i < 4 ? 0x80 : 0);
-            s >>= 7;
-        }
+        wasm_sleb(out, int32_t(uint32_t(v)));
         return true;
     }
     if (v < 0 || v > int64_t(UINT32_MAX)) return false;
-    uint32_t u = uint32_t(v);
-    for (int i = 0; i < 5; ++i) {
-        at[i] = uint8_t(u & 0x7f) | (i < 4 ? 0x80 : 0);
-        u >>= 7;
-    }
+    wasm_leb(out, uint32_t(v));
     return true;
 }
 
@@ -46,15 +40,17 @@ CpTranslator::Block CpTranslator::emit_wasm(uint32_t pc, uint32_t counter, const
     // A piece's code, its value holes filled in, at body_'s end: false if a
     // value does not fit.
     auto place = [&](const Piece& p) {
-        const size_t at = body_.size();
-        body_.insert(body_.end(), p.code, p.code + p.stencil->size);
+        size_t from = 0;  // the code up to here is placed
         for (uint32_t i = 0; i < p.stencil->reloc_count; ++i) {
             const Reloc& r = p.relocs[i];
             uint64_t value = 0;
-            if (!is_value_hole(r.hole) || !value_of(p, r, p.packet, last_len, counter, value) ||
-                !patch_leb(body_.data() + at + r.offset, r, value))
+            if (r.offset < from || !is_value_hole(r.hole) || !value_of(p, r, p.packet, last_len, counter, value))
                 return false;
+            body_.insert(body_.end(), p.code + from, p.code + r.offset);
+            if (!put_leb(body_, r, value)) return false;
+            from = r.offset + 5u;
         }
+        body_.insert(body_.end(), p.code + from, p.code + p.stencil->size);
         return true;
     };
     // The function: the locals, the pieces inside a block, then the exit:
