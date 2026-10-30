@@ -8,7 +8,8 @@
 // every 16-bit and 32-bit instruction, and a parallel packet as its pieces
 // (compose_parallel), but an illegal parallel packet (a slot the decoder
 // refuses, SEARCH in slot 0). For any other it places nothing and Core
-// compiles the block with LLVM. Its code is, in order: the prologue (the
+// compiles the block with LLVM. Its code is, in order: the entry guard
+// where its tails need one (Config::hint), the prologue (the
 // tier counter, and CYCLES with host cycles), each packet's stencils (one,
 // or a parallel packet's pieces), for a block the packet cap cuts the
 // fall-through stencil, and, for a block that chains, its own exit
@@ -79,8 +80,15 @@ public:
         // The CPU state the block is translated in, as BBTranslator's hint
         // (Core::set_copy_patch_hints), or none: a parallel packet at one of
         // its loop bottoms ends in the tail with the step inline
-        // (kParallelTailBottom), which holds for any loop registers.
+        // (kParallelTailBottom), which holds for any loop registers. Not
+        // careful, and with a Memory whose callbacks keep the registers,
+        // while no packet before has moved a loop (kLoopsMoved), a parallel
+        // packet the hint puts at no bottom ends in the tail that compares
+        // nothing, one at a bottom it pins in the tail that steps to the
+        // hint's top, and the block starts with the entry guard those need
+        // (kGuards): as a block the LLVM tier 0 lifts with the hint.
         const CpuState* hint = nullptr;
+        bool careful = false;  // after the block's guard failed (Core::run)
     };
     struct Block {
         BbFunc fn = nullptr;       // null: no block (why says why)
@@ -159,7 +167,7 @@ private:
     // must not see).
     bool compose_parallel(uint32_t pc, uint32_t insn, int selected, const bcore_cp::Stencil& body, Memory& code,
                           const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why,
-                          const CpuState* hint);
+                          const Config& config, bool& steady);
     Arena* arena_for(size_t size);
     const Support* support_for(Arena& arena);
     static size_t support_size();
@@ -183,6 +191,11 @@ private:
     uint32_t threshold_ = 0;  // the last block's tier counter's (Block::threshold)
     uint64_t last_len_ = 0;   // the length of the packet the fall-through stencil follows
     int exit_piece_ = -1;     // the block's own exit (Config::self_loop): its piece, or -1
+    // The last block's entry guard (Config::hint): whether it has one, the
+    // loops its tails pin, and its holes' values.
+    bool guarded_ = false;
+    unsigned pinned_ = 0;
+    uint32_t hint_lb_[2] = {}, hint_lt_[2] = {}, span_ = 0;
     JitEngine& jit_;
     std::function<void(const char*, const void*, size_t)> listener_;
     std::vector<std::unique_ptr<Arena>> arenas_;

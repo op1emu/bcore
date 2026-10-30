@@ -193,6 +193,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         // the table would hold it: a PC the filter takes.
         config.self_loop = chaining_ && !chain_dry_ && (!chain_filter_ || chain_filter_(pc));
         config.hint = copy_patch_hints_ ? cpu_ : nullptr;
+        config.careful = careful;
         const CpTranslator::Block block = cp_->translate(pc, *tier.code, tier.counter, config);
         if (block.fn) {
             jit_->addCode(pc, block.fn, block.fallthrough_pc);

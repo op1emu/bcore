@@ -122,6 +122,8 @@ std::string ir_text(llvm::Function* fn);
 // ---- Holes ----
 
 extern const char* const kHoleNames[kHoleCont];
+// A value hole's global's name (kHoleNames, then the loop hint's holes).
+const char* hole_name(unsigned hole);
 extern const char* const kContName;
 extern const char* const kExitName;
 extern const char* const kSelfName;

@@ -390,7 +390,7 @@ public:
         }
         item.bytes = uint8_t(lifted.bytes);
         item.flags = (lifted.terminated ? kTerminates : 0) | (lifted.cycles ? kCycles : 0) |
-                     (item.len == 2 && item.insn == 0x0020 ? kIdle : 0);
+                     (item.len == 2 && item.insn == 0x0020 ? kIdle : 0) | (lifted.loops_moved ? kLoopsMoved : 0);
     }
 
     // A parallel packet's slot 0 alone (a 32-bit key with the multi-issue
@@ -461,7 +461,8 @@ public:
             return;
         }
         item.bytes = 4;
-        item.flags = kBody | (lifted.dis_algn ? kSetsDisAlgn : 0) | (lifted.cycles ? kCycles : 0);
+        item.flags = kBody | (lifted.dis_algn ? kSetsDisAlgn : 0) | (lifted.cycles ? kCycles : 0) |
+                     (lifted.loops_moved ? kLoopsMoved : 0);
     }
 
     // A 16-bit word in slot 1 or 2, in each variant: legal there, the
@@ -490,7 +491,8 @@ public:
             if (!item.error.empty()) return;
             item.has[v] = true;
             item.writes[v] = a.writes;
-            item.slot_flags[v] = (a.checks_cec ? kSlotStore : 0) | (a.cycles ? kCycles : 0);
+            item.slot_flags[v] =
+                (a.checks_cec ? kSlotStore : 0) | (a.cycles ? kCycles : 0) | (a.loops_moved ? kLoopsMoved : 0);
             for (int u = 0; u < v; ++u)
                 if (item.has[u] && texts[u] == texts[v] && item.same_as[u] == u) {
                     item.same_as[v] = u;
@@ -1196,10 +1198,11 @@ int main(int argc, char** argv) {
     // The prologues and exits.
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
-    uint32_t fallthrough = 0, parallel_tail[2] = {}, parallel_tail_bottom[2] = {};
+    uint32_t fallthrough = 0, parallel_tail[2] = {}, parallel_tail_bottom[2] = {}, parallel_tail_absent[2] = {};
+    uint32_t parallel_tail_pinned[3][2] = {}, guards[4] = {};
     // Added to the blob after everything else, so that what was there before
-    // them keeps its place.
-    std::vector<std::pair<int, Code>> late;
+    // them keeps its place: where each one's index goes, and its code.
+    std::vector<std::pair<uint32_t*, Code>> late;
     std::string special_error;
     {
         Worker worker;
@@ -1246,20 +1249,45 @@ int main(int argc, char** argv) {
             bcore_abi::tail_call_block(b, exit, bcore_abi::block_cpu(fn), bcore_abi::block_mem(fn));
             b.CreateRetVoid();
         }
-        // A parallel packet's tail, without and with the CEC check, and the
-        // same at a loop bottom: the same IR at another PC.
-        const char* tail_names[] = {"ptail", "ptail_cec", "ptail_bottom", "ptail_bottom_cec"};
-        for (int t = 0; t < 4; ++t) {
+        // A parallel packet's tail, without and with the CEC check, in each
+        // role (BBTranslator::TailRole): the same IR at another PC.
+        using Role = BBTranslator::TailRole;
+        const Role roles[] = {Role::kCareful, Role::kBottom, Role::kAbsent, Role::kPinned0, Role::kPinned1,
+                              Role::kPinned01};
+        const char* role_names[] = {"ptail", "ptail_bottom", "ptail_absent", "ptail_pin0", "ptail_pin1",
+                                    "ptail_pin01"};
+        std::string tail_names[12];
+        auto tail_holes = [&](Module& m) {
+            auto holes = packet_holes(m);
+            holes.lt[0] = value_hole(m, Hole(kHoleLt0), 0, 1ull << 32, i32);
+            holes.lt[1] = value_hole(m, Hole(kHoleLt1), 0, 1ull << 32, i32);
+            return holes;
+        };
+        for (int t = 0; t < 12; ++t) {
+            const Role role = roles[t / 2];
+            tail_names[t] = std::string(role_names[t / 2]) + (t & 1 ? "_cec" : "");
             Module scratch("tail", ctx);
             std::string texts[2];
             for (int k = 0; k < 2; ++k) {
-                auto l = worker.translator().translate_parallel_tail(scratch, "t", k ? kPcB : kPcA,
-                                                                     packet_holes(scratch), t & 1, t >= 2);
+                auto l = worker.translator().translate_parallel_tail(scratch, "t", k ? kPcB : kPcA, tail_holes(scratch),
+                                                                     t & 1, role);
                 texts[k] = ir_text(l.fn);
                 l.fn->eraseFromParent();
             }
-            if (texts[0] != texts[1]) special_error += std::string(tail_names[t]) + ": IR depends on the PC\n";
-            worker.translator().translate_parallel_tail(mod, tail_names[t], kPcA, packet_holes(mod), t & 1, t >= 2);
+            if (texts[0] != texts[1]) special_error += tail_names[t] + ": IR depends on the PC\n";
+            worker.translator().translate_parallel_tail(mod, tail_names[t].c_str(), kPcA, tail_holes(mod), t & 1,
+                                                        role);
+        }
+        // The entry guards, by the loops pinned.
+        {
+            auto* span = value_hole(mod, Hole(kHoleSpan), 0, 1ull << 32, i32);
+            Constant* lb[2] = {value_hole(mod, Hole(kHoleLb0), 0, 1ull << 32, i32),
+                               value_hole(mod, Hole(kHoleLb1), 0, 1ull << 32, i32)};
+            Constant* lt[2] = {value_hole(mod, Hole(kHoleLt0), 0, 1ull << 32, i32),
+                               value_hole(mod, Hole(kHoleLt1), 0, 1ull << 32, i32)};
+            for (unsigned m = 0; m < 4; ++m)
+                worker.translator().emit_stencil_guard(mod, ("guard" + std::to_string(m)).c_str(), m, block_pc, span,
+                                                       lb, lt, cont);
         }
         // The exits an arena shares are copied whole (CpTranslator::arena_for).
         for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
@@ -1279,15 +1307,23 @@ int main(int argc, char** argv) {
         for (int e = 0; e < 5; ++e) exits[e] = add(names[e], true);
         for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e], true);
         fallthrough = add("fallthrough");
-        for (int t = 0; t < 2; ++t) parallel_tail[t] = add(tail_names[t]);
-        for (int t = 2; t < 4; ++t) {
-            auto it = code.find(tail_names[t]);
-            if (it != code.end()) as_piece(it->second);
+        for (int t = 0; t < 2; ++t) parallel_tail[t] = add(tail_names[t].c_str());
+        // The rest after everything else (late), a guard as an exit is (it
+        // may return).
+        auto add_late = [&](const std::string& name, uint32_t* at, bool exit = false) {
+            auto it = code.find(name);
+            if (it != code.end()) exit ? as_exit(it->second) : as_piece(it->second);
             if (it == code.end() || !it->second.error.empty())
-                special_error += std::string(tail_names[t]) + ": " + (it == code.end() ? "no code" : it->second.error) + "\n";
+                special_error += name + ": " + (it == code.end() ? "no code" : it->second.error) + "\n";
             else
-                late.emplace_back(t - 2, it->second);
+                late.emplace_back(at, it->second);
+        };
+        for (int t = 0; t < 2; ++t) {
+            add_late(tail_names[2 + t], &parallel_tail_bottom[t]);
+            add_late(tail_names[4 + t], &parallel_tail_absent[t]);
+            for (int p = 0; p < 3; ++p) add_late(tail_names[6 + 2 * p + t], &parallel_tail_pinned[p][t]);
         }
+        for (unsigned m = 0; m < 4; ++m) add_late("guard" + std::to_string(m), &guards[m], true);
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -1388,7 +1424,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    for (auto& [t, c] : late) parallel_tail_bottom[t] = blob.add(c, 0, 0);
+    for (auto& [at, c] : late) *at = blob.add(c, 0, 0);
 
     // cp_stencils.bin
     const std::string bin = out_dir + "/cp_stencils.bin";
@@ -1473,6 +1509,13 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kParallelTail[2] = {%u, %u};  // [CEC check]\n", parallel_tail[0], parallel_tail[1]);
     fprintf(f, "const uint32_t kParallelTailBottom[2] = {%u, %u};  // [CEC check]\n", parallel_tail_bottom[0],
             parallel_tail_bottom[1]);
+    fprintf(f, "const uint32_t kParallelTailAbsent[2] = {%u, %u};  // [CEC check]\n", parallel_tail_absent[0],
+            parallel_tail_absent[1]);
+    fprintf(f, "const uint32_t kParallelTailPinned[3][2] = {{%u, %u}, {%u, %u}, {%u, %u}};  // [pinned - 1][CEC]\n",
+            parallel_tail_pinned[0][0], parallel_tail_pinned[0][1], parallel_tail_pinned[1][0],
+            parallel_tail_pinned[1][1], parallel_tail_pinned[2][0], parallel_tail_pinned[2][1]);
+    fprintf(f, "const uint32_t kGuards[4] = {%u, %u, %u, %u};  // by the loops pinned\n", guards[0], guards[1],
+            guards[2], guards[3]);
     fprintf(f, "}  // namespace bcore::bcore_cp\n");
     fclose(f);
 

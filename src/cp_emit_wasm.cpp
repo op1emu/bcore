@@ -51,7 +51,7 @@ CpTranslator::Block CpTranslator::emit_wasm(uint32_t pc, uint32_t counter, const
         for (uint32_t i = 0; i < p.stencil->reloc_count; ++i) {
             const Reloc& r = p.relocs[i];
             uint64_t value = 0;
-            if (r.hole >= kHoleCont || !value_of(p, r, p.packet, last_len, counter, value) ||
+            if (!is_value_hole(r.hole) || !value_of(p, r, p.packet, last_len, counter, value) ||
                 !patch_leb(body_.data() + at + r.offset, r, value))
                 return false;
         }

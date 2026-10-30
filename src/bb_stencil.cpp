@@ -115,6 +115,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil(Module& mod, const cha
     for (unsigned i = 0; i < LiftVisitor::kFieldHoles; ++i) out.field_values[i] = visitor.field_values()[i];
     out.fields_used = visitor.fields_used();
     out.reg_violation = visitor.reg_hole_violation();
+    out.loops_moved = visitor.loops_moved();
     return out;
 }
 
@@ -182,6 +183,7 @@ BBTranslator::StencilLift BBTranslator::translate_stencil_body(Module& mod, cons
     out.reg_violation = visitor.reg_hole_violation();
     out.reads_after_write = visitor.reads_after_write();
     out.dis_algn = visitor.dis_algn();
+    out.loops_moved = visitor.loops_moved();
     return out;
 }
 
@@ -219,6 +221,11 @@ BBTranslator::StencilLift BBTranslator::translate_slot_stencil(Module& mod, cons
     out.fn = fn;
     out.bytes = 8;
     out.cycles = visitor.accesses_cycles();
+    out.loops_moved = visitor.loops_moved();
+    for (const auto& w : out.writes)
+        for (size_t f : {offsetof(CpuState, lb[0]), offsetof(CpuState, lb[1]), offsetof(CpuState, lt[0]),
+                         offsetof(CpuState, lt[1])})
+            if (w.offset == f) out.loops_moved = true;
     return out;
 }
 
@@ -248,7 +255,7 @@ Function* BBTranslator::emit_slot_commit(Module& mod, const char* name, int slot
 
 BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, const char* name, uint32_t pc,
                                                                 const StencilHoles& holes, bool check_cec,
-                                                                bool bottom) {
+                                                                TailRole role) {
     StencilLift out;
     auto& ctx = mod.getContext();
     declare_externs(mod);
@@ -257,12 +264,21 @@ BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, con
     auto* entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> builder(entry);
     LiftVisitor visitor(builder, cpu, bcore_abi::block_mem(fn), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
-    // A hint whose loop 0 ends here (relative to pc: the same IR at another
-    // PC), for the inline step; careful still, so the compares stay.
+    // The hint its role is (relative to pc: the same IR at another PC): a
+    // bottom of loop 0, careful still, so the compares stay; no bottom here
+    // (0 is no tail's PC), or the pinned loops ending here and running.
     CpuState hint{};
-    hint.lb[0] = pc;
-    if (bottom) visitor.set_hint(&hint);
-    visitor.set_careful(true);
+    const unsigned pinned = role == TailRole::kPinned0 ? 1 : role == TailRole::kPinned1 ? 2
+                          : role == TailRole::kPinned01 ? 3 : 0;
+    if (role == TailRole::kBottom) hint.lb[0] = pc;
+    for (int i = 0; i < 2; ++i)
+        if (pinned >> i & 1) {
+            hint.lb[i] = pc;
+            hint.lc[i] = 2;
+        }
+    if (role != TailRole::kCareful) visitor.set_hint(&hint);
+    visitor.set_careful(role == TailRole::kCareful || role == TailRole::kBottom);
+    if (pinned) visitor.set_stencil_loop_tops(holes.lt[0], holes.lt[1]);
     visitor.set_idle_waits(idle_waits_);
     visitor.set_stencil(holes.pc, pc, holes.fields);
     auto* insn_entry = BasicBlock::Create(ctx, "insn_entry", fn);
@@ -295,6 +311,40 @@ Function* BBTranslator::emit_stencil_prologue(Module& mod, const char* name, Con
     tail_call(first, cont);
     if (host_cycles) emit_host_cycles(b, cpu, first);
     emit_tier_counter(b, cpu, first, counter, count_offset, threshold);
+    return fn;
+}
+
+Function* BBTranslator::emit_stencil_guard(Module& mod, const char* name, unsigned pinned, Constant* block_pc,
+                                           Constant* span, Constant* const lb[2], Constant* const lt[2],
+                                           Function* cont) {
+    auto& ctx = mod.getContext();
+    auto* fn = stencil_function(mod, name);
+    Value* cpu = bcore_abi::block_cpu(fn);
+    auto* entry = BasicBlock::Create(ctx, "entry", fn);
+    auto* on = BasicBlock::Create(ctx, "on", fn);
+    auto* miss = BasicBlock::Create(ctx, "lb_guard_miss", fn);
+    IRBuilder<> b(entry);
+    auto* i32 = b.getInt32Ty();
+    Value* ok = b.getTrue();
+    for (int i = 0; i < 2; ++i) {
+        auto* l = b.CreateLoad(i32, field_ptr(b, cpu, offsetof(CpuState, lb[0]) + 4 * i), "lb");
+        auto* hinted = b.CreateICmpEQ(l, lb[i]);
+        if (pinned >> i & 1) {
+            auto* t = b.CreateLoad(i32, field_ptr(b, cpu, offsetof(CpuState, lt[0]) + 4 * i), "lt");
+            ok = b.CreateAnd(ok, b.CreateAnd(hinted, b.CreateICmpEQ(t, lt[i])));
+            continue;
+        }
+        auto* outside = b.CreateICmpUGT(b.CreateSub(l, block_pc), span);
+        ok = b.CreateAnd(ok, b.CreateOr(hinted, outside));
+    }
+    b.CreateCondBr(ok, on, miss, weights_usually(ctx));
+    b.SetInsertPoint(on);
+    b.CreateUnreachable();
+    tail_call(on, cont);
+    b.SetInsertPoint(miss);
+    b.CreateStore(block_pc, field_ptr(b, cpu, offsetof(CpuState, pc)));
+    b.CreateStore(b.getInt8(1), field_ptr(b, cpu, offsetof(CpuState, lb_guard_miss)));
+    b.CreateRetVoid();
     return fn;
 }
 
