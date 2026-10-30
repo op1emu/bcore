@@ -164,7 +164,10 @@ public:
     //     CpuState::slot_scratch (LiftVisitor::begin_slot); its exits as the
     //     packet's;
     //   - a slot's commit: its writes from the scratch to the registers;
-    //   - the packet's tail at pc: its epilog with the CEC check or not.
+    //   - the packet's tail at pc: its epilog with the CEC check or not;
+    //     with bottom, as a block whose hint has a loop end at pc lifts it
+    //     (LiftVisitor::emit_epilog_clear): the step inline, its compares
+    //     still made, so it holds whatever the loop registers are.
     // A slot and the tail start with did_jump known clear, as a packet does
     // (a slot leaves it so, StencilLift::did_jump_clear: the build checks).
     StencilLift translate_stencil_body(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
@@ -174,7 +177,7 @@ public:
     static llvm::Function* emit_slot_commit(llvm::Module& mod, const char* name, int slot,
                                             const std::vector<LiftVisitor::SlotWrite>& writes, llvm::Function* cont);
     StencilLift translate_parallel_tail(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
-                                        bool check_cec);
+                                        bool check_cec, bool bottom = false);
     // A copy-and-patch block's start: its tier counter (emit_tier_counter,
     // with holes for the counter, its count's offset and the threshold),
     // CYCLES with host_cycles (emit_host_cycles), then a musttail call of cont.

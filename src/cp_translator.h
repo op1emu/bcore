@@ -25,9 +25,11 @@
 // PC-relative).
 //
 // What a block does is what the LLVM tier 0's block does, packet for
-// packet: each stencil is the packet a careful block with no hint lifts
+// packet: each stencil is the packet a careful block lifts
 // (BBTranslator::translate_stencil), so it compares the loop bottoms at
-// every packet and needs no entry guard.
+// every packet and needs no entry guard. With no hint, but for a parallel
+// packet's tail at a loop bottom of the block's hint (Config::hint), which
+// is the tail such a block lifts there: the step inline.
 //
 // Stencil code has no unwind information. The helpers that may reach the
 // host's code are called through wrappers that catch whatever the host
@@ -74,6 +76,11 @@ public:
         uint32_t threshold = 0;    // the tier counter's
         uint32_t size_ref = 0;     // and tier_threshold's (tier_table.h), by the block's packets
         uint32_t max_packets = 256;
+        // The CPU state the block is translated in, as BBTranslator's hint
+        // (Core::set_copy_patch_hints), or none: a parallel packet at one of
+        // its loop bottoms ends in the tail with the step inline
+        // (kParallelTailBottom), which holds for any loop registers.
+        const CpuState* hint = nullptr;
     };
     struct Block {
         BbFunc fn = nullptr;       // null: no block (why says why)
@@ -145,12 +152,14 @@ private:
     bool scan(uint32_t pc, Memory& code, const Config& config, Block& out);
     // A parallel packet at pc whose slot 0 (insn) has a body stencil, as
     // pieces: slot 1, slot 2, the body, the slots' commits, the packet's
-    // tail (BBTranslator::translate_stencil_body). False with why where a
+    // tail (BBTranslator::translate_stencil_body), at a loop bottom of the
+    // hint the tail with the step inline. False with why where a
     // slot has no stencil, or the packet's memory callbacks may change
     // registers (the body runs after the slots' accesses, which its reads
     // must not see).
     bool compose_parallel(uint32_t pc, uint32_t insn, int selected, const bcore_cp::Stencil& body, Memory& code,
-                          const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why);
+                          const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why,
+                          const CpuState* hint);
     Arena* arena_for(size_t size);
     const Support* support_for(Arena& arena);
     static size_t support_size();

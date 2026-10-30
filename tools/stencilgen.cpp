@@ -1196,7 +1196,10 @@ int main(int argc, char** argv) {
     // The prologues and exits.
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
-    uint32_t fallthrough = 0, parallel_tail[2] = {};
+    uint32_t fallthrough = 0, parallel_tail[2] = {}, parallel_tail_bottom[2] = {};
+    // Added to the blob after everything else, so that what was there before
+    // them keeps its place.
+    std::vector<std::pair<int, Code>> late;
     std::string special_error;
     {
         Worker worker;
@@ -1243,20 +1246,20 @@ int main(int argc, char** argv) {
             bcore_abi::tail_call_block(b, exit, bcore_abi::block_cpu(fn), bcore_abi::block_mem(fn));
             b.CreateRetVoid();
         }
-        // A parallel packet's tail, without and with the CEC check: the same
-        // IR at another PC.
-        const char* tail_names[] = {"ptail", "ptail_cec"};
-        for (int t = 0; t < 2; ++t) {
+        // A parallel packet's tail, without and with the CEC check, and the
+        // same at a loop bottom: the same IR at another PC.
+        const char* tail_names[] = {"ptail", "ptail_cec", "ptail_bottom", "ptail_bottom_cec"};
+        for (int t = 0; t < 4; ++t) {
             Module scratch("tail", ctx);
             std::string texts[2];
             for (int k = 0; k < 2; ++k) {
                 auto l = worker.translator().translate_parallel_tail(scratch, "t", k ? kPcB : kPcA,
-                                                                     packet_holes(scratch), t == 1);
+                                                                     packet_holes(scratch), t & 1, t >= 2);
                 texts[k] = ir_text(l.fn);
                 l.fn->eraseFromParent();
             }
             if (texts[0] != texts[1]) special_error += std::string(tail_names[t]) + ": IR depends on the PC\n";
-            worker.translator().translate_parallel_tail(mod, tail_names[t], kPcA, packet_holes(mod), t == 1);
+            worker.translator().translate_parallel_tail(mod, tail_names[t], kPcA, packet_holes(mod), t & 1, t >= 2);
         }
         // The exits an arena shares are copied whole (CpTranslator::arena_for).
         for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
@@ -1277,6 +1280,14 @@ int main(int argc, char** argv) {
         for (int e = 0; e < 2; ++e) self_exits[e] = add(self_names[e], true);
         fallthrough = add("fallthrough");
         for (int t = 0; t < 2; ++t) parallel_tail[t] = add(tail_names[t]);
+        for (int t = 2; t < 4; ++t) {
+            auto it = code.find(tail_names[t]);
+            if (it != code.end()) as_piece(it->second);
+            if (it == code.end() || !it->second.error.empty())
+                special_error += std::string(tail_names[t]) + ": " + (it == code.end() ? "no code" : it->second.error) + "\n";
+            else
+                late.emplace_back(t - 2, it->second);
+        }
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -1377,6 +1388,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    for (auto& [t, c] : late) parallel_tail_bottom[t] = blob.add(c, 0, 0);
+
     // cp_stencils.bin
     const std::string bin = out_dir + "/cp_stencils.bin";
     if (FILE* f = fopen(bin.c_str(), "wb")) {
@@ -1458,6 +1471,8 @@ int main(int argc, char** argv) {
     fprintf(f, "const uint32_t kFallthrough = %u;\n", fallthrough);
     fprintf(f, "const uint32_t kUndef32 = %u;\n", undef32);
     fprintf(f, "const uint32_t kParallelTail[2] = {%u, %u};  // [CEC check]\n", parallel_tail[0], parallel_tail[1]);
+    fprintf(f, "const uint32_t kParallelTailBottom[2] = {%u, %u};  // [CEC check]\n", parallel_tail_bottom[0],
+            parallel_tail_bottom[1]);
     fprintf(f, "}  // namespace bcore::bcore_cp\n");
     fclose(f);
 

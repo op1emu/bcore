@@ -67,13 +67,14 @@ MATRICES: Dict[str, List[Tuple[str, str]]] = {
         ("t1", "-O 1 --page-table --chain --tier-threshold 1 --copy-patch"),
         ("t2-bg1", "-O 1 --page-table --chain --tier-threshold 2 --tier-background 1 --copy-patch"),
         ("t2-ref2", "-O 1 --page-table --chain --tier-threshold 2 --tier-size-ref 2 --copy-patch"),
+        ("tier0-no-hints", "-O 1 --page-table --chain --tier-threshold 1000000000 --copy-patch --no-cp-hints"),
     ],
 }
 # Flags the base side drops in each matrix (with their values).
 BASE_STRIP = {
     "standard": [],
     "tiers": ["--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "--copy-patch"],
-    "copy-patch": ["--copy-patch"],
+    "copy-patch": ["--copy-patch", "--no-cp-hints"],
 }
 VALUED = {"--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "-O", "--opt-level", "--max-steps", "--post-pipeline"}
 
