@@ -142,7 +142,9 @@ static void test_idle(int opt) {
     // A hardware loop that ends at the IDLE: its next PC is the loop's, so
     // the IDLE is a NOP and the loop runs its iterations. Known when the
     // block is compiled, or found by the entry guard of a block compiled to
-    // wait there, which misses and runs the block compiled again careful.
+    // wait there, which misses and runs the block compiled again careful;
+    // a block of stencils (kIdleWait) compares the loop bottoms as it runs,
+    // with no guard.
     for (bool compiledToWait : {false, true}) {
         Chained c(opt);
         c.core.set_idle_waits(true);
@@ -160,7 +162,9 @@ static void test_idle(int opt) {
         }
         require(c.cpu.pc == 0x800 && c.cpu.dpregs[0] == 3 && c.cpu.lc[0] == 0, "three iterations, then RTS");
 #if BCORE_ENABLE_PROFILE
-        if (compiledToWait) require(c.core.stats().lb_guard_misses > 0, "the waiting block's guard missed");
+        if (compiledToWait && opt != kCopyPatch)
+            require(c.core.stats().lb_guard_misses > 0, "the waiting block's guard missed");
+        if (opt == kCopyPatch) require(c.core.stats().copy_patch_fallbacks == 0, "a block with IDLE not of stencils");
 #endif
     }
 }

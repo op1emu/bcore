@@ -68,7 +68,7 @@ public:
         bool dry = false;
         bool count_chained = true;
         bool host_cycles = false;  // BBTranslator::set_host_cycles
-        bool idle_waits = false;   // a block with IDLE then compiles with LLVM
+        bool idle_waits = false;   // IDLE ends the block (kIdleWait), Core::set_idle_waits
         // The block ends in an exit of its own (kSelfExits) that runs the
         // block again without the chain table when it goes on to its own PC:
         // only where it chains and not dry, and where the chain filter

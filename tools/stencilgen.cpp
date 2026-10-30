@@ -1200,9 +1200,17 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
     uint32_t fallthrough = 0, parallel_tail[2] = {}, parallel_tail_bottom[2] = {}, parallel_tail_absent[2] = {};
     uint32_t parallel_tail_pinned[3][2] = {}, guards[4] = {}, self_exits_loop[2] = {}, prologue_uncounted[2] = {};
+    uint32_t idle_wait = 0;
     // Added to the blob after everything else, so that what was there before
-    // them keeps its place: where each one's index goes, and its code.
-    std::vector<std::pair<uint32_t*, Code>> late;
+    // them keeps its place: where each one's index goes, its code, and a
+    // packet's flags and length.
+    struct Late {
+        uint32_t* at;
+        Code code;
+        uint16_t flags = 0;
+        uint8_t bytes = 0;
+    };
+    std::vector<Late> late;
     std::string special_error;
     {
         Worker worker;
@@ -1213,6 +1221,16 @@ int main(int argc, char** argv) {
         auto* counter = value_hole(mod, kHoleCounter, 0, TierTable::kCounters, i32);
         auto* offset = value_hole(mod, kHoleCountOffset, 0, 1ull << 31, Type::getInt64Ty(ctx));
         auto* threshold = value_hole(mod, kHoleThreshold, 0, 1ull << 32, i32);
+        // IDLE where the host lets guest time pass (Core::set_idle_waits):
+        // the block ends at it but where a loop ends there, which the loop
+        // registers tell as it runs (kIdleWait).
+        {
+            Item idle;
+            idle.insn = 0x0020;
+            worker.translator().set_idle_waits(true);
+            worker.lift(mod, idle, kPcA, "idle_wait");
+            worker.translator().set_idle_waits(false);
+        }
         for (int h = 0; h < 2; ++h) {
             worker.translator().emit_stencil_prologue(mod, h ? "prologue_cycles" : "prologue", counter, offset,
                                                       threshold, h, cont);
@@ -1318,13 +1336,13 @@ int main(int argc, char** argv) {
         for (int t = 0; t < 2; ++t) parallel_tail[t] = add(tail_names[t].c_str());
         // The rest after everything else (late), a guard as an exit is (it
         // may return).
-        auto add_late = [&](const std::string& name, uint32_t* at, bool exit = false) {
+        auto add_late = [&](const std::string& name, uint32_t* at, bool exit = false, uint8_t bytes = 0) {
             auto it = code.find(name);
             if (it != code.end()) exit ? as_exit(it->second) : as_piece(it->second);
             if (it == code.end() || !it->second.error.empty())
                 special_error += name + ": " + (it == code.end() ? "no code" : it->second.error) + "\n";
             else
-                late.emplace_back(at, it->second);
+                late.push_back({at, it->second, 0, bytes});
         };
         for (int t = 0; t < 2; ++t) {
             add_late(tail_names[2 + t], &parallel_tail_bottom[t]);
@@ -1336,7 +1354,7 @@ int main(int argc, char** argv) {
             if (!Triple(g_triple).isWasm()) {
                 self_exits_loop[e] = self_exits[e];
             } else if (wasm_piece(self_code[e], true, true)) {
-                late.emplace_back(&self_exits_loop[e], self_code[e]);
+                late.push_back({&self_exits_loop[e], self_code[e]});
             } else {
                 special_error += std::string(self_names[e]) + " (loop): " + self_code[e].error + "\n";
             }
@@ -1344,6 +1362,7 @@ int main(int argc, char** argv) {
         // Last, so that those above keep their indices.
         add_late("prologue_uncounted", &prologue_uncounted[0]);
         add_late("prologue_uncounted_cycles", &prologue_uncounted[1]);
+        add_late("idle_wait", &idle_wait, false, 2);
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -1444,7 +1463,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    for (auto& [at, c] : late) *at = blob.add(c, 0, 0);
+    for (Late& l : late) *l.at = blob.add(l.code, l.flags, l.bytes);
 
     // cp_stencils.bin
     const std::string bin = out_dir + "/cp_stencils.bin";
@@ -1540,6 +1559,7 @@ int main(int argc, char** argv) {
             self_exits_loop[1]);
     fprintf(f, "const uint32_t kPrologueUncounted[2] = {%u, %u};  // host cycles off, on\n",
             prologue_uncounted[0], prologue_uncounted[1]);
+    fprintf(f, "const uint32_t kIdleWait = %u;\n", idle_wait);
     fprintf(f, "}  // namespace bcore::bcore_cp\n");
     fclose(f);
 
