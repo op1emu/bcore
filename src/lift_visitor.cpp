@@ -4,6 +4,7 @@
 #include "llvm_compat.h"
 #include "guest_memory.h"
 #include "helper_abi.h"
+#include "block_abi.h"
 
 #include <cstdio>
 #include <cstddef>
@@ -65,7 +66,7 @@ LiftVisitor::LiftVisitor(IRBuilder<>& builder, Value* cpu_ptr, Value* mem_ptr,
                          Module* module, Memory* mem, bool unlimited,
                          bool fastmem, uint64_t fast_base, uint32_t rawmem_limit)
     : builder_(builder), cpu_ptr_(cpu_ptr), mem_ptr_(mem_ptr), module_(module),
-      mem_(mem), unlimited_mode_(unlimited), fastmem_(fastmem), fast_base_value_(fast_base),
+      wasm_(bcore_abi::is_wasm(*module)), mem_(mem), unlimited_mode_(unlimited), fastmem_(fastmem), fast_base_value_(fast_base),
       rawmem_limit_(rawmem_limit),
       page_table_(!fastmem && rawmem_limit == 0 && mem && mem->page_table() != nullptr),
       mem_keeps_regs_(mem && mem->callbacks_preserve_registers()) {
@@ -107,8 +108,7 @@ Value* LiftVisitor::cpu_field_ptr(size_t offset, Type* ty, const Twine& name) {
         it->second = packet_pc_;
     Value* base = real_cpu_ && !shadowed(offset) ? real_cpu_ : cpu_ptr_;
     auto* i8ptr = builder_.CreateBitCast(base, builder_.getPtrTy());
-    auto* gep = builder_.CreateGEP(builder_.getInt8Ty(), i8ptr,
-                                   builder_.getInt32(static_cast<uint32_t>(offset)));
+    auto* gep = bcore_abi::object_field(builder_, wasm_, i8ptr, builder_.getInt32(static_cast<uint32_t>(offset)));
     return builder_.CreateBitCast(gep, builder_.getPtrTy(), name);
 }
 
@@ -376,7 +376,7 @@ void LiftVisitor::note_body_load(size_t offset, bool hole) {
 
 Value* LiftVisitor::reg_hole_ptr(uint32_t idx) {
     if (in_parallel_ || real_cpu_) reg_hole_violation_ = true;  // their shadows key on offsets
-    return builder_.CreateGEP(builder_.getInt8Ty(), cpu_ptr_, stencil_regs_[idx], "reg_hole");
+    return bcore_abi::object_field(builder_, wasm_, cpu_ptr_, stencil_regs_[idx], "reg_hole");
 }
 
 Value* LiftVisitor::load_dreg(uint32_t idx, const Twine& name) {
@@ -1031,8 +1031,7 @@ Value* LiftVisitor::call_extern(const char* name, FunctionType* ft,
         auto& ctx = builder_.getContext();
         auto* fn_ = builder_.GetInsertBlock()->getParent();
         auto* start = builder_.GetInsertBlock();
-        auto* dj_ptr = builder_.CreateGEP(builder_.getInt8Ty(), real_cpu_,
-                                          builder_.getInt32(offsetof(CpuState, did_jump)));
+        auto* dj_ptr = bcore_abi::object_field(builder_, wasm_, real_cpu_, builder_.getInt32(offsetof(CpuState, did_jump)));
         auto* dj = builder_.CreateLoad(builder_.getInt8Ty(), dj_ptr, "real_did_jump");
         auto* raised = BasicBlock::Create(ctx, "loop_sync_raised", fn_);
         auto* cont = BasicBlock::Create(ctx, "loop_sync_cont", fn_);
@@ -1553,8 +1552,7 @@ llvm::Value* LiftVisitor::entry_load_ptr(size_t offset, llvm::Value*& slot, cons
     if (!slot) {
         auto& entry = builder_.GetInsertBlock()->getParent()->getEntryBlock();
         llvm::IRBuilder<> at_entry(&entry, entry.getFirstInsertionPt());
-        auto* field = at_entry.CreateGEP(at_entry.getInt8Ty(), real_cpu_ ? real_cpu_ : cpu_ptr_,
-                                         at_entry.getInt32(offset));
+        auto* field = bcore_abi::object_field(at_entry, wasm_, real_cpu_ ? real_cpu_ : cpu_ptr_, at_entry.getInt32(offset));
         slot = at_entry.CreateLoad(at_entry.getPtrTy(), field, name);
     }
     return slot;
@@ -8756,7 +8754,7 @@ static void emit_dbg_assert_ir(llvm::IRBuilder<>& B,
     auto make_ptr = [&](size_t off, llvm::Type* ty) {
         auto* base = off == offsetof(CpuState, did_jump) ? did_jump_base : real_cpu;
         auto* i8ptr = B.CreateBitCast(base, B.getPtrTy());
-        auto* gep   = B.CreateConstGEP1_32(B.getInt8Ty(), i8ptr, (unsigned)off);
+        auto* gep   = bcore_abi::object_field(B, bcore_abi::is_wasm(B), i8ptr, B.getInt32((unsigned)off));
         return B.CreateBitCast(gep, B.getPtrTy());
     };
     B.CreateStore(B.getInt8(1),  make_ptr(offsetof(CpuState, halted),    B.getInt8Ty()));

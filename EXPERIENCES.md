@@ -1102,3 +1102,26 @@ execution -20.3%. Work the same at every mark.
   profiling: there they passed all the same were every block compiled with
   LLVM (found in review). cp_translator_test calls the translator itself
   and requires its blocks.
+- Why the copy-and-patch tier was slower than LLVM's on bench.s (4.2-4.5
+  against 3.3 s; natively 2.1 against 2.2): blocks of a hardware loop of a
+  few packets that ends and starts again, K3/K4's 8 iterations in a
+  software loop. Each packet costs about what LLVM's does (1.6 against
+  1.4 ns); each iteration's loop step 7.6 against 3.6 ns, where LLVM's
+  block pins the bottom (the entry guard) and counts in a WebAssembly loop,
+  and the stencils compare the bottoms at every packet, step through
+  bfin_hwloop_step and run the block again. V8's code for it (node
+  --print-wasm-code) showed the rest: every field's address an add of its
+  own (`i32.add cpu, 240`: a plain GEP may wrap, so LLVM folds no offset
+  into the load or store), which TurboFan shares across the pieces in
+  registers and spills around the call. In-bounds GEPs (object_field):
+  bench.s LLVM 3.31 to 2.93 s, copy-and-patch 4.44 to 3.88; op1emu's boot
+  in Node 10.54 to 10.02 s (3 of 3, CpuState's fields alone), its .wasm
+  79.1 to 76.1 MB (stencils with offsets in their loads and stores are
+  smaller). Native IR is unchanged (in bounds only for WebAssembly
+  modules).
+- Tried and dropped: the block's own exit as a branch to a loop around the
+  function, not a tail call of itself (no change: V8's tail call of the
+  same function is cheap); the stencils stepping the hardware loop inline
+  (K1/K2 as much slower as the call cost; natively also nothing); promoting
+  hot blocks to LLVM (slower: V8 has no on-stack replacement, a new
+  module's long loop runs in Liftoff).

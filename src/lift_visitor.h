@@ -752,6 +752,7 @@ private:
     llvm::Value* cpu_ptr_;
     llvm::Value* mem_ptr_;
     llvm::Module* module_;
+    const bool wasm_;  // module_ is WebAssembly's (bcore_abi::is_wasm): its fields in bounds
     Memory* mem_ = nullptr;
     bool terminated_ = false;
     const char* exit_kind_ = "jump";

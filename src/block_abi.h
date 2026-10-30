@@ -137,6 +137,21 @@ inline llvm::CallInst* call_block(llvm::IRBuilder<>& b, llvm::Value* callee, llv
     return call;
 }
 
+// Whether the module b inserts into is compiled for WebAssembly.
+inline bool is_wasm(const llvm::IRBuilderBase& b) { return is_wasm(*b.GetInsertBlock()->getModule()); }
+
+// A field offset bytes into the object at base (the CpuState, the chain
+// table, the tier table), in a module compiled for WebAssembly (wasm,
+// is_wasm) or not. In bounds on WebAssembly: a load or store there takes a
+// constant offset only from an address that cannot wrap, and without it each
+// field's address is an add of its own, which V8 keeps in a register (and
+// spills around a call). Elsewhere a plain GEP, as it always was.
+inline llvm::Value* object_field(llvm::IRBuilderBase& b, bool wasm, llvm::Value* base, llvm::Value* offset,
+                                 const llvm::Twine& name = "") {
+    return wasm ? b.CreateInBoundsGEP(b.getInt8Ty(), base, offset, name)
+                : b.CreateGEP(b.getInt8Ty(), base, offset, name);
+}
+
 // The same as a musttail call; the caller returns right after it.
 inline llvm::CallInst* tail_call_block(llvm::IRBuilder<>& b, llvm::Value* callee, llvm::Value* cpu,
                                        llvm::Value* mem) {
