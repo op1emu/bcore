@@ -113,6 +113,60 @@ inline void wasm_leb(std::vector<uint8_t>& out, uint32_t v) {
     } while (v);
 }
 
+// A LEB128 at b + p, p moved past it; false if it does not end before size.
+inline bool wasm_read_leb(const uint8_t* b, size_t size, size_t& p, uint64_t& v) {
+    v = 0;
+    for (unsigned shift = 0; p < size && shift < 64; shift += 7) {
+        const uint8_t byte = b[p++];
+        v |= uint64_t(byte & 0x7f) << shift;
+        if (!(byte & 0x80)) return true;
+    }
+    return false;
+}
+
+// Where the immediates of the instruction at op end, from p (after the
+// opcode), for the instructions LLVM emits without SIMD; false for another.
+inline bool wasm_skip_immediates(const uint8_t* b, size_t size, size_t& p, uint8_t op) {
+    uint64_t v = 0;
+    switch (op) {
+    case 0x00: case 0x01: case 0x05: case 0x0b: case 0x0f: case 0x1a: case 0x1b: return true;
+    case 0x02: case 0x03: case 0x04:  // a block type: empty, a value type, or a type index
+        if (p >= size) return false;
+        if (b[p] == 0x40 || (b[p] >= 0x7b && b[p] <= 0x7f)) {
+            ++p;
+            return true;
+        }
+        return wasm_read_leb(b, size, p, v);
+    case 0x0c: case 0x0d: case 0x10: case 0x12:
+    case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26:
+    case 0x41: case 0x42:
+        return wasm_read_leb(b, size, p, v);
+    case 0x0e: {
+        uint64_t n = 0;
+        if (!wasm_read_leb(b, size, p, n)) return false;
+        for (uint64_t i = 0; i <= n; ++i)
+            if (!wasm_read_leb(b, size, p, v)) return false;
+        return true;
+    }
+    case 0x11: case 0x13: return wasm_read_leb(b, size, p, v) && wasm_read_leb(b, size, p, v);
+    case 0x3f: case 0x40: return wasm_read_leb(b, size, p, v);
+    case 0x43: p += 4; return p <= size;
+    case 0x44: p += 8; return p <= size;
+    case 0xfc: {
+        uint64_t sub = 0;
+        if (!wasm_read_leb(b, size, p, sub)) return false;
+        if (sub <= 7) return true;                                                       // trunc_sat
+        if (sub == 8) return wasm_read_leb(b, size, p, v) && wasm_read_leb(b, size, p, v);   // memory.init
+        if (sub == 9) return wasm_read_leb(b, size, p, v);                               // data.drop
+        if (sub == 10) return wasm_read_leb(b, size, p, v) && wasm_read_leb(b, size, p, v);  // memory.copy
+        if (sub == 11) return wasm_read_leb(b, size, p, v);                              // memory.fill
+        return false;
+    }
+    }
+    if (op >= 0x28 && op <= 0x3e) return wasm_read_leb(b, size, p, v) && wasm_read_leb(b, size, p, v);  // a memarg
+    return op >= 0x45 && op <= 0xc4;  // numeric, no immediates
+}
+
 inline void wasm_sleb(std::vector<uint8_t>& out, int32_t v) {
     for (;;) {
         const uint8_t b = v & 0x7f;
@@ -137,10 +191,12 @@ inline void wasm_section(std::vector<uint8_t>& out, uint8_t id, const std::vecto
     out.insert(out.end(), body.begin(), body.end());
 }
 
-// The header: the magic and version, the types and the imports.
-inline std::vector<uint8_t> wasm_header() {
+// The header: the magic and version, the types and the imports; extra, if
+// any, is a type after the others (wasm_types().size() its index).
+inline std::vector<uint8_t> wasm_header(const WasmType* extra = nullptr) {
     std::vector<uint8_t> out = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
-    const std::vector<WasmType> types = wasm_types();
+    std::vector<WasmType> types = wasm_types();
+    if (extra) types.push_back(*extra);
     std::vector<uint8_t> body;
     wasm_leb(body, uint32_t(types.size()));
     for (const WasmType& t : types) {

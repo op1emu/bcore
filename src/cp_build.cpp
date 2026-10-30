@@ -630,64 +630,11 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
 
 namespace {
 
-bool read_leb(const std::vector<uint8_t>& b, size_t& p, uint64_t& v) {
-    v = 0;
-    for (unsigned shift = 0; p < b.size() && shift < 64; shift += 7) {
-        const uint8_t byte = b[p++];
-        v |= uint64_t(byte & 0x7f) << shift;
-        if (!(byte & 0x80)) return true;
-    }
-    return false;
-}
-
 void write_padded(std::vector<uint8_t>& out, size_t at, uint32_t v) {
     for (int i = 0; i < 5; ++i) {
         out[at + i] = uint8_t(v & 0x7f) | (i < 4 ? 0x80 : 0);
         v >>= 7;
     }
-}
-
-// Where the immediates of the instruction at op end, from p (after the
-// opcode), for the instructions LLVM emits without SIMD; false for another.
-bool skip_immediates(const std::vector<uint8_t>& b, size_t& p, uint8_t op) {
-    uint64_t v = 0;
-    switch (op) {
-    case 0x00: case 0x01: case 0x05: case 0x0b: case 0x0f: case 0x1a: case 0x1b: return true;
-    case 0x02: case 0x03: case 0x04:  // a block type: empty, a value type, or a type index
-        if (p >= b.size()) return false;
-        if (b[p] == 0x40 || (b[p] >= 0x7b && b[p] <= 0x7f)) {
-            ++p;
-            return true;
-        }
-        return read_leb(b, p, v);
-    case 0x0c: case 0x0d: case 0x10: case 0x12:
-    case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26:
-    case 0x41: case 0x42:
-        return read_leb(b, p, v);
-    case 0x0e: {
-        uint64_t n = 0;
-        if (!read_leb(b, p, n)) return false;
-        for (uint64_t i = 0; i <= n; ++i)
-            if (!read_leb(b, p, v)) return false;
-        return true;
-    }
-    case 0x11: case 0x13: return read_leb(b, p, v) && read_leb(b, p, v);
-    case 0x3f: case 0x40: return read_leb(b, p, v);
-    case 0x43: p += 4; return p <= b.size();
-    case 0x44: p += 8; return p <= b.size();
-    case 0xfc: {
-        uint64_t sub = 0;
-        if (!read_leb(b, p, sub)) return false;
-        if (sub <= 7) return true;                                       // trunc_sat
-        if (sub == 8) return read_leb(b, p, v) && read_leb(b, p, v);     // memory.init
-        if (sub == 9) return read_leb(b, p, v);                          // data.drop
-        if (sub == 10) return read_leb(b, p, v) && read_leb(b, p, v);    // memory.copy
-        if (sub == 11) return read_leb(b, p, v);                         // memory.fill
-        return false;
-    }
-    }
-    if (op >= 0x28 && op <= 0x3e) return read_leb(b, p, v) && read_leb(b, p, v);  // a memarg
-    return op >= 0x45 && op <= 0xc4;  // numeric, no immediates
 }
 
 // wasm_piece (cp_build.h); exit_code: an exit's, which may return.
@@ -700,12 +647,12 @@ bool wasm_rewrite(Code& c, bool exit_code, bool self_br) {
     // The locals: their types, by index from 2 (after cpu and mem).
     size_t p = 0;
     uint64_t groups = 0;
-    if (!read_leb(b, p, groups)) return fail("a malformed body");
+    if (!wasm_read_leb(b.data(), b.size(), p, groups)) return fail("a malformed body");
     std::vector<uint32_t> map = {0, 1};  // a local's index in the block's function
     uint32_t used[4] = {};
     for (uint64_t g = 0; g < groups; ++g) {
         uint64_t n = 0;
-        if (!read_leb(b, p, n) || p >= b.size()) return fail("a malformed body");
+        if (!wasm_read_leb(b.data(), b.size(), p, n) || p >= b.size()) return fail("a malformed body");
         const uint8_t type = b[p++];
         int k = -1;
         for (int i = 0; i < 4; ++i)
@@ -738,11 +685,11 @@ bool wasm_rewrite(Code& c, bool exit_code, bool self_br) {
         const size_t start = p, out_start = out.size();
         const uint8_t op = b[p++];
         size_t imm = p;
-        if (!skip_immediates(b, p, op)) return fail("an instruction stencils do not take");
+        if (!wasm_skip_immediates(b.data(), b.size(), p, op)) return fail("an instruction stencils do not take");
         if (op == 0x0f && !exit_code) return fail("a return");
         if (op == 0x20 || op == 0x21 || op == 0x22) {
             uint64_t index = 0;
-            read_leb(b, imm, index);
+            wasm_read_leb(b.data(), b.size(), imm, index);
             if (index >= map.size()) return fail("a local out of range");
             out.push_back(op);
             wasm_leb(out, map[index]);
