@@ -114,7 +114,7 @@ static void check_relocs(const Code& c, const char* what) {
     }
     for (const auto& [rp, insn] : all) {
         const bcore_cp::Reloc& r = *rp;
-        const bool code_hole = r.hole >= kHoleCont;
+        const bool code_hole = !bcore_cp::is_value_hole(r.hole);
         require(code_hole ? is_branch(r.kind) : is_movw(r.kind), "a code hole as a branch, a value hole as MOVW");
         if (r.kind == kCondBr19 || r.kind == kTestBr14) {
             require(r.hole == kHoleHot || r.hole == kHoleCold, "a conditional branch to the other part only");

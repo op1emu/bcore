@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <string>
+#include <tuple>
+#include <utility>
 
 using namespace bcore;
 
@@ -118,10 +120,221 @@ static void test_loop() {
     }
 }
 
+// A hardware loop whose bottom is a parallel packet, R3 = [P0++] in a slot
+// counting its iterations, in a block translated with a hint
+// (Config::hint): the tails it pins, or that compare nothing, behind the
+// block's entry guard. Run until it returns, from loop registers the hint
+// may not have (a guard that misses compiles the block careful, as
+// Core::run does), it must end as the block with no hint does.
+struct LoopRun {
+    uint32_t r0, r3, p0, lc0, lb0, pc, misses, starts;
+    bool operator==(const LoopRun& o) const {
+        return r0 == o.r0 && r3 == o.r3 && p0 == o.p0 && lc0 == o.lc0 && lb0 == o.lb0 && pc == o.pc;
+    }
+};
+
+static LoopRun run_loop(unsigned packets, const CpuState* hint, bool careful, uint32_t lb0, uint32_t lt0,
+                        uint32_t lc0) {
+    Setup s;
+    for (unsigned i = 0; i < packets; ++i)
+        s.code({0xcc04, 0x000a, 0x9003, 0x0000});  // R0 = R1 + R2 || R3 = [P0++] || NOP
+    if (packets == 2) {
+        s.mem.write16(kPc + 8, 0xcc04); s.mem.write16(kPc + 10, 0x000a);
+        s.mem.write16(kPc + 12, 0x9003); s.mem.write16(kPc + 14, 0x0000);
+    }
+    s.mem.write16(kPc + 8 * packets, 0x0010);  // RTS
+    for (uint32_t i = 0; i < 16; ++i) s.mem.write32(0x2000 + 4 * i, 0x100 + i);
+    s.cpu.dpregs[1] = 7;
+    s.cpu.dpregs[2] = 1;
+    s.cpu.dpregs[8] = 0x2000;  // P0
+    s.cpu.lb[0] = lb0;
+    s.cpu.lt[0] = lt0;
+    s.cpu.lc[0] = lc0;
+    s.cpu.lb[1] = 0x9000;
+    CpTranslator cp(s.jit);
+    CpTranslator::Config config;
+    config.threshold = kTierOnly;
+    config.hint = hint;
+    config.careful = careful;
+    CpTranslator::Block block = cp.translate(kPc, s.mem, 0, config);
+    require(block.fn, "no block made of stencils");
+    LoopRun out{};
+    for (int runs = 0; runs < 64 && s.cpu.pc != kReturn; ++runs) {
+        s.jit.enter(block.fn, &s.cpu, &s.mem);
+        if (s.cpu.lb_guard_miss) {
+            require(s.cpu.pc == kPc && s.cpu.dpregs[8] == 0x2000 + 4 * out.r3, "a guard miss runs no packet");
+            s.cpu.lb_guard_miss = 0;
+            ++out.misses;
+            config.careful = true;
+            block = cp.translate(kPc, s.mem, 1, config);
+            require(block.fn, "no careful block");
+        }
+        s.cpu.did_jump = false;
+        out.r3 = (s.cpu.dpregs[8] - 0x2000) / 4;
+    }
+    out.r0 = s.cpu.dpregs[0];
+    out.r3 = s.cpu.dpregs[3];
+    out.p0 = s.cpu.dpregs[8];
+    out.lc0 = s.cpu.lc[0];
+    out.lb0 = s.cpu.lb[0];
+    out.pc = s.cpu.pc;
+    out.starts = s.jit.tierTable()->count[0];
+    return out;
+}
+
+static void test_hints() {
+    for (unsigned packets : {1u, 2u}) {
+        // The loop's bottom (the last parallel packet), another packet of
+        // the block, and a PC outside it.
+        const uint32_t bottom = kPc + 8 * (packets - 1), elsewhere = 0x800;
+        for (uint32_t lc : {0u, 1u, 2u, 5u})
+        for (uint32_t lb : {bottom, kPc, elsewhere})
+        for (uint32_t lt : {kPc, kPc + 0x40}) {
+            const LoopRun want = run_loop(packets, nullptr, false, lb, lt, lc);
+            require(want.pc == kReturn && want.misses == 0, "the block with no hint returns");
+            for (uint32_t hint_lb : {bottom, kPc, elsewhere})
+            for (uint32_t hint_lc : {0u, 5u})
+            for (bool careful : {false, true}) {
+                CpuState hint{};
+                hint.lb[0] = hint_lb;
+                hint.lt[0] = kPc;
+                hint.lc[0] = hint_lc;
+                hint.lb[1] = 0x9000;
+                const LoopRun got = run_loop(packets, &hint, careful, lb, lt, lc);
+                const std::string what = std::to_string(packets) + " packets, LB0 " + std::to_string(lb) + " LT0 " +
+                                         std::to_string(lt) + " LC0 " + std::to_string(lc) + ", hint LB0 " +
+                                         std::to_string(hint_lb) + " LC0 " + std::to_string(hint_lc) +
+                                         (careful ? " careful" : "");
+                require(got == want, what + ": not as the block with no hint");
+                // The block has a guard where a packet's tail relies on it:
+                // one the hint puts at no bottom, or one whose loop it pins
+                // (it runs, LC0 not 0); none careful. The guard misses where
+                // the loop registers are not as it relies on: a pinned
+                // loop's LB0 and LT0 the hint's, or else LB0 the hint's or
+                // outside the block (its RTS in it), and only there.
+                const bool pinned = hint_lb != elsewhere && hint_lc != 0;
+                const bool absent = packets == 2 || hint_lb != bottom;
+                const bool guarded = !careful && (pinned || absent);
+                const bool inside = lb >= kPc && lb <= kPc + 8 * packets;
+                const bool holds = pinned ? lb == hint_lb && lt == kPc : lb == hint_lb || !inside;
+                require(got.misses == (guarded && !holds ? 1u : 0u), what + ": guard misses");
+                // Before the prologue: a block that misses counts no start.
+                require(!got.misses || got.starts == 0, what + ": a guard miss counted");
+            }
+        }
+    }
+}
+
+// A packet that moves a loop bottom (kLoopsMoved) before a parallel packet:
+// LB0 = R4 puts loop 0's bottom on it, from a hint with no bottom in the
+// block. Its tail must compare from there on, as the block with no hint's.
+static void test_loops_moved() {
+    auto run = [](const CpuState* hint) {
+        Setup s;
+        s.code({0x3c14,                          // LB0 = R4
+                0xcc04, 0x000a, 0x9003, 0x0000,  // R0 = R1 + R2 || R3 = [P0++] || NOP
+                0x0010});                        // RTS
+        s.cpu.dpregs[4] = kPc + 2;
+        s.cpu.dpregs[8] = 0x2000;
+        s.cpu.lb[0] = 0x800;
+        s.cpu.lt[0] = kPc;
+        s.cpu.lc[0] = 3;
+        s.cpu.lb[1] = 0x9000;
+        CpTranslator cp(s.jit);
+        CpTranslator::Config config;
+        config.threshold = kTierOnly;
+        config.hint = hint;
+        CpTranslator::Block block = cp.translate(kPc, s.mem, 0, config);
+        require(block.fn, "no block made of stencils");
+        for (int runs = 0; runs < 64 && s.cpu.pc != kReturn; ++runs) {
+            s.jit.enter(block.fn, &s.cpu, &s.mem);
+            if (s.cpu.lb_guard_miss) {
+                s.cpu.lb_guard_miss = 0;
+                config.careful = true;
+                block = cp.translate(kPc, s.mem, 1, config);
+                require(block.fn, "no careful block");
+            }
+            s.cpu.did_jump = false;
+        }
+        require(s.cpu.pc == kReturn, "returns");
+        return std::make_pair(s.cpu.dpregs[8], s.cpu.lc[0]);
+    };
+    CpuState hint{};
+    hint.lb[0] = 0x800;
+    hint.lt[0] = kPc;
+    hint.lc[0] = 3;
+    hint.lb[1] = 0x9000;
+    const auto want = run(nullptr), got = run(&hint);
+    require(want.first == 0x2000 + 4 * 3 && want.second == 0, "the loop runs three times");
+    require(got == want, "a loop moved in the block: not as the block with no hint");
+}
+
+// Both loops ending at a parallel packet that is the block's start, from
+// every pair of counts: the hint pins loop 0, loop 1 or both (or neither,
+// one count 0) and the tail steps as bfin_hwloop_step would, loop 1 first.
+static void test_two_loops() {
+    auto run = [](const CpuState* hint, uint32_t lc0, uint32_t lc1) {
+        Setup s;
+        s.code({0xcc04, 0x000a, 0x9003, 0x0000,  // R0 = R1 + R2 || R3 = [P0++] || NOP
+                0x0010});                        // RTS
+        s.cpu.dpregs[8] = 0x2000;
+        for (int i = 0; i < 2; ++i) {
+            s.cpu.lb[i] = kPc;
+            s.cpu.lt[i] = kPc;
+        }
+        s.cpu.lc[0] = lc0;
+        s.cpu.lc[1] = lc1;
+        CpTranslator cp(s.jit);
+        CpTranslator::Config config;
+        config.threshold = kTierOnly;
+        config.hint = hint;
+        CpTranslator::Block block = cp.translate(kPc, s.mem, 0, config);
+        require(block.fn, "no block made of stencils");
+        unsigned misses = 0;
+        for (int runs = 0; runs < 64 && s.cpu.pc != kReturn; ++runs) {
+            s.jit.enter(block.fn, &s.cpu, &s.mem);
+            if (s.cpu.lb_guard_miss) {
+                s.cpu.lb_guard_miss = 0;
+                ++misses;
+                config.careful = true;
+                block = cp.translate(kPc, s.mem, 1, config);
+                require(block.fn, "no careful block");
+            }
+            s.cpu.did_jump = false;
+        }
+        require(s.cpu.pc == kReturn, "returns");
+        return std::make_tuple(s.cpu.dpregs[8], s.cpu.lc[0], s.cpu.lc[1], misses);
+    };
+    for (uint32_t lc0 : {0u, 1u, 2u, 3u})
+    for (uint32_t lc1 : {0u, 1u, 2u, 3u}) {
+        const auto want = run(nullptr, lc0, lc1);
+        for (uint32_t h0 : {0u, 3u})
+        for (uint32_t h1 : {0u, 3u}) {
+            CpuState hint{};
+            for (int i = 0; i < 2; ++i) {
+                hint.lb[i] = kPc;
+                hint.lt[i] = kPc;
+            }
+            hint.lc[0] = h0;
+            hint.lc[1] = h1;
+            const auto got = run(&hint, lc0, lc1);
+            const std::string what = "LC " + std::to_string(lc0) + "," + std::to_string(lc1) + " hint LC " +
+                                     std::to_string(h0) + "," + std::to_string(h1);
+            require(std::get<0>(got) == std::get<0>(want) && std::get<1>(got) == std::get<1>(want) &&
+                        std::get<2>(got) == std::get<2>(want),
+                    what + ": not as the block with no hint");
+            require(std::get<3>(got) == 0, what + ": the loops as the hint has them, and a guard missed");
+        }
+    }
+}
+
 int main() {
     test_packets();
+    test_two_loops();
+    test_loops_moved();
     test_cap();
     test_loop();
+    test_hints();
     printf("PASS\n");
     return 0;
 }

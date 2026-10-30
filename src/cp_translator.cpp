@@ -11,6 +11,7 @@
 #include "code_arena.h"
 #include "cp_patch.h"
 #include "helper_abi.h"
+#include "lift_visitor.h"
 #include "host_bridge.h"
 #include "syscall_emu.h"
 #include "tier_table.h"
@@ -134,6 +135,12 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
     };
     pieces_.clear();
     pieces_.push_back({nullptr, nullptr, nullptr, pc, 0, -1, 0, 0});  // the prologue, chosen below
+    guarded_ = false;
+    pinned_ = 0;
+    // Whether the hint's loops still hold at the packet: none has moved one
+    // since the block's start (kLoopsMoved).
+    bool steady = true;
+    uint32_t last_pc = pc;
     bool cycles = false;
     uint32_t cur = pc, packets = 0, last_bytes = 0;
     auto fail = [&](const char* why) {
@@ -164,8 +171,9 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             if (id && (kStencils[id - 1].flags & kBody)) {
                 const char* why = nullptr;
                 const size_t first = pieces_.size();
-                if (!compose_parallel(cur, insn, selected, kStencils[id - 1], code, read, index, why, config.hint))
+                if (!compose_parallel(cur, insn, selected, kStencils[id - 1], code, read, index, why, config, steady))
                     return fail(why);
+                last_pc = cur;
                 for (size_t i = first; i < pieces_.size(); ++i)
                     cycles |= (pieces_[i].stencil->flags & kCycles) != 0;
                 cur += 8;
@@ -180,6 +188,8 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
         cycles |= (flags & kCycles) != 0;
         piece.packet = index;
         pieces_.push_back(piece);
+        last_pc = cur;
+        if (flags & kLoopsMoved) steady = false;
         cur += piece.stencil->bytes;
         last_bytes = piece.stencil->bytes;
         if (flags & kTerminates) break;
@@ -192,12 +202,22 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
         pieces_.back().packet = packets;  // the last packet's
     }
     pieces_[0] = CpTranslator::piece(kStencils[kPrologue[config.host_cycles && cycles]], pc, 0, -1);
+    if (guarded_) {
+        // Before the prologue: a block whose guard fails neither counts its
+        // start nor sets CYCLES.
+        pieces_.insert(pieces_.begin(), CpTranslator::piece(kStencils[kGuards[pinned_]], pc, 0, -1));
+        for (int i = 0; i < 2; ++i) {
+            hint_lb_[i] = config.hint->lb[i];
+            hint_lt_[i] = config.hint->lt[i];
+        }
+        span_ = last_pc - pc;
+    }
     return true;
 }
 
 bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, const Stencil& body, Memory& code,
                                     const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why,
-                                    const CpuState* hint) {
+                                    const Config& config, bool& steady) {
     if (!code.callbacks_preserve_registers()) {
         why = "parallel: callbacks may change registers";
         return false;
@@ -230,8 +250,22 @@ bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, co
     add(body, insn, selected);
     if (e1.commit) add(kStencils[e1.commit - 1], 0, -1);
     if (e2.commit) add(kStencils[e2.commit - 1], 0, -1);
+    // Its tail, by what the hint says of its loop bottoms (Config::hint).
+    const CpuState* hint = config.hint;
+    if ((st1.flags | st2.flags | body.flags) & kLoopsMoved) steady = false;
     const bool bottom = hint && (hint->lb[0] == pc || hint->lb[1] == pc);
-    add(kStencils[(bottom ? kParallelTailBottom : kParallelTail)[tail]], 0, -1);
+    uint32_t id = (bottom ? kParallelTailBottom : kParallelTail)[tail];
+    if (hint && !config.careful && steady) {
+        if (const unsigned pin = LiftVisitor::pin_mask(*hint, pc)) {
+            id = kParallelTailPinned[pin - 1][tail];
+            pinned_ |= pin;
+            guarded_ = true;
+        } else if (!bottom) {
+            id = kParallelTailAbsent[tail];
+            guarded_ = true;
+        }
+    }
+    add(kStencils[id], 0, -1);
     return true;
 }
 
@@ -359,7 +393,7 @@ bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, con
             const Reloc& r = relocs[i];
             if (r.offset >= size) continue;  // in the dropped jump to what follows
             uint64_t value = 0;
-            if (r.hole < kHoleCont) {
+            if (is_value_hole(r.hole)) {
                 if (!value_of(piece, r, packet, field0, counter, value)) return false;
             } else if (r.hole == kHoleCont) {
                 if (!next) return false;
@@ -427,6 +461,12 @@ bool CpTranslator::value_of(const Piece& piece, const Reloc& r, uint32_t packet,
         value = threshold_;
     } else if (r.hole == kHoleBlockPc) {
         value = piece.pc;  // the exit's piece is the block's PC's
+    } else if (r.hole == kHoleLb0 || r.hole == kHoleLb1) {
+        value = hint_lb_[r.hole - kHoleLb0];
+    } else if (r.hole == kHoleLt0 || r.hole == kHoleLt1) {
+        value = hint_lt_[r.hole - kHoleLt0];
+    } else if (r.hole == kHoleSpan) {
+        value = span_;
     } else if (r.hole >= kHoleReg0 && r.hole < kHoleReg0 + kRegHoles && piece.selected >= 0) {
         value = field_hole_value(kSelected32[piece.selected].regs[r.hole - kHoleReg0], piece.insn, piece.pc);
     } else {
@@ -452,7 +492,8 @@ uint64_t CpTranslator::code_hash(uint32_t counter) const {
                 if (r.offset >= size) continue;
                 mix(&r, sizeof r);
                 uint64_t value = 0;
-                if (r.hole < kHoleCont && value_of(p, r, packet, last_len, counter, value)) mix(&value, sizeof value);
+                if (is_value_hole(r.hole) && value_of(p, r, packet, last_len, counter, value))
+                    mix(&value, sizeof value);
             }
         };
         relocs(p.relocs, s.reloc_count, p.size);

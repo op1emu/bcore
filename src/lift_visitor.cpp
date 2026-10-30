@@ -154,6 +154,9 @@ void LiftVisitor::emit_cpu_store(size_t offset, Value* val) {
     if (offset == offsetof(CpuState, lb[1])) lb_steady_[1] = false;
     if (offset == offsetof(CpuState, lt[0])) lt_steady_[0] = false;
     if (offset == offsetof(CpuState, lt[1])) lt_steady_[1] = false;
+    if (offset == offsetof(CpuState, lb[0]) || offset == offsetof(CpuState, lb[1]) ||
+        offset == offsetof(CpuState, lt[0]) || offset == offsetof(CpuState, lt[1]))
+        loops_moved_ = true;
     auto* ptr = cpu_field_ptr(offset, builder_.getInt32Ty());
     builder_.CreateStore(val, ptr);
     if (reg_cacheable(offset)) {
@@ -229,18 +232,25 @@ void LiftVisitor::reg_cache_after_call(const char* callee) {
     cache->clear();
     lb_steady_[0] = lb_steady_[1] = false;
     lt_steady_[0] = lt_steady_[1] = false;
+    loops_moved_ = true;
     regs_kept_ = false;
 }
 
-unsigned LiftVisitor::pin_bottom(uint32_t insn_pc) {
-    if (careful_ || !hint_ || !lb_steady()) return 0;
+unsigned LiftVisitor::pin_mask(const CpuState& hint, uint32_t pc) {
     unsigned mask = 0;
     // A loop that ends here and runs now (its count says so; a hint with an
     // idle loop, whose top may be anything, keeps the compares).
     for (int i = 0; i < 2; ++i)
-        if (hint_->lb[i] == insn_pc && hint_->lc[i] != 0) mask |= 1u << i;
+        if (hint.lb[i] == pc && hint.lc[i] != 0) mask |= 1u << i;
     // Both loops end here but one does not run: the compares decide.
-    if (!mask || ((hint_->lb[0] == insn_pc) + (hint_->lb[1] == insn_pc)) != __builtin_popcount(mask)) return 0;
+    if (!mask || ((hint.lb[0] == pc) + (hint.lb[1] == pc)) != __builtin_popcount(mask)) return 0;
+    return mask;
+}
+
+unsigned LiftVisitor::pin_bottom(uint32_t insn_pc) {
+    if (careful_ || !hint_ || !lb_steady()) return 0;
+    const unsigned mask = pin_mask(*hint_, insn_pc);
+    if (!mask) return 0;
     lb_guard_used_ = true;
     lb_pinned_ |= mask;
     return mask;
@@ -815,7 +825,8 @@ void LiftVisitor::emit_epilog_pinned(uint32_t insn_pc, uint32_t insn_len, unsign
 
         builder_.SetInsertPoint(bb_back);
         builder_.CreateStore(builder_.CreateSub(lc, one), field(offsetof(CpuState, lc[0]) + 4 * i));
-        builder_.CreateStore(builder_.getInt32(hint_->lt[i]), field(offsetof(CpuState, pc)));
+        builder_.CreateStore(stencil_lt_[i] ? stencil_lt_[i] : builder_.getInt32(hint_->lt[i]),
+                             field(offsetof(CpuState, pc)));
         emit_set_did_jump();
         if (check_cec) emit_cec_check(false);
         auto* ret = builder_.CreateRetVoid();

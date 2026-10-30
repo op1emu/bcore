@@ -309,8 +309,93 @@ static unsigned test_pinned_both() {
     return cases;
 }
 
+// The same in copy-and-patch blocks (Core::set_copy_patch): three parallel
+// packets, each R3 = [P0++] in a slot, then JUMP.S 0. Compiled with no loop
+// in the block, a parallel packet's tail compares nothing behind the
+// block's entry guard (CpTranslator::Config::hint); run with loop 0 ending
+// at one of them, the guard misses once, Core::run compiles the block
+// careful (no guard: else it would miss forever), and the run ends as a
+// block compiled with no hint does.
+struct CpOutcome { uint32_t pc, p0, lc0, packets; uint64_t misses, cp_blocks; };
+
+static CpOutcome run_cp(bool chained, bool hints, uint32_t compiled_lb, uint32_t lb, uint32_t lc) {
+    CpuState cpu{};
+    FlatMemory mem(0, 0x1000, &cpu);
+    mem.enable_page_table();
+    constexpr int kPackets = 3;
+    for (int i = 0; i < kPackets; ++i) {
+        const uint16_t words[] = {0xcc04, 0x000a, 0x9003, 0x0000};  // R0 = R1 + R2 || R3 = [P0++] || NOP
+        for (int w = 0; w < 4; ++w) mem.write16(kPc + 8 * i + 2 * w, words[w]);
+    }
+    const uint32_t end = kPc + 8 * kPackets;
+    mem.write16(end, 0x2000);  // JUMP.S 0
+    Core core(&cpu, &mem);
+    core.set_chaining(chained, false);
+    core.set_copy_patch(true);
+    core.set_copy_patch_hints(hints);
+    core.set_tiering(1000000000, 0);
+    require(core.init(1), "init");
+    cec_init(); evt_init();
+    cpu.lb[0] = compiled_lb;
+    cpu.lt[0] = kPc;
+    cpu.lc[0] = 5;
+    cpu.lb[1] = kElsewhere;
+    cpu.dpregs[8] = 0x800;
+    cpu.chain_budget = 0;
+    require(core.run(kPc), "compile");
+
+    cpu = {};
+    cpu.lb[0] = lb;
+    cpu.lt[0] = kPc;
+    cpu.lc[0] = lc;
+    cpu.lb[1] = kElsewhere;
+    cpu.dpregs[8] = 0x800;
+    CpOutcome out{};
+    for (int runs = 0; runs < 64 && cpu.pc != end; ++runs) {
+        cpu.chain_budget = chained ? 1000 : 0;
+        require(core.run(runs ? cpu.pc : kPc), "run");
+        require(!cpu.lb_guard_miss, "a miss was left behind");
+        out.packets += cpu.packets + cpu.chain_packets;
+        cpu.did_jump = false;
+    }
+    out.pc = cpu.pc;
+    out.p0 = cpu.dpregs[8];
+    out.lc0 = cpu.lc[0];
+    out.misses = core.stats().lb_guard_misses;
+    out.cp_blocks = core.stats().copy_patch_blocks;
+    return out;
+}
+
+static unsigned test_copy_patch() {
+    unsigned cases = 0;
+    for (bool chained : {false, true})
+        for (int bottom = 0; bottom < 3; ++bottom)
+            for (uint32_t lc : {0u, 1u, 2u, 5u}) {
+                const uint32_t lb = kPc + 8 * bottom;
+                const CpOutcome want = run_cp(chained, false, kElsewhere, lb, lc);
+                for (uint32_t compiled_lb : {kElsewhere, lb}) {
+                    const CpOutcome got = run_cp(chained, true, compiled_lb, lb, lc);
+                    if (got.pc != want.pc || got.p0 != want.p0 || got.lc0 != want.lc0 || got.packets != want.packets) {
+                        fprintf(stderr, "FAIL: copy-patch%s bottom %d lc %u compiled lb %x: pc %x p0 %x lc0 %u "
+                                        "packets %u, expected pc %x p0 %x lc0 %u packets %u\n",
+                                chained ? " chained" : "", bottom, lc, compiled_lb, got.pc, got.p0, got.lc0,
+                                got.packets, want.pc, want.p0, want.lc0, want.packets);
+                        std::exit(1);
+                    }
+#if BCORE_ENABLE_PROFILE
+                    require(got.cp_blocks > 0, "no block made of stencils");
+                    require(want.misses == 0, "a block with no hint missed a guard");
+                    require(got.misses == (compiled_lb == lb ? 0u : 1u), "the guard missed other than once");
+#endif
+                    ++cases;
+                }
+            }
+    return cases;
+}
+
 int main() {
     unsigned cases = 0;
+    cases += test_copy_patch();
     cases += test_pinned();
     cases += test_pinned_both();
     for (int opt : {0, 1, 2, 3}) test_fetch_during_careful(opt);

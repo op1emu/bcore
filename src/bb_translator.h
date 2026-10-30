@@ -122,6 +122,7 @@ public:
         llvm::Constant* regs[8] = {};      // i64 offsets of data registers (LiftVisitor::set_stencil_regs)
         llvm::Function* cont = nullptr;    // the next packet's code
         llvm::Function* exit = nullptr;    // where every path that leaves the block goes
+        llvm::Constant* lt[2] = {};        // i32: the hint's LT0 and LT1 (a pinned tail's)
     };
     struct StencilLift {
         llvm::Function* fn = nullptr;
@@ -144,6 +145,19 @@ public:
         bool slot_conflict = false;
         bool checks_cec = false;
         bool did_jump_clear = true;
+        // Whether it wrote LB or LT or called a helper that may
+        // (LiftVisitor::loops_moved; a slot's writes too).
+        bool loops_moved = false;
+    };
+    // A parallel packet's tail, by what the block's hint says of its loop
+    // bottoms (translate_parallel_tail).
+    enum class TailRole {
+        kCareful,  // compares, and calls bfin_hwloop_step at a bottom
+        kBottom,   // a bottom of the hint: the step inline, compares and all
+        kAbsent,   // under the entry guard, no loop ends here: no compares
+        kPinned0,  // under the entry guard, loop 0 ends here (LiftVisitor::pin_mask)
+        kPinned1,  // loop 1
+        kPinned01, // both
     };
     // The packet at pc, read through this translator's Memory, as the
     // function `name`, compiled as packet `holes.packet` of a careful block
@@ -164,10 +178,13 @@ public:
     //     CpuState::slot_scratch (LiftVisitor::begin_slot); its exits as the
     //     packet's;
     //   - a slot's commit: its writes from the scratch to the registers;
-    //   - the packet's tail at pc: its epilog with the CEC check or not;
-    //     with bottom, as a block whose hint has a loop end at pc lifts it
-    //     (LiftVisitor::emit_epilog_clear): the step inline, its compares
-    //     still made, so it holds whatever the loop registers are.
+    //   - the packet's tail at pc: its epilog with the CEC check or not, by
+    //     role: careful; or as a block whose hint has a loop end at pc lifts
+    //     it careful (LiftVisitor::emit_epilog_clear: the step inline, its
+    //     compares still made, so it holds whatever the loop registers
+    //     are); or not careful, under the entry guard (emit_stencil_guard),
+    //     as a hint with no bottom at pc or with loop 0, 1 or both pinned
+    //     there (their tops holes.lt) lifts it.
     // A slot and the tail start with did_jump known clear, as a packet does
     // (a slot leaves it so, StencilLift::did_jump_clear: the build checks).
     StencilLift translate_stencil_body(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
@@ -177,7 +194,15 @@ public:
     static llvm::Function* emit_slot_commit(llvm::Module& mod, const char* name, int slot,
                                             const std::vector<LiftVisitor::SlotWrite>& writes, llvm::Function* cont);
     StencilLift translate_parallel_tail(llvm::Module& mod, const char* name, uint32_t pc, const StencilHoles& holes,
-                                        bool check_cec, bool bottom = false);
+                                        bool check_cec, TailRole role = TailRole::kCareful);
+    // A copy-and-patch block's entry guard (emit_lb_guard's): each LB is
+    // lb[i] or outside [block_pc, block_pc + span], and LB and LT are lb[i]
+    // and lt[i] for a loop in `pinned` (bit i: loop i). Then a musttail call
+    // of cont; otherwise PC the block's, CpuState::lb_guard_miss set, and a
+    // return before the block's first packet.
+    llvm::Function* emit_stencil_guard(llvm::Module& mod, const char* name, unsigned pinned, llvm::Constant* block_pc,
+                                       llvm::Constant* span, llvm::Constant* const lb[2],
+                                       llvm::Constant* const lt[2], llvm::Function* cont);
     // A copy-and-patch block's start: its tier counter (emit_tier_counter,
     // with holes for the counter, its count's offset and the threshold),
     // CYCLES with host_cycles (emit_host_cycles), then a musttail call of cont.

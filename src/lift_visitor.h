@@ -211,6 +211,23 @@ public:
     // to a constant top. The guard then also requires LB[i] and LT[i] equal
     // to the hint's.
     unsigned lb_pinned() const { return lb_pinned_; }
+    // The loops a packet at pc would pin with the hint (pin_bottom, careful
+    // aside): those whose bottom is pc and whose count is not 0, unless
+    // both end there and one of them does not run (then the compares
+    // decide, and none). The copy-and-patch translator picks its tails by it.
+    static unsigned pin_mask(const CpuState& hint, uint32_t pc);
+    // Whether the lift wrote LB or LT, or called a helper that may: what
+    // makes lb_steady() false, but for the memory callbacks, taken here to
+    // keep the registers (the copy-and-patch translator's kLoopsMoved, for
+    // a Memory that promises it).
+    bool loops_moved() const { return loops_moved_; }
+    // Stencil mode: the loop tops a pinned bottom's back edge stores, holes
+    // (the hint's LT0 and LT1 at the block's translation), in place of the
+    // hint's values.
+    void set_stencil_loop_tops(llvm::Constant* lt0, llvm::Constant* lt1) {
+        stencil_lt_[0] = lt0;
+        stencil_lt_[1] = lt1;
+    }
     // The returns of back edges to a pinned top taken while nothing in the
     // block had yet changed a loop bottom or top: one to the block's start
     // may skip the entry guard.
@@ -807,6 +824,8 @@ private:
     bool lb_steady_[2] = {true, true};
     bool lt_steady_[2] = {true, true};
     unsigned lb_pinned_ = 0;
+    bool loops_moved_ = false;
+    llvm::Constant* stencil_lt_[2] = {};  // set_stencil_loop_tops
     std::set<llvm::ReturnInst*> steady_back_edges_;
     // At insn_pc a loop the hint puts there ends, given the entry guard: the
     // mask of the loops (bit i for loop i), each pinned; 0 where the block

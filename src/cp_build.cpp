@@ -56,14 +56,21 @@ const char* const kHoleNames[kHoleCont] = {
     "bcore_hole_field3", "bcore_hole_counter", "bcore_hole_count_offset", "bcore_hole_threshold",
     "bcore_hole_block_pc", "bcore_hole_reg0", "bcore_hole_reg1", "bcore_hole_reg2", "bcore_hole_reg3",
 };
+const char* const kLoopHoleNames[kHoleEnd - kHoleLb0] = {
+    "bcore_hole_lb0", "bcore_hole_lb1", "bcore_hole_lt0", "bcore_hole_lt1", "bcore_hole_span",
+};
 const char* const kContName = "bcore_hole_cont";
 const char* const kExitName = "bcore_hole_exit";
 const char* const kSelfName = "bcore_hole_self";
 
+const char* hole_name(unsigned hole) {
+    return hole < kHoleCont ? kHoleNames[hole] : kLoopHoleNames[hole - kHoleLb0];
+}
+
 Constant* value_hole(Module& mod, Hole hole, uint64_t lo, uint64_t hi, Type* ty) {
     auto& ctx = mod.getContext();
     auto* i8 = Type::getInt8Ty(ctx);
-    auto* g = mod.getNamedGlobal(kHoleNames[hole]);
+    auto* g = mod.getNamedGlobal(hole_name(hole));
     if (!g) {
         // On WebAssembly (whose stencils are LLVM 23's) weak: two holes may
         // hold the same value, as two globals that are not weak never do
@@ -74,7 +81,7 @@ Constant* value_hole(Module& mod, Hole hole, uint64_t lo, uint64_t hi, Type* ty)
 #else
         const auto linkage = GlobalValue::ExternalLinkage;
 #endif
-        g = new GlobalVariable(mod, i8, true, linkage, nullptr, kHoleNames[hole]);
+        g = new GlobalVariable(mod, i8, true, linkage, nullptr, hole_name(hole));
         g->setDSOLocal(true);
         auto* i64 = Type::getInt64Ty(ctx);
         g->setMetadata(LLVMContext::MD_absolute_symbol,
@@ -111,6 +118,8 @@ void make_local(Module& mod) {
 int hole_of(StringRef name) {
     for (int i = 0; i < int(kHoleCont); ++i)
         if (name == kHoleNames[i]) return i;
+    for (unsigned i = kHoleLb0; i < kHoleEnd; ++i)
+        if (name == hole_name(i)) return int(i);
     if (name == kContName) return kHoleCont;
     if (name == kExitName) return kHoleExit;
     if (name == kSelfName) return kHoleSelf;
@@ -133,6 +142,8 @@ struct HoleUse {
 bool is_value_hole(const GlobalValue* g) {
     if (!g) return false;
     for (const char* name : kHoleNames)
+        if (g->getName() == name) return true;
+    for (const char* name : kLoopHoleNames)
         if (g->getName() == name) return true;
     return false;
 }
@@ -434,7 +445,7 @@ std::map<std::string, Code> extract_wasm(const object::WasmObjectFile& wasm) {
             case wasm::R_WASM_TABLE_NUMBER_LEB: kind = kWasmIndex; break;
             }
         }
-        const bool value = hole >= 0 && hole < int(kHoleCont);
+        const bool value = hole >= 0 && bcore_cp::is_value_hole(unsigned(hole));
         char why[160] = {};
         if (hole < 0)
             snprintf(why, sizeof why, "relocation against '%s'", name.c_str());
@@ -584,7 +595,7 @@ std::map<std::string, Code> extract(const MemoryBuffer& buffer) {
                 if (name.empty()) name = "a section";
             }
             const int kind = a64 ? a64_kind(rel.getType()) : x86_kind(rel.getType());
-            const bool code_hole = hole >= int(kHoleCont);
+            const bool code_hole = hole >= 0 && !bcore_cp::is_value_hole(unsigned(hole));
             const bool conditional = kind == kCondBr19 || kind == kTestBr14;
             const bool branch = kind == kPcRel32 || kind == kBranch26 || conditional;
             char why[160] = {};

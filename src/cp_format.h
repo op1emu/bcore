@@ -55,6 +55,23 @@ inline constexpr unsigned kHoleWasmStack = kHoleHelper + kHelperCount;
 inline constexpr unsigned kHoleWasmTable = kHoleWasmStack + 1;
 inline constexpr unsigned kHoleWasmType = kHoleWasmStack + 2;
 
+// Value holes after those (numbered so that the ones before keep theirs),
+// the block's loop hint (CpTranslator::Config::hint) for its entry guard
+// and its pinned loop bottoms: the hint's LB0, LB1, LT0 and LT1, and the
+// block's span (its last packet's PC less its first's).
+inline constexpr unsigned kHoleLb0 = kHoleWasmType + 1;
+inline constexpr unsigned kHoleLb1 = kHoleLb0 + 1;
+inline constexpr unsigned kHoleLt0 = kHoleLb0 + 2;
+inline constexpr unsigned kHoleLt1 = kHoleLb0 + 3;
+inline constexpr unsigned kHoleSpan = kHoleLb0 + 4;
+inline constexpr unsigned kHoleEnd = kHoleSpan + 1;
+
+// Whether a hole is a value the translator fills in (else code: a jump or
+// a call, or on WebAssembly an index).
+inline constexpr bool is_value_hole(unsigned hole) {
+    return hole < kHoleCont || (hole >= kHoleLb0 && hole < kHoleEnd);
+}
+
 // How a relocation fills its value in: the relocation it came from.
 enum RelocKind : uint8_t {
     // x86-64
@@ -102,6 +119,10 @@ enum StencilFlags : uint16_t {
     kSetsDisAlgn = 64,  // a slot 0 that leaves DISALGNEXCPT on: the slots' dis_algn entries
     kSlotStore = 128,   // a slot that writes memory: the packet's tail checks CEC
     kNop = 256,         // a slot that does nothing: the translator leaves it out
+    // Writes LB or LT, or calls a helper that may (the memory callbacks
+    // taken to keep the registers, as a parallel packet's must): the
+    // block's loop hint holds no longer after it.
+    kLoopsMoved = 512,
 };
 
 // Its code is in two parts: the hot code, which the translator lays out
@@ -195,6 +216,19 @@ extern const SlotEntry kSlots[4][0x10000];
 // BBTranslator::translate_parallel_tail's bottom), by [CEC check].
 extern const uint32_t kParallelTail[2];
 extern const uint32_t kParallelTailBottom[2];
+// Under the block's entry guard (kGuards), its hint holding: where no loop
+// ends at the packet, the tail without the compares; where loop 0, loop 1
+// or both end there and run (pinned, LiftVisitor::pin_mask), the step to
+// the hint's tops (kHoleLt0, kHoleLt1) with only the counts read. By [CEC
+// check], and [pinned - 1][CEC check].
+extern const uint32_t kParallelTailAbsent[2];
+extern const uint32_t kParallelTailPinned[3][2];
+// A block's entry guard, before its prologue, by the loops its tails pin
+// (bit i: loop i): each LB the hint's (kHoleLb0, kHoleLb1) or outside the
+// block (kHoleBlockPc, kHoleSpan), and for a pinned loop LB and LT the
+// hint's. Otherwise it sets CpuState::lb_guard_miss and returns before the
+// block's first packet, and Core::run compiles the block careful.
+extern const uint32_t kGuards[4];
 
 }  // namespace bcore_cp
 
