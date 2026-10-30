@@ -494,7 +494,94 @@ static void test_no_worker() {
     require(g_worker_starts == 0, "a worker started in a build without threads");
 }
 
+#if defined(__EMSCRIPTEN__)
+// The cold tier keeps what tier 0 promises (found in review): a block runs
+// the code it was first compiled from until invalidate(), cold or not, and
+// no halfword of it is read from the host twice. A block of R0 += 1; RTS,
+// the add rewritten after the first run, then copy-and-patch turned off,
+// the page table hidden or a chain filter set (which invalidates); and a
+// parallel packet copy-and-patch does not take where the Memory's
+// callbacks may change registers.
+class CountingMemory : public FlatMemory {
+public:
+    explicit CountingMemory(CpuState* cpu) : FlatMemory(0, 0x4000, cpu) { enable_page_table(); }
+    mutable unsigned reads = 0;
+    bool shown = true, keeps_registers = true;
+    uint16_t read16(uint32_t addr) const override {
+        ++reads;
+        return FlatMemory::read16(addr);
+    }
+    uint8_t* const* page_table() const override { return shown ? FlatMemory::page_table() : nullptr; }
+    bool callbacks_preserve_registers() const override { return keeps_registers; }
+};
+
+static void test_cold_code() {
+    enum Change { kCopyPatchOff, kPageTableHidden, kChainFilter };
+    for (Change change : {kCopyPatchOff, kPageTableHidden, kChainFilter}) {
+        uint32_t r0[2][4] = {};
+        for (uint32_t cold : {0u, 2u}) {
+            CpuState cpu{};
+            CountingMemory mem(&cpu);
+            mem.write16(0x100, kAdd1);
+            mem.write16(0x102, 0x0010);  // RTS
+            Core core(&cpu, &mem);
+            core.set_tiering(UINT32_MAX);
+            core.set_copy_patch(true);
+            if (cold) require(core.set_cold_threshold(cold), "no cold tier");
+            require(core.init(1), "init");
+            cec_init(); evt_init();
+            cpu.lb[0] = cpu.lb[1] = 0x3f00;
+            for (int r = 0; r < 4; ++r) {
+                if (r == 1) {
+                    mem.write16(0x100, kAdd2);
+                    if (change == kCopyPatchOff) core.set_copy_patch(false);
+                    if (change == kPageTableHidden) mem.shown = false;
+                    if (change == kChainFilter) core.set_chain_filter([](uint32_t) { return true; });
+                }
+                cpu.rets = 0x800;
+                cpu.dpregs[0] = 0;
+                require(core.run(0x100), "run");
+                r0[cold != 0][r] = cpu.dpregs[0];
+            }
+        }
+        for (int r = 0; r < 4; ++r)
+            if (r0[0][r] != r0[1][r]) {
+                fprintf(stderr, "FAIL: change %d run %d: R0 %u without the cold tier, %u with it\n", int(change), r,
+                        r0[0][r], r0[1][r]);
+                std::exit(1);
+            }
+    }
+    unsigned reads[2] = {};
+    for (uint32_t cold : {0u, 2u}) {
+        CpuState cpu{};
+        CountingMemory mem(&cpu);
+        mem.keeps_registers = false;
+        const uint16_t code[] = {0xcc04, 0x000a, 0x9003, 0x0000, 0x0010};  // R0 = R1 + R2 || R3 = [P0++] || NOP; RTS
+        for (int i = 0; i < 5; ++i) mem.write16(0x100 + 2 * i, code[i]);
+        Core core(&cpu, &mem);
+        core.set_tiering(UINT32_MAX);
+        core.set_copy_patch(true);
+        if (cold) require(core.set_cold_threshold(cold), "no cold tier");
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        cpu.rets = 0x800;
+        cpu.dpregs[8] = 0x2000;
+        mem.reads = 0;
+        require(core.run(0x100), "run");
+        reads[cold != 0] = mem.reads;
+    }
+    if (reads[0] != reads[1]) {
+        fprintf(stderr, "FAIL: a block no stencils take read %u halfwords, %u with the cold tier\n", reads[0], reads[1]);
+        std::exit(1);
+    }
+}
+#endif
+
 int main() {
+#if defined(__EMSCRIPTEN__)
+    test_cold_code();
+#endif
     test_no_worker();
     test_result_order();
     test_size_ref();
