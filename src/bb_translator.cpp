@@ -277,7 +277,7 @@ BBTranslateResult BBTranslator::translate_as(uint32_t pc, const CpuState* hint, 
 }
 
 static Value* field(IRBuilder<>& b, Value* cpu, size_t offset) {
-    return b.CreateGEP(b.getInt8Ty(), cpu, b.getInt64(offset));
+    return bcore_abi::object_field(b, bcore_abi::is_wasm(b), cpu, b.getInt64(offset));
 }
 
 // A tier-0 block counts every start, its native loop's included: at the top
@@ -296,25 +296,25 @@ void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* fir
 void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* first_entry,
                                      Value* counter, Value* count_offset, Value* threshold) {
     auto& ctx = b.getContext();
-    auto* i8 = b.getInt8Ty();
     auto* i32 = b.getInt32Ty();
     Instruction* at = &*first_entry->getFirstInsertionPt();
     b.SetInsertPoint(at);
     auto* chain = b.CreateLoad(b.getPtrTy(), field(b, cpu, offsetof(CpuState, chain_table)), "chain_table");
-    auto* table = b.CreateGEP(i8, chain, b.getInt64(kTierTableOffset), "tier_table");
-    auto* slot = b.CreateGEP(i8, table, count_offset);
+    const bool wasm = bcore_abi::is_wasm(b);
+    auto* table = bcore_abi::object_field(b, wasm, chain, b.getInt64(kTierTableOffset), "tier_table");
+    auto* slot = bcore_abi::object_field(b, wasm, table, count_offset);
     auto* count = b.CreateAdd(b.CreateLoad(i32, slot), b.getInt32(1), "tier_count");
     b.CreateStore(count, slot);
     Instruction* hot = SplitBlockAndInsertIfThen(b.CreateICmpEQ(count, threshold), at, false,
                                                  weights_rarely(ctx));
     b.SetInsertPoint(hot);
-    auto* filed_ptr = b.CreateGEP(i8, table, b.getInt64(offsetof(TierTable, requests)));
+    auto* filed_ptr = bcore_abi::object_field(b, wasm, table, b.getInt64(offsetof(TierTable, requests)));
     auto* filed = b.CreateLoad(i32, filed_ptr, "tier_requests");
     b.CreateStore(b.CreateAdd(filed, b.getInt32(1)), filed_ptr);
     Instruction* room = SplitBlockAndInsertIfThen(b.CreateICmpULT(filed, b.getInt32(TierTable::kRequests)), hot,
                                                   false);
     b.SetInsertPoint(room);
-    auto* request = b.CreateGEP(i8, table, b.CreateAdd(b.getInt64(offsetof(TierTable, request)),
+    auto* request = bcore_abi::object_field(b, wasm, table, b.CreateAdd(b.getInt64(offsetof(TierTable, request)),
                                                        b.CreateMul(b.CreateZExt(filed, b.getInt64Ty()), b.getInt64(4))));
     b.CreateStore(counter, request);
 }
@@ -337,6 +337,7 @@ void BBTranslator::emit_tier_counter(IRBuilder<>& b, Value* cpu, BasicBlock* fir
 bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* real, bool steady_skip) {
     using Bytes = std::bitset<sizeof(CpuState)>;
     const DataLayout& layout = fn->getParent()->getDataLayout();
+    const bool wasm = bcore_abi::is_wasm(*fn->getParent());
     Function* sync_out = fn->getParent()->getFunction(LiftVisitor::kSyncOut);
     Function* sync_in = fn->getParent()->getFunction(LiftVisitor::kSyncIn);
     Function* commit = fn->getParent()->getFunction(kCommit);
@@ -404,8 +405,8 @@ bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* re
             if (!set.test(begin)) { ++begin; continue; }
             uint32_t end = begin;
             while (end < sizeof(CpuState) && set.test(end)) ++end;
-            auto* at_shadow = b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(begin));
-            auto* at_real = b.CreateGEP(b.getInt8Ty(), real, b.getInt64(begin));
+            auto* at_shadow = bcore_abi::object_field(b, wasm, shadow, b.getInt64(begin));
+            auto* at_real = bcore_abi::object_field(b, wasm, real, b.getInt64(begin));
             if (to_shadow) b.CreateMemCpy(at_shadow, Align(1), at_real, Align(1), end - begin);
             else b.CreateMemCpy(at_real, Align(1), at_shadow, Align(1), end - begin);
             begin = end;
@@ -419,7 +420,7 @@ bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* re
     for (uint32_t i = offsetof(CpuState, did_jump); i < offsetof(CpuState, did_jump) + sizeof(bool); ++i)
         copied.reset(i);
     copy(copied, true);
-    b.CreateStore(b.getInt8(0), b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(offsetof(CpuState, did_jump))));
+    b.CreateStore(b.getInt8(0), bcore_abi::object_field(b, wasm, shadow, b.getInt64(offsetof(CpuState, did_jump))));
 
     // A loop that skips to its last iteration (Core::set_steady_skip) jumps
     // the fields it counts in without storing the iterations between: a
@@ -449,8 +450,8 @@ bool BBTranslator::expand_loop_syncs(Function* fn, AllocaInst* shadow, Value* re
     auto build_accs = [&] {
         for (int n = 0; n < 2; ++n) {
             if (!acc_used[n]) continue;
-            auto* ax = b.CreateLoad(b.getInt32Ty(), b.CreateGEP(b.getInt8Ty(), real, b.getInt64(offsetof(CpuState, ax[0]) + 4 * n)));
-            auto* aw = b.CreateLoad(b.getInt32Ty(), b.CreateGEP(b.getInt8Ty(), real, b.getInt64(offsetof(CpuState, aw[0]) + 4 * n)));
+            auto* ax = b.CreateLoad(b.getInt32Ty(), bcore_abi::object_field(b, wasm, real, b.getInt64(offsetof(CpuState, ax[0]) + 4 * n)));
+            auto* aw = b.CreateLoad(b.getInt32Ty(), bcore_abi::object_field(b, wasm, real, b.getInt64(offsetof(CpuState, aw[0]) + 4 * n)));
             auto* acc = b.CreateOr(b.CreateShl(b.CreateSExt(b.CreateTrunc(ax, b.getInt8Ty()), b.getInt64Ty()), 32),
                                    b.CreateZExt(aw, b.getInt64Ty()));
             b.CreateStore(acc, b.CreateGEP(b.getInt8Ty(), shadow, b.getInt64(LiftVisitor::kAccSlot + 8 * n)));
@@ -715,6 +716,7 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
                                    uint32_t entry_pc, BasicBlock* self_loop, BasicBlock* direct,
                                    BasicBlock* first_entry, const std::set<ReturnInst*>* steady,
                                    Value* entry_pc_value) {
+    const bool wasm = bcore_abi::is_wasm(*fn->getParent());
     std::vector<ReturnInst*> returns;
     for (auto& block : *fn)
         if (auto* ret = dyn_cast_or_null<ReturnInst>(terminator(block)); ret && &block != direct)
@@ -823,18 +825,18 @@ void BBTranslator::emit_chain_exit(IRBuilder<>& b, Function* fn, Value* cpu, Val
     };
     auto slot_of = [&](Value* pc) {
         auto* index = b.CreateAnd(b.CreateLShr(pc, 1), b.getInt32((1u << kChainBits) - 1));
-        return b.CreateGEP(i8, table, b.CreateMul(b.CreateZExt(index, b.getInt64Ty()),
+        return bcore_abi::object_field(b, wasm, table, b.CreateMul(b.CreateZExt(index, b.getInt64Ty()),
                                                   b.getInt64(sizeof(ChainSlot))), "chain_slot");
     };
     // The slot's block runs next if the slot holds pc.
     auto call_slot = [&](Value* slot, Value* pc, Value* total, const Tail& tail, BasicBlock* out,
                          bool did_jump_clear) {
-        auto* slot_pc = b.CreateLoad(i32, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
+        auto* slot_pc = b.CreateLoad(i32, bcore_abi::object_field(b, wasm, slot, b.getInt64(offsetof(ChainSlot, pc))), "slot_pc");
         auto* hit = BasicBlock::Create(ctx, "chain_hit", fn);
         b.CreateCondBr(b.CreateICmpEQ(slot_pc, pc), hit, out, weights_usually(ctx));
         b.SetInsertPoint(hit);
         if (!chain(total, tail, pc, did_jump_clear)) return;
-        auto* next_fn = b.CreateLoad(ptr, b.CreateGEP(i8, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
+        auto* next_fn = b.CreateLoad(ptr, bcore_abi::object_field(b, wasm, slot, b.getInt64(offsetof(ChainSlot, fn))), "chain_fn");
         commit();
         bcore_abi::tail_call_block(b, next_fn, real, mem);
         b.CreateRetVoid();

@@ -48,7 +48,7 @@ void tail_call(BasicBlock* block, Function* next) {
 }
 
 Value* field_ptr(IRBuilder<>& b, Value* cpu, size_t offset) {
-    return b.CreateGEP(b.getInt8Ty(), cpu, b.getInt64(offset));
+    return bcore_abi::object_field(b, bcore_abi::is_wasm(b), cpu, b.getInt64(offset));
 }
 
 }  // namespace
