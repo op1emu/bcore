@@ -80,10 +80,6 @@ bool Core::init(int opt_level, int codegen_level) {
     opt_level_ = opt_level;
     codegen_level_ = codegen_level;
 
-    compiler_ = std::make_unique<Compiler>();
-    if (!compiler_->init(opt_level_, codegen_level_) || !compiler_->set_post_pipeline(post_pipeline_))
-        return false;
-    compiler_->set_steady_skip(steady_skip_);
     jit_ = std::make_shared<JitEngine>();
     if (!jit_->init())
         return false;
@@ -92,6 +88,15 @@ bool Core::init(int opt_level, int codegen_level) {
     unlimited_ = cpu_->steps_remaining == 0;
     cp_.reset();
     set_copy_patch(copy_patch_);
+    return llvm_on_demand_ || init_llvm();
+}
+
+bool Core::init_llvm() {
+    auto compiler = std::make_unique<Compiler>();
+    if (!compiler->init(opt_level_, codegen_level_) || !compiler->set_post_pipeline(post_pipeline_))
+        return false;
+    compiler->set_steady_skip(steady_skip_);
+    compiler_ = std::move(compiler);
 
     // Use the Memory interface's is_fastmem() to determine mode.
     const bool fastmem = mem_->is_fastmem();
@@ -101,7 +106,7 @@ bool Core::init(int opt_level, int codegen_level) {
 
     translator_ = std::make_shared<BBTranslator>(
         mem_,
-        /*unlimited=*/(cpu_->steps_remaining == 0),
+        /*unlimited=*/unlimited_,
         fastmem,
         fast_base);
     if (cpu_->steps_remaining)
@@ -116,8 +121,18 @@ bool Core::init(int opt_level, int codegen_level) {
     translator_->set_idle_waits(idle_waits_);
     translator_->set_steady_skip(steady_skip_ != 0);
     applyModuleTarget();
+    if (tier_threshold_ && !tier0_compiler_ && !init_tier0_compiler()) return false;
     if (tier_background_) startWorker();
 
+    return true;
+}
+
+bool Core::init_tier0_compiler() {
+    auto compiler = std::make_unique<Compiler>();
+    // Neither the IR pipeline nor the splitter: tier-0 code runs too
+    // rarely for its layout to matter.
+    if (!compiler->init(/*opt_level=*/0, /*codegen_level=*/0, /*split=*/false)) return false;
+    tier0_compiler_ = std::move(compiler);
     return true;
 }
 
@@ -267,6 +282,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         tier.code = &*prefetched;
     }
 #endif
+    if (!translator_ && !init_llvm()) return nullptr;  // set_llvm_on_demand
     auto result = translator_->translate(pc, hint, careful, tiered);
     if (replay && replay->missed()) {
         // Code the tier-0 compilation never read: not this block's.
@@ -898,7 +914,7 @@ void Core::invalidate() {
     if (!jit_->init())
         llvm::report_fatal_error("bcore: JIT re-initialization failed in invalidate()");
     jit_->setChainFilter(chain_filter_);
-    applyModuleTarget();
+    if (translator_) applyModuleTarget();
     cp_.reset();  // the old engine's arenas are gone
     set_copy_patch(copy_patch_);
     // The new engine's tier table starts at zero, with none of these blocks.
@@ -968,6 +984,11 @@ void Core::set_host_cycles(bool host_cycles) {
 const char* const Core::kDefaultPostPipeline = "function(dse)";
 
 bool Core::set_post_pipeline(const std::string& pipeline) {
+    // With LLVM not made yet (set_llvm_on_demand), its Compiler takes it then.
+    if (!compiler_ && llvm_on_demand_) {
+        post_pipeline_ = pipeline;
+        return true;
+    }
     if (!compiler_ || !compiler_->set_post_pipeline(pipeline)) return false;
     post_pipeline_ = pipeline;
     if (worker_) {
@@ -988,13 +1009,8 @@ void Core::set_loop_blocks(bool loop) {
 }
 
 void Core::set_tiering(uint32_t threshold, uint32_t size_ref) {
-    if (threshold && !tier0_compiler_) {
-        auto compiler = std::make_unique<Compiler>();
-        // Neither the IR pipeline nor the splitter: tier-0 code runs too
-        // rarely for its layout to matter.
-        if (!compiler->init(/*opt_level=*/0, /*codegen_level=*/0, /*split=*/false)) return;
-        tier0_compiler_ = std::move(compiler);
-    }
+    // LLVM not made yet (set_llvm_on_demand): init_llvm makes it.
+    if (threshold && !tier0_compiler_ && (compiler_ || !llvm_on_demand_) && !init_tier0_compiler()) return;
     tier_threshold_ = threshold;
     tier_size_ref_ = size_ref;
 }
