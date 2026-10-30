@@ -183,9 +183,10 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             }
         }
         if (!id) return fail(is16(w) ? "no stencil" : is_parallel(w) ? "parallel" : "32-bit");
-        Piece piece = CpTranslator::piece(kStencils[id - 1], cur, insn, selected);
+        // IDLE waits where the host does (kIdleWait).
+        const bool waits = (kStencils[id - 1].flags & kIdle) && config.idle_waits;
+        Piece piece = CpTranslator::piece(kStencils[waits ? kIdleWait : id - 1], cur, insn, selected);
         const uint16_t flags = piece.stencil->flags;
-        if ((flags & kIdle) && config.idle_waits) return fail("idle");
         cycles |= (flags & kCycles) != 0;
         piece.packet = index;
         pieces_.push_back(piece);

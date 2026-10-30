@@ -2573,13 +2573,23 @@ bool LiftVisitor::decode_ProgCtrl_IDLE() {
     // sources: a sync NOP, like CSYNC/SSYNC. With one (set_idle_waits), the
     // block ends after it and says so: the core waits for a wakeup at the
     // next packet, which the host then lets guest time reach. Where a loop
-    // may end at the IDLE the next PC would be the hardware loop's: a NOP
-    // there too -- and in a careful compilation, which knows no loop bottom
-    // to be absent, so a block recompiled careful spins where it waited.
-    if (!idle_waits_ || !lb_absent(current_pc)) return true;
-    // A wakeup due now (CpuState::idle_wake, cec_pending): a NOP too.
+    // ends at the IDLE the next PC would be the hardware loop's: a NOP
+    // there too. The hint tells (lb_absent, behind the block's guard), or
+    // else the loop registers do as it runs: a careful compilation's, a
+    // stencil's (kIdleWait).
+    if (!idle_waits_) return true;
+    const bool absent = lb_absent(current_pc);
     auto& ctx = builder_.getContext();
     auto* i8 = builder_.getInt8Ty();
+    Value* bottom = nullptr;  // the IDLE is a loop's bottom now
+    if (!absent) {
+        for (int i = 0; i < 2; ++i) {
+            Value* lb = load_cpu_u32(offsetof(CpuState, lb[0]) + 4 * i, "idle_lb");
+            Value* here = builder_.CreateICmpEQ(lb, pc_value(current_pc));
+            bottom = bottom ? builder_.CreateOr(bottom, here) : here;
+        }
+    }
+    // A wakeup due now (CpuState::idle_wake, cec_pending): a NOP too.
     Value* wake = builder_.CreateLoad(i8, entry_load_ptr(offsetof(CpuState, cec_pending), cec_pending_value_,
                                                          "cec_pending_flag"), "cec_pending");
     auto* wake_ptr = builder_.CreateLoad(builder_.getPtrTy(), cpu_field_ptr(offsetof(CpuState, idle_wake),
@@ -2600,7 +2610,9 @@ bool LiftVisitor::decode_ProgCtrl_IDLE() {
     carry_reg_cache(from, decide);
     auto* wait = BasicBlock::Create(ctx, "idle_wait", fn);
     auto* nop = BasicBlock::Create(ctx, "idle_now", fn);
-    builder_.CreateCondBr(builder_.CreateICmpEQ(wake, builder_.getInt8(0)), wait, nop);
+    Value* waits = builder_.CreateICmpEQ(wake, builder_.getInt8(0));
+    if (bottom) waits = builder_.CreateAnd(waits, builder_.CreateNot(bottom));
+    builder_.CreateCondBr(waits, wait, nop);
     builder_.SetInsertPoint(wait);
     carry_reg_cache(decide, wait);  // for the epilog this exit runs (finalize_pending_exits)
     builder_.CreateStore(builder_.getInt8(1), cpu_field_ptr(offsetof(CpuState, idle), i8));
