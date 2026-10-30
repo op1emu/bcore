@@ -2,6 +2,7 @@
 #include "helper_functions.h"
 #include "wasm_object.h"
 
+#include <algorithm>
 #include <cstring>
 #include <unordered_set>
 
@@ -28,6 +29,9 @@ alignas(16) uint8_t g_stack[kStackSize];
 
 // The table grows by this many slots at a time.
 constexpr uint32_t kSlotChunk = 1024;
+
+// The hole values of the piece running (CodeLoader::run_pieces).
+const uint32_t* g_piece_values = nullptr;
 
 // What a block's module may import (wasm_object.h), and whether the imports
 // are made (Module.bcoreBlocks, once in the process: the same for every
@@ -98,11 +102,63 @@ EM_JS(int, bcore_wasm_instantiate, (const uint8_t* bytes, uint32_t size, const c
     }
 });
 
+// The module of the size bytes at bytes (copied first, as above)
+// instantiated, its functions "0" to n - 1 in the table's slots at slots
+// (n of them). 0, or -1 (said why, for pc), with no slot set.
+EM_JS(int, bcore_wasm_instantiate_n, (const uint8_t* bytes, uint32_t size, uint32_t n, const uint32_t* slots,
+                                      uint32_t pc), {
+    try {
+        const module = new WebAssembly.Module(HEAPU8.slice(bytes >>> 0, (bytes >>> 0) + (size >>> 0)));
+        const exports = new WebAssembly.Instance(module, {env: Module["bcoreBlocks"]}).exports;
+        const fns = [];
+        for (let i = 0; i < n; ++i) fns.push(exports[i]);
+        for (let i = 0; i < n; ++i) wasmTable.set(HEAPU32[(slots >>> 2) + i], fns[i]);
+        return 0;
+    } catch (error) {
+        err("bcore: the blocks at 0x" + (pc >>> 0).toString(16).padStart(8, "0") + ": " + error);
+        return -1;
+    }
+});
+
 EM_JS(void, bcore_wasm_clear, (uint32_t slot), {
     wasmTable.set(slot, null);
 });
 
 namespace bcore {
+
+namespace {
+
+// n free slots, taken; false if the table grows no more.
+bool take_slots(uint32_t n, uint32_t* slots) {
+    if (g_free.size() < n) {
+        const uint32_t grow = std::max(kSlotChunk, n);
+        const int first = bcore_wasm_grow(grow);
+        if (first < 0) return false;
+        for (uint32_t i = grow; i-- > 0;) g_free.push_back(uint32_t(first) + i);
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        slots[i] = g_free.back();
+        g_free.pop_back();
+    }
+    return true;
+}
+
+void give_slots(uint32_t n, const uint32_t* slots) {
+    for (uint32_t i = n; i-- > 0;) g_free.push_back(slots[i]);
+}
+
+}  // namespace
+
+bool load_shared_functions(const uint8_t* bytes, size_t size, uint32_t n, uint32_t* slots) {
+    if (!take_slots(n, slots)) return false;
+    if (bcore_wasm_instantiate_n(bytes, uint32_t(size), n, slots, 0) != 0) {
+        give_slots(n, slots);
+        return false;
+    }
+    return true;
+}
+
+uintptr_t piece_values_address() { return reinterpret_cast<uintptr_t>(&g_piece_values); }
 
 CodeLoader::CodeLoader() = default;
 
@@ -165,6 +221,30 @@ BbFunc CodeLoader::load_module(uint32_t pc, const uint8_t* bytes, size_t size, c
     slots_.insert(slot);
     object_bytes_ += size;
     return reinterpret_cast<BbFunc>(uintptr_t(slot));
+}
+
+bool CodeLoader::load_functions(uint32_t pc, const uint8_t* bytes, size_t size, uint32_t n, BbFunc* out) {
+    std::vector<uint32_t> slots(n);
+    if (!take_slots(n, slots.data())) return false;
+    if (bcore_wasm_instantiate_n(bytes, uint32_t(size), n, slots.data(), pc) != 0) {
+        give_slots(n, slots.data());
+        return false;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        slots_.insert(slots[i]);
+        out[i] = reinterpret_cast<BbFunc>(uintptr_t(slots[i]));
+    }
+    object_bytes_ += size;
+    return true;
+}
+
+void CodeLoader::run_pieces(const ColdPiece* pieces, size_t n, const uint32_t* values, CpuState* cpu,
+                            Memory* mem) const {
+    using Piece = int (*)(CpuState*, Memory*);
+    for (size_t i = 0; i < n; ++i) {
+        g_piece_values = values + pieces[i].values;
+        if (reinterpret_cast<Piece>(uintptr_t(pieces[i].slot))(cpu, mem)) break;
+    }
 }
 
 void CodeLoader::release(BbFunc fn) {

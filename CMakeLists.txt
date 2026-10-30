@@ -280,7 +280,7 @@ if(BCORE_COPY_PATCH)
         OBJECT_DEPENDS "${BCORE_CP_GEN}/cp_stencils.inc;${BCORE_CP_GEN}/cp_stencils.bin;${BCORE_CP_GEN}/cp_tables.bin")
     set(BCORE_CP_SOURCES src/cp_stencils.cpp src/cp_translator.cpp ${BCORE_CP_GEN}/cp_stencils.inc)
     if(EMSCRIPTEN)
-        list(APPEND BCORE_CP_SOURCES src/cp_emit_wasm.cpp)
+        list(APPEND BCORE_CP_SOURCES src/cp_emit_wasm.cpp src/cp_cold_wasm.cpp)
     endif()
 endif()
 

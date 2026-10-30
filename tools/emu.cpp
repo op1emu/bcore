@@ -39,6 +39,8 @@ int main(int argc, char** argv) {
     bool light_tier1 = false;
     bool copy_patch = false;
     bool copy_patch_hints = true;
+    uint32_t cold_threshold = 0;  // --cp-cold
+    uint32_t cold_batch = 1;      // --cp-batch
     int tier_background = -1;  // -1 on the dispatching thread; else publish_after
     const char* post_pipeline = nullptr;
     uint64_t max_steps = 0; // 0 = unlimited
@@ -81,6 +83,10 @@ int main(int argc, char** argv) {
             copy_patch = true;
         } else if (strcmp(argv[i], "--no-cp-hints") == 0) {
             copy_patch_hints = false;
+        } else if (strcmp(argv[i], "--cp-cold") == 0 && i + 1 < argc) {
+            cold_threshold = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
+        } else if (strcmp(argv[i], "--cp-batch") == 0 && i + 1 < argc) {
+            cold_batch = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--tier-background") == 0 && i + 1 < argc) {
             tier_background = static_cast<int>(strtol(argv[++i], nullptr, 0));
         } else if (strcmp(argv[i], "--post-pipeline") == 0 && i + 1 < argc) {
@@ -91,7 +97,7 @@ int main(int argc, char** argv) {
     }
 
     if (!elf_path) {
-        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N [--tier-size-ref N] [--tier1-pipeline light|o1]] [--copy-patch [--no-cp-hints]] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
+        fprintf(stderr, "usage: emu [--trace] [--dump] [--fastmem | --page-table] [--count-packets] [--chain] [--no-lazy-state] [--no-loop-blocks] [--tier-threshold N [--tier-size-ref N] [--tier1-pipeline light|o1]] [--copy-patch [--no-cp-hints] [--cp-cold N [--cp-batch K]]] [--tier-background PUBLISH_AFTER] [--post-pipeline P] [--max-steps N] [--opt-level/-O N] <elf-file>\n");
         return 1;
     }
     if (chain && (max_steps || trace)) {
@@ -220,6 +226,11 @@ int main(int argc, char** argv) {
     core.set_light_tier1(light_tier1);
     core.set_copy_patch(copy_patch);
     core.set_copy_patch_hints(copy_patch_hints);
+    if (cold_threshold && !core.set_cold_threshold(cold_threshold)) {
+        fprintf(stderr, "--cp-cold: this build has no cold tier (WebAssembly's)\n");
+        return 1;
+    }
+    core.set_cold_batch(cold_batch);
     if (tier_background >= 0 && !core.set_tier_background(true, static_cast<uint64_t>(tier_background))) {
         fprintf(stderr, "--tier-background: this build has no threads\n");
         return 1;
