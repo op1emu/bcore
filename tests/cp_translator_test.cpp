@@ -15,6 +15,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 using namespace bcore;
 
@@ -328,8 +329,119 @@ static void test_two_loops() {
     }
 }
 
+// A hardware loop at the block's start, ending at its parallel packet, the
+// block chaining with its own exit: pinned, it runs itself again past its
+// guard (kSelfExitsLoop), its prologue still counting every start. It must
+// end as the block with no hint does, the same starts counted; and where a
+// packet in the loop moves LB0 (LB0 = R4, to where it is), through its guard
+// every time.
+static void test_self_loop() {
+    auto run = [](const CpuState* hint, bool moves, bool counted) {
+        Setup s;
+        if (moves) s.code({0x3c14});  // LB0 = R4
+        const uint32_t bottom = kPc + (moves ? 2 : 0);
+        const uint16_t loop[] = {0xcc04, 0x000a, 0x9003, 0x0000,  // R0 = R1 + R2 || R3 = [P0++] || NOP
+                                 0x0010};                          // RTS
+        for (int i = 0; i < 5; ++i) s.mem.write16(bottom + 2 * i, loop[i]);
+        s.cpu.dpregs[4] = bottom;
+        s.cpu.dpregs[8] = 0x2000;
+        s.cpu.lb[0] = bottom;
+        s.cpu.lt[0] = kPc;
+        s.cpu.lc[0] = 9;
+        s.cpu.lb[1] = 0x9000;
+        CpTranslator cp(s.jit);
+        CpTranslator::Config config;
+        config.threshold = kTierOnly;
+        config.chaining = true;
+        config.self_loop = true;
+        config.count_chained = counted;
+        config.hint = hint;
+        CpTranslator::Block block = cp.translate(kPc, s.mem, 0, config);
+        require(block.fn, "no block made of stencils");
+        s.jit.addCode(kPc, block.fn, block.fallthrough_pc);
+        s.cpu.chain_budget = 1000;
+        s.jit.enter(block.fn, &s.cpu, &s.mem);
+        require(!s.cpu.lb_guard_miss, "a guard missed");
+        return std::make_tuple(s.cpu.pc, s.cpu.dpregs[8], s.cpu.lc[0], s.cpu.packets + s.cpu.chain_packets,
+                               s.cpu.chain_blocks, s.jit.tierTable()->count[0]);
+    };
+    for (bool moves : {false, true})
+    for (bool counted : {false, true}) {
+        CpuState hint{};
+        hint.lb[0] = kPc + (moves ? 2 : 0);
+        hint.lt[0] = kPc;
+        hint.lc[0] = 9;
+        hint.lb[1] = 0x9000;
+        const auto want = run(nullptr, moves, counted), got = run(&hint, moves, counted);
+        const std::string what = std::string(moves ? "moved" : "steady") + (counted ? " counted" : "");
+        require(std::get<0>(want) == kReturn && std::get<1>(want) == 0x2000 + 4 * 9 && std::get<5>(want) == 9,
+                what + ": the loop runs nine times");
+        require(got == want, what + ": not as the block with no hint");
+    }
+}
+
+// A guarded block that moves a loop and runs itself again: its parallel
+// packet compares nothing (the hint's LB0 outside the block), then LB0 = R4
+// puts loop 0's bottom on it and JUMP.S goes back to it, through the
+// block's own exit. The next start must pass the guard again, which misses
+// (a careful block runs on), not run past it: the packet would not count
+// the loop down.
+static void test_self_loop_moved() {
+    auto run = [](const CpuState* hint) {
+        Setup s;
+        s.code({0xcc04, 0x000a, 0x9003, 0x0000,  // R0 = R1 + R2 || R3 = [P0++] || NOP
+                0x3c14,                          // LB0 = R4
+                0x2ffb});                        // JUMP.S 0x100
+        s.cpu.dpregs[4] = kPc;
+        s.cpu.dpregs[8] = 0x2000;
+        s.cpu.lb[0] = 0x800;
+        s.cpu.lt[0] = kPc + 8;
+        s.cpu.lc[0] = 4;
+        s.cpu.lb[1] = 0x9000;
+        CpTranslator cp(s.jit);
+        CpTranslator::Config config;
+        config.threshold = kTierOnly;
+        config.chaining = true;
+        config.self_loop = true;
+        config.hint = hint;
+        CpTranslator::Block block = cp.translate(kPc, s.mem, 0, config);
+        require(block.fn, "no block made of stencils");
+        s.jit.addCode(kPc, block.fn, block.fallthrough_pc);
+        std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> runs_seen;  // after each run
+        for (int runs = 0; runs < 8; ++runs) {
+            s.cpu.chain_budget = 60;
+            s.cpu.chain_packets = 0;
+            s.jit.enter(block.fn, &s.cpu, &s.mem);
+            if (s.cpu.lb_guard_miss) {
+                // As Core::run: the careful block in its place, in the same run.
+                s.cpu.lb_guard_miss = 0;
+                s.cpu.packets = 0;
+                config.careful = true;
+                block = cp.translate(kPc, s.mem, 1, config);
+                require(block.fn, "no careful block");
+                s.jit.addCode(kPc, block.fn, block.fallthrough_pc);
+                s.jit.enter(block.fn, &s.cpu, &s.mem);
+                require(!s.cpu.lb_guard_miss, "the careful block missed");
+            }
+            s.cpu.did_jump = false;
+            runs_seen.emplace_back(s.cpu.pc, s.cpu.dpregs[8], s.cpu.lc[0]);
+        }
+        return runs_seen;
+    };
+    CpuState hint{};
+    hint.lb[0] = 0x800;
+    hint.lt[0] = kPc + 8;
+    hint.lc[0] = 4;
+    hint.lb[1] = 0x9000;
+    const auto want = run(nullptr), got = run(&hint);
+    require(std::get<2>(want.front()) == 0, "loop 0 counted down to its end");
+    require(got == want, "a guarded block that moves a loop, again: not as the block with no hint");
+}
+
 int main() {
     test_packets();
+    test_self_loop_moved();
+    test_self_loop();
     test_two_loops();
     test_loops_moved();
     test_cap();

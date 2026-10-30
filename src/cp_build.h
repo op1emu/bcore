@@ -174,8 +174,10 @@ int32_t wasm_signature(const llvm::wasm::WasmSignature& sig);
 // of a block's function: the header's indices filled in, its locals the
 // block's, its tail calls of the next packet and of the exit branches out
 // of its block and the pieces' (an exit's code, kExits or kSelfExits, may
-// return). False with c.error set where the code cannot be one.
-bool wasm_piece(Code& c, bool exit = false);
+// return). False with c.error set where the code cannot be one. With
+// self_br, an exit's tail call of the block itself (kHoleSelf) is a branch
+// to the loop around the block's pieces instead (kSelfExitsLoop).
+bool wasm_piece(Code& c, bool exit = false, bool self_br = false);
 // The hole a relocation's symbol names, or -1.
 int hole_of(llvm::StringRef name);
 // The code of each function of an object, by name: its section's or its

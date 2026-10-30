@@ -137,6 +137,7 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
     pieces_.push_back({nullptr, nullptr, nullptr, pc, 0, -1, 0, 0});  // the prologue, chosen below
     guarded_ = false;
     pinned_ = 0;
+    past_guard_ = false;
     // Whether the hint's loops still hold at the packet: none has moved one
     // since the block's start (kLoopsMoved).
     bool steady = true;
@@ -211,6 +212,7 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             hint_lt_[i] = config.hint->lt[i];
         }
         span_ = last_pc - pc;
+        past_guard_ = steady;
     }
     return true;
 }
@@ -401,7 +403,8 @@ bool CpTranslator::place(const Support& arena, uint8_t* code, uint8_t* cold, con
             } else if (r.hole == kHoleExit) {
                 value = reinterpret_cast<uintptr_t>(exit_piece_ >= 0 ? code + pieces_[exit_piece_].at : arena.exits[exit]);
             } else if (r.hole == kHoleSelf) {
-                value = reinterpret_cast<uintptr_t>(code);
+                // Its start, or past its guard: the prologue.
+                value = reinterpret_cast<uintptr_t>(code + (past_guard_ ? pieces_[1].at : 0));
             } else if (r.hole == kHoleHot) {
                 value = reinterpret_cast<uintptr_t>(hot_at);  // the place there in the addend
             } else if (r.hole == kHoleCold) {
@@ -510,7 +513,10 @@ CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t 
     exit_piece_ = -1;
     if (config.self_loop && config.chaining && !config.dry) {
         exit_piece_ = int(pieces_.size());
-        pieces_.push_back(CpTranslator::piece(kStencils[kSelfExits[config.count_chained]], pc, 0, -1));
+        const uint32_t* exits = past_guard_ ? kSelfExitsLoop : kSelfExits;
+        pieces_.push_back(CpTranslator::piece(kStencils[exits[config.count_chained]], pc, 0, -1));
+    } else {
+        past_guard_ = false;
     }
 #if defined(__EMSCRIPTEN__)
     return emit_wasm(pc, counter, config, out);

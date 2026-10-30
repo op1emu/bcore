@@ -197,6 +197,12 @@ extern const uint32_t kExits[5];     // return; chain; count chained; dry; dry, 
 // to its own start when its next PC is its own, through the chain table
 // otherwise. Without, with chained blocks counted.
 extern const uint32_t kSelfExits[2];
+// The same where the block runs again past its entry guard (kGuards): a
+// guarded block in which no packet moves a loop (kLoopsMoved) finds the
+// loop registers as its guard did. On WebAssembly the way back is a branch
+// to a loop around the block's pieces, after the guard (cp_emit_wasm.cpp);
+// natively these are kSelfExits, their kHoleSelf the block's prologue.
+extern const uint32_t kSelfExitsLoop[2];
 // Where a block cut at its last packet goes on (pc the next PC, field 0
 // the packet's length, packet its index): stores them and exits.
 extern const uint32_t kFallthrough;

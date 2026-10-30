@@ -195,6 +195,9 @@ private:
     // loops its tails pin, and its holes' values.
     bool guarded_ = false;
     unsigned pinned_ = 0;
+    // Whether it runs itself again past the guard (kSelfExitsLoop): guarded,
+    // with its own exit, and no packet moves a loop.
+    bool past_guard_ = false;
     uint32_t hint_lb_[2] = {}, hint_lt_[2] = {}, span_ = 0;
     JitEngine& jit_;
     std::function<void(const char*, const void*, size_t)> listener_;

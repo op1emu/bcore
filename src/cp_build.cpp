@@ -691,7 +691,7 @@ bool skip_immediates(const std::vector<uint8_t>& b, size_t& p, uint8_t op) {
 }
 
 // wasm_piece (cp_build.h); exit_code: an exit's, which may return.
-bool wasm_rewrite(Code& c, bool exit_code) {
+bool wasm_rewrite(Code& c, bool exit_code, bool self_br) {
     const std::vector<uint8_t>& b = c.bytes;
     auto fail = [&](const char* why) {
         if (c.error.empty()) c.error = why;
@@ -746,6 +746,14 @@ bool wasm_rewrite(Code& c, bool exit_code) {
             if (index >= map.size()) return fail("a local out of range");
             out.push_back(op);
             wasm_leb(out, map[index]);
+        } else if (op == 0x12 && self_br && reloc_at(imm) && reloc_at(imm)->hole == kHoleSelf) {
+            // The block again: to the loop around its pieces, which the
+            // exit's code follows (cp_emit_wasm.cpp), one out past its own
+            // block. The arguments stay on the stack, which a branch drops.
+            out.push_back(0x0c);
+            wasm_leb(out, depth + 1);
+            prev = prev2 = SIZE_MAX;
+            continue;
         } else if (op == 0x12 && reloc_at(imm) &&
                    (reloc_at(imm)->hole == kHoleCont || reloc_at(imm)->hole == kHoleExit)) {
             // The next packet: out of the piece's block; the block's exit:
@@ -807,7 +815,7 @@ bool wasm_rewrite(Code& c, bool exit_code) {
 
 }  // namespace
 
-bool wasm_piece(Code& c, bool exit) { return c.error.empty() && wasm_rewrite(c, exit); }
+bool wasm_piece(Code& c, bool exit, bool self_br) { return c.error.empty() && wasm_rewrite(c, exit, self_br); }
 
 size_t tail_jump(const Code& c, Hole hole) {
     if (c.relocs.empty()) return 0;
