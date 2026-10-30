@@ -192,6 +192,7 @@ extern const Pattern32 kPatterns32[];
 extern const uint32_t kPatterns32Count;
 extern const Selected32 kSelected32[];
 extern const uint32_t kPrologue[2];  // without, with host cycles
+extern const uint32_t kPrologueUncounted[2];  // the same, no tier counter (a threshold of UINT32_MAX)
 extern const uint32_t kExits[5];     // return; chain; count chained; dry; dry, count chained
 // A chaining block's own exit, at its end (CpTranslator::Config::self_loop):
 // to its own start when its next PC is its own, through the chain table

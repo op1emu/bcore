@@ -202,7 +202,9 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
         pieces_.push_back(CpTranslator::piece(kStencils[kFallthrough], cur, 0, -1));
         pieces_.back().packet = packets;  // the last packet's
     }
-    pieces_[0] = CpTranslator::piece(kStencils[kPrologue[config.host_cycles && cycles]], pc, 0, -1);
+    // A block that never reaches its threshold need not count its starts.
+    const uint32_t* prologue = config.threshold == UINT32_MAX ? kPrologueUncounted : kPrologue;
+    pieces_[0] = CpTranslator::piece(kStencils[prologue[config.host_cycles && cycles]], pc, 0, -1);
     if (guarded_) {
         // Before the prologue: a block whose guard fails neither counts its
         // start nor sets CYCLES.
