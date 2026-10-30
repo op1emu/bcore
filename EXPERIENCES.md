@@ -1125,3 +1125,60 @@ execution -20.3%. Work the same at every mark.
   (K1/K2 as much slower as the call cost; natively also nothing); promoting
   hot blocks to LLVM (slower: V8 has no on-stack replacement, a new
   module's long loop runs in Liftoff).
+
+## Copy-and-patch with the loop hint
+
+Every stencil was the packet a careful block with no hint lifts: each
+compared the loop bottoms, and at one called bfin_hwloop_step. On the boot
+to main-display (op1emu, promotions off) bfin_hwloop_step ran 276.6M
+times; 88% (243.8M) came from parallel packets, in 36 blocks, the rest
+from lone packets in 810 (a P0 count, not kept). A parallel packet's
+epilog is one tail all of them share, so only the tails needed roles; a
+lone packet's epilog is inside its stencil, and giving those roles would
+double the 89,000 stencils. Handing the blocks with a lone bottom to
+LLVM's tier 0 instead was dropped before it was built: they started 273M
+times, and LLVM's tier 0 code is slower than the stencils' (natively 5.5
+against 3.0 s of execution to main-display).
+
+- A tail at a bottom of the hint, careful still (the step inline, its
+  compares made, emit_epilog_clear's path a careful hint keeps): it holds
+  for any loop registers, needs no guard, and is what a careful
+  compilation after a miss uses too.
+- Under an entry guard, as LLVM's tier 0: the tail that compares nothing
+  where the hint has no bottom at the packet, and the tails that pin loop
+  0, 1 or both (pin_mask, which the translator and the lifter share). The
+  guard comes before the prologue, so a miss counts no start; it returns
+  with lb_guard_miss set and its PC the block's, not through the exit
+  (which would chain to the block again and miss forever). Core passes
+  careful on to the translator: a careful compilation with a guard missed
+  again on every run.
+- The hint holds until a packet moves a loop (kLoopsMoved: a lift that
+  wrote LB or LT, or called a helper that may). No slot piece or slot 0
+  body has the flag, only lone packets (522 stencils).
+- New holes (LB0, LB1, LT0, LT1, the block's span) are numbered after
+  WebAssembly's indices, so the stencils before them keep their bytes:
+  natively code and tables are the same but for the new flag and the 14
+  stencils appended.
+
+Results, boot to main-display. Natively (op1prof ab, 6 pairs, counters):
+execution instructions -0.50%, the synthesizer phase -0.10%, time within
+noise (promotions take the hot loops natively). WebAssembly in Node: 10.83
+to 9.71 s (medians of 5, alternating), user CPU 16.1 to 14.2 s; in Chrome
+133 bfin_hwloop_step 0.79 to 0.08 s of a Worker profile. bench.s is
+unchanged: its loop bottoms are lone packets.
+
+The FIR loop (0x01a5e27e, a one-packet loop, pinned) still cost about as
+much in Chrome (1.9 s): each iteration left through the block's own exit
+and started the function again, its guard included. As LLVM's tier 0
+(loop_top), a guarded block in which no packet moves a loop now runs
+again from its prologue (which still counts the start): natively its own
+exit's kHoleSelf is the prologue; on WebAssembly the guard is first in
+the function, a loop holds the rest, and the exit branches to it
+(kSelfExitsLoop, wasm_piece's self_br: return_call and br are both 6
+bytes, the arguments left on the stack, which a branch drops). Node boot
+10.01 to 9.52 s (medians of 5); Chrome's Worker profile: the FIR block
+1.93 to 1.54 s, the emulator 12.15 s (main) to 11.19 (the tails) to
+10.61 s. A measurement that left the guard out of such blocks altogether
+hung the boot ROM: guards do miss there (as a block's LB is set before
+it starts again), so the guard has to stay at the function's start.
+

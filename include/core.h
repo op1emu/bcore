@@ -103,9 +103,11 @@ public:
     // (elsewhere this does nothing).
     void set_copy_patch(bool enable);
     // Copy-and-patch blocks take the CPU state they are translated in as a
-    // hint, as LLVM's tier 0 does: a parallel packet at a loop bottom then
-    // steps the loop inline instead of calling bfin_hwloop_step. Exact
-    // either way. On by default.
+    // hint, as LLVM's tier 0 does (CpTranslator::Config::hint): a parallel
+    // packet the hint puts at no loop bottom compares none, one at a bottom
+    // steps the loop inline (to the hint's top behind the block's entry
+    // guard), instead of calling bfin_hwloop_step. Exact either way. On by
+    // default.
     void set_copy_patch_hints(bool enable) { copy_patch_hints_ = enable; }
     // For tests: how far from a block (bytes) its arena's helper jumps and
     // exits may lie, 0 for as far as the host's calls reach (all of an arena
