@@ -190,8 +190,11 @@ struct SlotEntry {
     uint32_t commit;
 };
 extern const SlotEntry kSlots[4][0x10000];
-// A parallel packet's tail (its epilog), by [CEC check].
+// A parallel packet's tail (its epilog), by [CEC check]; and where a loop
+// ends at the packet when the block is translated (its step inline,
+// BBTranslator::translate_parallel_tail's bottom), by [CEC check].
 extern const uint32_t kParallelTail[2];
+extern const uint32_t kParallelTailBottom[2];
 
 }  // namespace bcore_cp
 

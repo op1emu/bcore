@@ -102,6 +102,11 @@ public:
     // before. Exact either way. Off by default; on x86-64 and AArch64 only
     // (elsewhere this does nothing).
     void set_copy_patch(bool enable);
+    // Copy-and-patch blocks take the CPU state they are translated in as a
+    // hint, as LLVM's tier 0 does: a parallel packet at a loop bottom then
+    // steps the loop inline instead of calling bfin_hwloop_step. Exact
+    // either way. On by default.
+    void set_copy_patch_hints(bool enable) { copy_patch_hints_ = enable; }
     // For tests: how far from a block (bytes) its arena's helper jumps and
     // exits may lie, 0 for as far as the host's calls reach (all of an arena
     // on x86-64; under 128 MiB on AArch64). A short distance makes a set for
@@ -233,6 +238,7 @@ private:
     uint32_t tier_size_ref_ = 0;
     bool light_tier1_ = false;
     bool copy_patch_ = false;
+    bool copy_patch_hints_ = true;  // set_copy_patch_hints
     size_t copy_patch_reach_ = 0;  // set_copy_patch_reach
     std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
     bool unlimited_ = true;             // no step limit at init

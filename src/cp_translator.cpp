@@ -164,7 +164,7 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
             if (id && (kStencils[id - 1].flags & kBody)) {
                 const char* why = nullptr;
                 const size_t first = pieces_.size();
-                if (!compose_parallel(cur, insn, selected, kStencils[id - 1], code, read, index, why))
+                if (!compose_parallel(cur, insn, selected, kStencils[id - 1], code, read, index, why, config.hint))
                     return fail(why);
                 for (size_t i = first; i < pieces_.size(); ++i)
                     cycles |= (pieces_[i].stencil->flags & kCycles) != 0;
@@ -196,7 +196,8 @@ bool CpTranslator::scan(uint32_t pc, Memory& code, const Config& config, Block& 
 }
 
 bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, const Stencil& body, Memory& code,
-                                    const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why) {
+                                    const std::function<uint16_t(uint32_t)>& read, uint32_t packet, const char*& why,
+                                    const CpuState* hint) {
     if (!code.callbacks_preserve_registers()) {
         why = "parallel: callbacks may change registers";
         return false;
@@ -229,7 +230,8 @@ bool CpTranslator::compose_parallel(uint32_t pc, uint32_t insn, int selected, co
     add(body, insn, selected);
     if (e1.commit) add(kStencils[e1.commit - 1], 0, -1);
     if (e2.commit) add(kStencils[e2.commit - 1], 0, -1);
-    add(kStencils[kParallelTail[tail]], 0, -1);
+    const bool bottom = hint && (hint->lb[0] == pc || hint->lb[1] == pc);
+    add(kStencils[(bottom ? kParallelTailBottom : kParallelTail)[tail]], 0, -1);
     return true;
 }
 

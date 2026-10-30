@@ -247,7 +247,8 @@ Function* BBTranslator::emit_slot_commit(Module& mod, const char* name, int slot
 }
 
 BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, const char* name, uint32_t pc,
-                                                                const StencilHoles& holes, bool check_cec) {
+                                                                const StencilHoles& holes, bool check_cec,
+                                                                bool bottom) {
     StencilLift out;
     auto& ctx = mod.getContext();
     declare_externs(mod);
@@ -256,6 +257,11 @@ BBTranslator::StencilLift BBTranslator::translate_parallel_tail(Module& mod, con
     auto* entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> builder(entry);
     LiftVisitor visitor(builder, cpu, bcore_abi::block_mem(fn), &mod, mem_, unlimited_, fastmem_, fast_base_, mem_->rawmem_limit());
+    // A hint whose loop 0 ends here (relative to pc: the same IR at another
+    // PC), for the inline step; careful still, so the compares stay.
+    CpuState hint{};
+    hint.lb[0] = pc;
+    if (bottom) visitor.set_hint(&hint);
     visitor.set_careful(true);
     visitor.set_idle_waits(idle_waits_);
     visitor.set_stencil(holes.pc, pc, holes.fields);
