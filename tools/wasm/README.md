@@ -26,10 +26,41 @@ for the next piece where its LLVM code tail-called the next packet, and
 leaves with the pieces' block for the exit's code, which follows them. Its
 locals are the function's, the same for every stencil, and every index it
 names is the header's that all blocks share: what the translator fills in
-are its value holes, 5-byte LEB128 immediates (the relocations LLVM's
-object leaves there). A block of 8 packets made of a function per packet
-took three times as long to make and run once in V8 (118 + 69 µs, against
-40 + 20 µs): V8 compiles each function when it is first called.
+are its value holes, 5-byte LEB128 immediates in the stencil (the
+relocations LLVM's object leaves there), as long as their values in the
+block (its modules 9% smaller over a boot of the OP-1's firmware). A block
+of 8 packets made of a function per packet took three times as long to
+make and run once in V8 (118 + 69 µs, against 40 + 20 µs): V8 compiles each
+function when it is first called. A block that is never promoted (a
+threshold of UINT32_MAX) counts no starts (`kPrologueUncounted`).
+
+## The cold tier and batches
+
+A module costs V8 about 40 µs to make and 5 to 15 to instantiate whatever
+its size, its function 20 µs or more to compile when first called, and 27
+KiB of memory; most of a boot's blocks start a few times (the OP-1's: 74%
+of them at most 100 times, 0.14% of its packets). With
+`Core::set_cold_threshold(N)` (emu `--cp-cold N`) a block's first N starts
+make no module: its pieces run one at a time (`CodeLoader::run_pieces`),
+careful and unchained, as functions of their stencils that every block
+shares (`src/cp_cold_wasm.h`), made the first time a block needs them, a
+module of those it needs that none did before (5,100 over that boot, a
+third of a second all told). Its holes' values are read from memory. Then
+it is compiled as copy-and-patch would have at its first start, with the
+state of its next start as its hint, and its count goes on towards
+`set_tiering`'s threshold. With `Core::set_cold_batch(K, age)` (emu
+`--cp-batch K`) the blocks that leave the cold tier are compiled K to a
+module, or fewer once the first has waited `age` packets (Chrome 133: 4.6 +
+1.5 µs a block at 32, against 38.7 + 11.9 alone). A batch's block that runs
+itself again does so by a branch to a loop around its pieces
+(`kSelfExitsLoop`), as its function's index is not the one its module alone
+would have. The same work either way (`run_diff_test.py --matrix
+copy-patch`: tier0-cold and the rows after it; a cold block chains to none,
+so more runs return to the host).
+
+LLVM is the WebAssembly build's largest part, and with every instruction
+on stencils (a block with IDLE too, `kIdleWait`, where the host waits) a
+host may make it only when a block needs it: `Core::set_llvm_on_demand`.
 
 The stencils are data in memory, 43 MiB of it: the executables start with
 128 MiB (`-sINITIAL_MEMORY`). A block that runs a hardware loop in a few

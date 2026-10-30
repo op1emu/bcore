@@ -1182,3 +1182,54 @@ bytes, the arguments left on the stack, which a branch drops). Node boot
 hung the boot ROM: guards do miss there (as a block's LB is set before
 it starts again), so the guard has to stay at the function's start.
 
+
+## WebAssembly's cold tier
+
+A boot of the OP-1's firmware in Chrome 133 made 21,400 modules, one a
+block, and V8's cost of a module is mostly fixed: about 40 µs to make one
+of unique bytes (identical bytes hit its NativeModule cache, 5 µs), 5 to
+15 µs to instantiate it, 20 µs or more to compile its function at its
+first call (lazily, on the calling thread: a CPU profile puts it under
+Core::run, as the function return_call'ed away), 27 KiB of memory. 74% of
+those blocks started at most 100 times (0.14% of the packets).
+
+- A cold block's pieces are functions of their stencils, shared: the
+  piece's code in a block, then i32.const 0 (on to the next piece) and
+  after it 1 (left for the exit). Every value hole reads its value from
+  memory; a register hole on a store's offset holds the stored value in a
+  local of its own while the address is moved (2.4% of the stencils' LEB
+  holes are on stores). Pieces pass nothing in locals (CpuState and
+  slot_scratch carry it all, every block type is void), so a piece runs
+  alone. Exits, guards and self exits have none (return,
+  return_call): a cold block is careful, unchained, with no hint.
+- One module of every stencil is 27.5 MB; and WebAssembly.compile's
+  promise never settles in hosts that run the emulator synchronously (the
+  Worker, Node's tests). So the functions are made a module at a time, of
+  the stencils a block needs that none did before: 13,000 stencils in
+  5,100 modules over that boot, about 0.35 s all told in Node.
+- One tier counter for a block across both stages: separate ones would
+  reach TierTable's 65,536 twice as fast (then every new block is LLVM's).
+  The hint is the state at the block's next start after the count reached
+  the threshold, not at promote(), which runs after the run, at the next
+  block's state. A guard miss still compiles a module (a cold block in its
+  place would leave the guarded module in the cache, missing every time).
+- In a batch a block's function index is not kWasmBlockFunction, which
+  kSelfExits' return_call names: a batched block that runs itself again
+  loops around its pieces instead (kSelfExitsLoop).
+- run_diff_test: a cold block chains to no block, so `returns=` differs
+  (ROW_IGNORE); packets and runs are the same.
+- Chrome 133 Worker, a module of K block functions: K=1 38.7 + 11.9 µs a
+  block (Module + Instance and table), 32: 4.6 + 1.5, 64: 4.3 + 1.3.
+
+Node, a boot to the main screen (threshold 10, 32 to a module, 64 Ki
+packets' wait): 9.9 to 8.1 s (3 pairs), user CPU 13.7 to 11.3 s, 21,400
+modules to 5,900, 1.23 GB to 0.72. Thresholds 2 to 10 did as well; 30 and
+100 less (a cold start is slower, and most blocks that start often do so
+at once).
+
+IDLE with the host waiting was LLVM's alone (all 24 blocks a boot gave
+LLVM): kIdleWait compares the loop bottoms as it runs (the IDLE is a NOP
+at one), as the careful lift now does where it was a NOP, so it needs no
+guard. With that a host may make LLVM only when a block needs it
+(set_llvm_on_demand); the browser's build keeps LLVM's code in a module it
+loads then (op1emu's web/tools/split-module.mjs).

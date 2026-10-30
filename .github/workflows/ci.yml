@@ -417,10 +417,10 @@ jobs:
             --shard ${{ matrix.shard }}/3 --costs .github/wasm-diff-costs.txt \
             -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
 
-      - name: Copy-and-patch's tier 0 against the native emu's LLVM tier 0
+      - name: Copy-and-patch's tier 0, and its cold tier, against the native emu's LLVM tier 0
         run: |
           python3 tests/run_diff_test.py --emu build-wasm/emu-node --base-emu build/emu \
-            --matrix copy-patch --only tier0 --count-packets \
+            --matrix copy-patch --only tier0,tier0-cold2-batch4 --count-packets \
             --shard ${{ matrix.shard }}/3 --costs .github/wasm-diff-costs.txt \
             -j $(getconf _NPROCESSORS_ONLN) -t 120 --ignore-list .github/emu-ignore.txt
 
