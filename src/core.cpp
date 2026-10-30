@@ -150,7 +150,7 @@ void Core::note_page_table() {
         page_table_ = table;
 }
 
-BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
+BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote, const bcore_tier::CodeLog* read) {
     note_page_table();
     // Tiered (set_tiering): a promotion reads what its tier-0 compilation
     // read; a tier-0 compilation records it, while the engine has counters.
@@ -178,6 +178,16 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
         tier.size_ref = tier_size_ref_;
         tier.code = &*recording;
         tiered = &tier;
+    }
+    // What a cold block's translation read already (cold_block), read again
+    // from it: no halfword from the host twice.
+    bcore_tier::CodeLog read_before;
+    std::optional<bcore_tier::PrefetchedMemory> read_once;
+    if (read && record) {
+        read_before = *read;
+        record->code = read_before;
+        read_once.emplace(*tier.code, read_before);
+        tier.code = &*read_once;
     }
     const bool tier0 = tiered && tier.level == 0;
 #if BCORE_ENABLE_PROFILE
@@ -424,8 +434,9 @@ bool Core::run(uint32_t pc) {
 #endif
     BbFunc fn = jit_->lookup(pc);
 #if BCORE_COLD
+    const bcore_tier::CodeLog* read = nullptr;  // what a cold block's translation read, if it failed
     if (!fn && cold_threshold_) {
-        if (Cold* cold = cold_block(pc)) {
+        if (Cold* cold = cold_block(pc, read)) {
             if (!cold->asked) return run_cold(pc, *cold);
             // It reached the cold threshold: this start's state is its hint
             // (as a block's first start is compile()'s).
@@ -446,9 +457,11 @@ bool Core::run(uint32_t pc) {
             }
         }
     }
+#else
+    const bcore_tier::CodeLog* read = nullptr;
 #endif
     if (!fn) {
-        fn = compile(pc, false);
+        fn = compile(pc, false, nullptr, read);
         if (!fn)
             return false;
     }
@@ -767,7 +780,8 @@ void Core::set_cold_batch(uint32_t blocks, uint64_t age) {
 }
 
 #if BCORE_COLD
-Core::Cold* Core::cold_block(uint32_t pc) {
+Core::Cold* Core::cold_block(uint32_t pc, const bcore_tier::CodeLog*& read) {
+    read = nullptr;
     const auto it = cold_.find(pc);
     if (it != cold_.end()) return it->second.get();
     if (!tier_threshold_ || tier0_.size() >= TierTable::kCounters) return nullptr;
@@ -786,7 +800,11 @@ Core::Cold* Core::cold_block(uint32_t pc) {
     config.careful = true;
     auto cold = std::make_unique<Cold>();
     cold->counter = uint32_t(tier0_.size());
-    if (!cp_->translate_cold(pc, recording, cold->counter, config, cold->block)) return nullptr;
+    if (!cp_->translate_cold(pc, recording, cold->counter, config, cold->block)) {
+        // compile() reads what it read from it (cp_->words()).
+        read = &cp_->words();
+        return nullptr;
+    }
     record->threshold = cold->block.threshold;
     tier0_current_[pc] = cold->counter;
     tier0_latest_[pc] = cold->counter;
@@ -822,8 +840,7 @@ void Core::leave_cold(const std::vector<uint32_t>& pcs) {
     for (const uint32_t pc : pcs) {
         const auto it = cold_.find(pc);
         if (it == cold_.end()) continue;
-        const std::unique_ptr<Cold> cold = std::move(it->second);
-        cold_.erase(it);
+        Cold* const cold = it->second.get();
         Tier0Record* const record = cold->counter < tier0_.size() ? tier0_[cold->counter].get() : nullptr;
         if (!record || tier0_current_[pc] != cold->counter) {
             failed.push_back(pc);
@@ -855,8 +872,6 @@ void Core::leave_cold(const std::vector<uint32_t>& pcs) {
             failed.push_back(pc);
             continue;
         }
-        record->cold = false;
-        record->hint = *cold->hint;
         left.push_back({pc, record, block});
     }
     std::vector<BbFunc> fns;
@@ -869,6 +884,10 @@ void Core::leave_cold(const std::vector<uint32_t>& pcs) {
             continue;
         }
         jit_->addCode(l.pc, fn, l.block.fallthrough_pc);
+        const auto it = cold_.find(l.pc);
+        l.record->cold = false;
+        l.record->hint = *it->second->hint;
+        cold_.erase(it);
         l.record->threshold = l.block.threshold;
         // Its count goes on from the cold tier's: past its threshold
         // already, it asks now.
@@ -878,10 +897,14 @@ void Core::leave_cold(const std::vector<uint32_t>& pcs) {
             ++table.requests;
         }
     }
-    // The others as any block is, with counters of their own.
+    // The others stay cold, for good: compiled now, from the code as it is
+    // now, they would run another version of it (a block runs what it was
+    // compiled from until invalidate()).
     for (const uint32_t pc : failed) {
-        tier0_current_.erase(pc);
-        compile(pc, false);
+        Cold& cold = *cold_.at(pc);
+        cold.asked = false;
+        cold.hint.reset();
+        if (cold.counter < tier0_.size() && tier0_[cold.counter]) tier0_[cold.counter]->threshold = UINT32_MAX;
     }
 }
 #endif
@@ -957,7 +980,7 @@ void Core::set_chain_filter(std::function<bool(uint32_t)> filter) {
     jit_->setChainFilter(chain_filter_);
     // A compiled block's native loop holds the answer the old filter gave
     // for its PC when it was translated (BBTranslator::set_chain_filter).
-    if (!jit_->empty()) invalidate();
+    if (!jit_->empty() || !cold_.empty()) invalidate();
 }
 
 void Core::set_chaining(bool chaining, bool dry) {

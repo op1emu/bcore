@@ -8,6 +8,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "bcore_profile.h"
@@ -222,7 +223,10 @@ private:
     // BBTranslator::translate); null if that fails.
     // promote: the tier-0 compilation to compile again at tier 1.
     struct Tier0Record;
-    void (*compile(uint32_t pc, bool careful, Tier0Record* promote = nullptr))(CpuState*, Memory*);
+    // read: halfwords read already (a cold block's translation that failed),
+    // not to be read again.
+    void (*compile(uint32_t pc, bool careful, Tier0Record* promote = nullptr,
+                   const std::vector<std::pair<uint32_t, uint16_t>>* read = nullptr))(CpuState*, Memory*);
     // Compiles again at tier 1 the blocks that asked to be (set_tiering).
     void promote();
     void note_page_table();
@@ -234,10 +238,12 @@ private:
     void startWorker();
     void stopWorker();
     // The cold tier (set_cold_threshold): pc's cold block, made where it has
-    // none yet (null if it cannot be one); runs it; compiles the blocks that
-    // left it (all those queued, or pc's alone); whether one may be made now.
+    // none yet (null if it cannot be one; read then what its translation
+    // read, if anything, for compile); runs it; compiles the blocks that left
+    // it (all those queued, or pc's alone), a block that fails staying cold;
+    // whether one may be made now.
     struct Cold;
-    Cold* cold_block(uint32_t pc);
+    Cold* cold_block(uint32_t pc, const std::vector<std::pair<uint32_t, uint16_t>>*& read);
     bool run_cold(uint32_t pc, Cold& cold);
     void leave_cold(const std::vector<uint32_t>& pcs);
     bool can_copy_patch(Memory& code) const;
