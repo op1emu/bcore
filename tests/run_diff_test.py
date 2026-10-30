@@ -68,15 +68,32 @@ MATRICES: Dict[str, List[Tuple[str, str]]] = {
         ("t2-bg1", "-O 1 --page-table --chain --tier-threshold 2 --tier-background 1 --copy-patch"),
         ("t2-ref2", "-O 1 --page-table --chain --tier-threshold 2 --tier-size-ref 2 --copy-patch"),
         ("tier0-no-hints", "-O 1 --page-table --chain --tier-threshold 1000000000 --copy-patch --no-cp-hints"),
+        # WebAssembly's cold tier (--cp-cold): cold throughout; cold for two
+        # starts, then never promoted (the prologue counts nothing), alone or
+        # four blocks to a module; promoted at once past it.
+        ("tier0-cold", "-O 1 --page-table --chain --tier-threshold 1000000000 --copy-patch --cp-cold 1000000000"),
+        ("tier0-cold2", "-O 1 --page-table --chain --tier-threshold 4294967295 --copy-patch --cp-cold 2"),
+        ("tier0-cold2-batch4",
+         "-O 1 --page-table --chain --tier-threshold 4294967295 --copy-patch --cp-cold 2 --cp-batch 4"),
+        ("t3-cold2-batch4", "-O 1 --page-table --chain --tier-threshold 3 --copy-patch --cp-cold 2 --cp-batch 4"),
     ],
+}
+# Lines a configuration's runs may differ in from the base's: a cold block
+# (--cp-cold) chains to no other, so more of its runs return to the host.
+COLD_RETURNS = [r"^returns="]
+ROW_IGNORE: Dict[str, List[str]] = {
+    "tier0-cold": COLD_RETURNS,
+    "tier0-cold2": COLD_RETURNS,
+    "tier0-cold2-batch4": COLD_RETURNS,
+    "t3-cold2-batch4": COLD_RETURNS,
 }
 # Flags the base side drops in each matrix (with their values).
 BASE_STRIP = {
     "standard": [],
     "tiers": ["--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "--copy-patch"],
-    "copy-patch": ["--copy-patch", "--no-cp-hints"],
+    "copy-patch": ["--copy-patch", "--no-cp-hints", "--cp-cold", "--cp-batch"],
 }
-VALUED = {"--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "-O", "--opt-level", "--max-steps", "--post-pipeline"}
+VALUED = {"--tier-threshold", "--tier-size-ref", "--tier1-pipeline", "--tier-background", "-O", "--opt-level", "--max-steps", "--post-pipeline", "--cp-cold", "--cp-batch"}
 
 # Lines that describe the run, not the guest: dropped before comparing.
 DEFAULT_IGNORE = [r"^copy-patch blocks=\d+ fallbacks=\d+$", r"^cp-runtime "]
@@ -375,15 +392,16 @@ def main() -> None:
             sys.exit("error: both sides are the same: give --base-emu, other --base-flags, or --matrix")
         configs = [("compare", base + extra, flags + extra)]
 
-    runner = Runner(args.timeout, [re.compile(p) for p in DEFAULT_IGNORE + args.ignore], args.dump,
-                    args.keep_lines)
+    def runner_for(name: str) -> Runner:
+        patterns = DEFAULT_IGNORE + args.ignore + (ROW_IGNORE.get(name, []) if args.matrix else [])
+        return Runner(args.timeout, [re.compile(p) for p in patterns], args.dump, args.keep_lines)
     jobs = args.jobs or max(1, (os.cpu_count() or 2) // 2)
     print(f"=== Blackfin emulator differential test: {len(files)} tests, {jobs} at once ===\n")
     total_diff = 0
     costs: Dict[str, float] = {}
     for name, base_flags, flags in configs:
-        _, differing, _ = compare(name, runner, base_emu, args.emu, base_flags, flags, files, jobs, args.verbose,
-                                  costs)
+        _, differing, _ = compare(name, runner_for(name), base_emu, args.emu, base_flags, flags, files, jobs,
+                                  args.verbose, costs)
         total_diff += differing
     if args.write_costs:
         with open(args.write_costs, "w") as out:

@@ -6,6 +6,9 @@
 // they would pass all the same were every block compiled with LLVM (found in
 // review).
 #include "../src/cp_translator.h"
+#if defined(__EMSCRIPTEN__)
+#include "../src/cp_cold_wasm.h"
+#endif
 #include "../src/cec.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
@@ -438,7 +441,107 @@ static void test_self_loop_moved() {
     require(got == want, "a guarded block that moves a loop, again: not as the block with no hint");
 }
 
+#if defined(__EMSCRIPTEN__)
+// WebAssembly's cold blocks (CpTranslator::translate_cold): a block's
+// pieces run one at a time as the stencils' functions do what the block's
+// module does, careful and unchained: the packets above (a parallel one,
+// register holes on a store), a block the cap cuts, a hardware loop's
+// bottom, and its start counted.
+static void test_cold() {
+    struct Case {
+        const char* what;
+        std::vector<uint16_t> words;
+        unsigned cap;
+    };
+    const Case cases[] = {
+        {"packets", {0x6008, 0x6408, 0xe101, 0x1234, 0xcc04, 0x000a, 0x9003, 0x0000, 0x0010}, 256},
+        {"cut", {0x6408, 0x6408, 0x6408, 0x0010}, 2},
+        {"loop bottom", {0x6408, 0xcc04, 0x000a, 0x9003, 0x0000, 0x0010}, 256},
+    };
+    for (const Case& c : cases) {
+        auto run = [&](bool cold) {
+            Setup s;
+            uint32_t at = kPc;
+            for (uint16_t w : c.words) { s.mem.write16(at, w); at += 2; }
+            s.mem.write32(0x2000, 0xcafef00d);
+            s.cpu.dpregs[1] = 0x5670000;
+            s.cpu.dpregs[2] = 2;
+            s.cpu.dpregs[8] = 0x2000;
+            s.cpu.lb[0] = kPc + 2;  // the parallel packet of "loop bottom"
+            s.cpu.lt[0] = kPc;
+            s.cpu.lc[0] = 3;
+            s.cpu.lb[1] = 0x9000;
+            CpTranslator cp(s.jit);
+            CpTranslator::Config config;
+            config.threshold = 5;
+            config.max_packets = c.cap;
+            config.careful = true;
+            const std::string what = std::string(c.what) + (cold ? " cold" : "");
+            for (int runs = 0; runs < 4 && s.cpu.pc != kReturn; ++runs) {
+                s.cpu.did_jump = false;
+                s.cpu.packets = 0;
+                if (cold) {
+                    CpTranslator::Cold block;
+                    require(cp.translate_cold(s.cpu.pc, s.mem, 0, config, block),
+                            what + ": no cold block: " + (block.why ? block.why : "?"));
+                    s.jit.loader().run_pieces(block.pieces.data(), block.pieces.size(), block.values.data(), &s.cpu,
+                                              &s.mem);
+                } else {
+                    const CpTranslator::Block block = cp.translate(s.cpu.pc, s.mem, 0, config);
+                    require(block.fn, what + ": no block made of stencils");
+                    s.jit.enter(block.fn, &s.cpu, &s.mem);
+                }
+            }
+            return std::make_tuple(s.cpu.pc, s.cpu.dpregs[0], s.cpu.dpregs[1], s.cpu.dpregs[3], s.cpu.dpregs[8],
+                                   s.cpu.lc[0], s.cpu.packets, s.jit.tierTable()->count[0],
+                                   s.jit.tierTable()->requests);
+        };
+        const auto want = run(false), got = run(true);
+        require(std::get<7>(want) > 0, std::string(c.what) + ": its starts counted");
+        require(got == want, std::string(c.what) + ": the cold block not as its module");
+    }
+    // An exit's stencil has no piece function (it returns).
+    std::vector<uint8_t> body;
+    require(!bcore_cp::piece_function(bcore_cp::kExits[1], body), "a chain exit as a piece function");
+    require(bcore_cp::piece_function(bcore_cp::kPrologue[0], body), "no prologue piece function");
+}
+
+// Blocks in one module (Batch): each does what it does alone, one that runs
+// itself again through the loop around its pieces (not a return_call of
+// the index its module alone gives it).
+static void test_batch() {
+    Setup s;
+    s.mem.write16(0x200, 0x6408);  // 0x200: R0 += 1; RTS
+    s.mem.write16(0x202, 0x0010);
+    s.code({0x6408, 0x2fff});      // 0x100: R0 += 1; JUMP.S 0x100
+    CpTranslator cp(s.jit);
+    CpTranslator::Config config;
+    config.threshold = kTierOnly;
+    config.chaining = true;
+    config.self_loop = true;
+    CpTranslator::Batch batch;
+    const CpTranslator::Block a = cp.translate(0x200, s.mem, 0, config, &batch);
+    const CpTranslator::Block b = cp.translate(kPc, s.mem, 1, config, &batch);
+    require(a.batched == 0 && b.batched == 1 && !a.fn && !b.fn, "two blocks in the batch");
+    std::vector<BbFunc> fns;
+    require(cp.load(batch, kPc, fns) && fns.size() == 2, "the batch's module");
+    s.jit.addCode(0x200, fns[0], a.fallthrough_pc);
+    s.jit.addCode(kPc, fns[1], b.fallthrough_pc);
+    s.cpu.chain_budget = 7;
+    s.jit.enter(fns[1], &s.cpu, &s.mem);
+    require(s.cpu.dpregs[0] == 4 && s.cpu.pc == kPc, "the looping block ran itself again");
+    s.cpu.pc = 0x200;
+    s.cpu.chain_packets = 0;
+    s.jit.enter(fns[0], &s.cpu, &s.mem);
+    require(s.cpu.dpregs[0] == 5 && s.cpu.pc == kReturn, "the other block");
+}
+#endif
+
 int main() {
+#if defined(__EMSCRIPTEN__)
+    test_cold();
+    test_batch();
+#endif
     test_packets();
     test_self_loop_moved();
     test_self_loop();

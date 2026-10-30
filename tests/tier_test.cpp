@@ -5,14 +5,15 @@
 // overflows, a PC the chain filter keeps out of the chain table, a block
 // compiled again careful after its loop-bottom guard missed, and code that
 // changed in memory after tier 0 read it (an untiered block keeps running
-// the code it was compiled from, and so does its promotion); and three cases
-// found in review (below).
+// the code it was compiled from, and so does its promotion); the same with
+// WebAssembly's cold tier first; and three cases found in review (below).
 #include "core.h"
 #include "bcore_profile.h"
 #include "../src/bb_translator.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
 #include "../tools/flat_memory.h"
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +58,10 @@ struct Case {
     int runs;
     uint32_t budget;
     std::function<bool(uint32_t)> filter;
+    // `before` does nothing: what the case does depends on its packets
+    // alone, not on where its runs end (Mode::cold runs it to as many
+    // packets as the untiered runs instead).
+    bool same_any_run = false;
 };
 
 // How the guest's memory and chaining are set up, and whether tier 0 is
@@ -70,14 +75,23 @@ struct Mode {
     // Core::set_copy_patch_reach: a block's helper jumps and exits no
     // further than this (0: the host's reach).
     size_t reach = 0;
+    // Core::set_cold_threshold and set_cold_batch (WebAssembly's): the
+    // first starts of a block run cold, then blocks are compiled `batch`
+    // at a time, or fewer after `age` packets.
+    uint32_t cold = 0;
+    uint32_t batch = 1;
+    uint64_t age = 0;
 };
 
 // background: -1 promotions on this thread; else on the worker, published
 // after that many packets (0: as soon as the worker is done), which a build
 // without threads has not (Core::kHasThreads): its cases leave the worker
 // out, as they would run on this thread, the same as the ones without it.
+// packets: run until that many packets ran, the last run's budget cut to
+// end there, instead of c.runs runs (each run's outcome then not kept): a
+// cold block (Mode::cold) chains to none, so its runs end elsewhere.
 static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"},
-                   uint32_t size_ref = 0, bool light = false) {
+                   uint32_t size_ref = 0, bool light = false, uint64_t packets = 0) {
     CpuState cpu{};
     FlatMemory mem(0, 0x4000, &cpu);
     if (mode.paged) mem.enable_page_table();
@@ -89,19 +103,24 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_light_tier1(light);
     if (threshold) core.set_copy_patch(mode.copy_patch);
     core.set_copy_patch_reach(mode.reach);
+    if (threshold && mode.cold) require(core.set_cold_threshold(mode.cold), "no cold tier");
+    core.set_cold_batch(mode.batch, mode.age);
     if (background >= 0) require(core.set_tier_background(true, uint64_t(background)), "no worker");
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
     cec_init(); evt_init();
     cpu.lb[0] = cpu.lb[1] = 0x3f00;  // no loop bottom anywhere near the code
     Outcome out;
-    for (int r = 0; r < c.runs; ++r) {
+    uint64_t ran = 0;
+    for (int r = 0; packets ? ran < packets : r < c.runs; ++r) {
         c.before(cpu, mem, r);
-        cpu.chain_budget = c.budget;
+        cpu.chain_budget = packets ? uint32_t(std::min<uint64_t>(c.budget, packets - ran)) : c.budget;
         require(core.run(r ? cpu.pc : c.start), "run");
-        out.runs.push_back({cpu.pc, cpu.packets, cpu.chain_packets, cpu.chain_blocks});
+        ran += uint64_t(cpu.chain_packets) + cpu.packets;
+        if (!packets) out.runs.push_back({cpu.pc, cpu.packets, cpu.chain_packets, cpu.chain_blocks});
         cpu.did_jump = false;
     }
+    require(!packets || ran == packets, "the runs ended past the packets");
     const auto* bytes = reinterpret_cast<const uint8_t*>(&cpu);
     out.state.assign(bytes, bytes + offsetof(CpuState, insn_len));
     out.data.assign(mem.raw(), mem.raw() + 0x4000);
@@ -492,17 +511,17 @@ int main() {
             m.write16(at, kAdd1);
             m.write16(at + 2, jump_s(at + 2, i + 1 < kBlocks ? at + 4 : 0x100));
         }
-    }, [](CpuState&, FlatMemory&, int) {}, 0x100, kBlocks + 40, 1000, nullptr});
+    }, [](CpuState&, FlatMemory&, int) {}, 0x100, kBlocks + 40, 1000, nullptr, true});
     // A block that jumps to itself (a native loop), with budgets that end
     // runs in the middle of it.
     auto self = [](FlatMemory& m) {
         m.write16(0x100, kAdd1); m.write16(0x102, kAdd1); m.write16(0x104, jump_s(0x104, 0x100));
     };
-    cases.push_back({"self loop", self, [](CpuState&, FlatMemory&, int) {}, 0x100, 12, 37, nullptr});
+    cases.push_back({"self loop", self, [](CpuState&, FlatMemory&, int) {}, 0x100, 12, 37, nullptr, true});
     // The same, its PC rejected by the chain filter: the host runs it
     // every time.
     cases.push_back({"filtered", self, [](CpuState&, FlatMemory&, int) {}, 0x100, 30, 37,
-                     [](uint32_t pc) { return pc != 0x100; }});
+                     [](uint32_t pc) { return pc != 0x100; }, true});
     // Its first instruction rewritten after the first run, one pass round
     // the loop per run (so that the block is promoted after that): the block
     // keeps running what it was compiled from.
@@ -528,14 +547,25 @@ int main() {
         // Helper jumps and exits for every block or so (far from the
         // first, as on AArch64 once an arena holds 120 MiB).
         {"stencils near", true, true, false, true, 64},
+#if defined(__EMSCRIPTEN__)
+        // Cold for two starts, compiled alone or four to a module, a batch
+        // that does not fill after 40 packets (the promotion at threshold 1
+        // asks at once).
+        {"stencils cold", true, true, false, true, 0, 2},
+        {"stencils cold batch", true, true, false, true, 0, 2, 4, 40},
+#endif
     };
     unsigned compared = 0;
     uint64_t promoted = 0, overflows = 0, background_promoted = 0, stencil_blocks = 0, near_sets = 0;
     for (const Case& c : cases)
         for (int opt : {0, 1, 2})
         for (const Mode& mode : modes) {
-            if ((mode.dry || !mode.count || mode.reach) && opt != 1) continue;
+            if ((mode.dry || !mode.count || mode.reach || mode.cold) && opt != 1) continue;
+            if (mode.cold && !c.same_any_run) continue;
             const Outcome want = run(c, opt, 0, -1, mode);
+            uint64_t packets = 0;  // a cold mode's: as many as the untiered runs
+            if (mode.cold)
+                for (const Run& r : want.runs) packets += uint64_t(r.chain_packets) + r.packets;
             // Thresholds with and without a size_ref (1: a block of n
             // packets n times the threshold), and promotions with the light
             // pipeline (Core::set_light_tier1).
@@ -547,8 +577,8 @@ int main() {
             for (int background : {-1, 0, 1, 50}) {
                 if (background >= 0 && !Core::kHasThreads) continue;
                 const uint32_t threshold = t.threshold;
-                const Outcome got = run(c, opt, threshold, background, mode, t.size_ref, t.light);
-                if (!(got == want)) {
+                const Outcome got = run(c, opt, threshold, background, mode, t.size_ref, t.light, packets);
+                if (packets ? got.state != want.state || got.data != want.data : !(got == want)) {
                     fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u size_ref %u%s background %d: %zu/%zu runs\n",
                             c.name, mode.name, opt, threshold, t.size_ref, t.light ? " light" : "", background,
                             want.runs.size(), got.runs.size());
