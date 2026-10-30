@@ -310,7 +310,7 @@ Function* BBTranslator::emit_stencil_prologue(Module& mod, const char* name, Con
     b.CreateUnreachable();
     tail_call(first, cont);
     if (host_cycles) emit_host_cycles(b, cpu, first);
-    emit_tier_counter(b, cpu, first, counter, count_offset, threshold);
+    if (counter) emit_tier_counter(b, cpu, first, counter, count_offset, threshold);
     return fn;
 }
 

@@ -1199,7 +1199,7 @@ int main(int argc, char** argv) {
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
     uint32_t fallthrough = 0, parallel_tail[2] = {}, parallel_tail_bottom[2] = {}, parallel_tail_absent[2] = {};
-    uint32_t parallel_tail_pinned[3][2] = {}, guards[4] = {}, self_exits_loop[2] = {};
+    uint32_t parallel_tail_pinned[3][2] = {}, guards[4] = {}, self_exits_loop[2] = {}, prologue_uncounted[2] = {};
     // Added to the blob after everything else, so that what was there before
     // them keeps its place: where each one's index goes, and its code.
     std::vector<std::pair<uint32_t*, Code>> late;
@@ -1213,9 +1213,12 @@ int main(int argc, char** argv) {
         auto* counter = value_hole(mod, kHoleCounter, 0, TierTable::kCounters, i32);
         auto* offset = value_hole(mod, kHoleCountOffset, 0, 1ull << 31, Type::getInt64Ty(ctx));
         auto* threshold = value_hole(mod, kHoleThreshold, 0, 1ull << 32, i32);
-        for (int h = 0; h < 2; ++h)
+        for (int h = 0; h < 2; ++h) {
             worker.translator().emit_stencil_prologue(mod, h ? "prologue_cycles" : "prologue", counter, offset,
                                                       threshold, h, cont);
+            worker.translator().emit_stencil_prologue(
+                mod, h ? "prologue_uncounted_cycles" : "prologue_uncounted", nullptr, nullptr, nullptr, h, cont);
+        }
         // Exits: no chaining; chaining; counting chained blocks; dry; dry counting.
         const char* names[] = {"exit_return", "exit_chain", "exit_chain_count", "exit_dry", "exit_dry_count"};
         for (int e = 0; e < 5; ++e) {
@@ -1338,6 +1341,9 @@ int main(int argc, char** argv) {
                 special_error += std::string(self_names[e]) + " (loop): " + self_code[e].error + "\n";
             }
         }
+        // Last, so that those above keep their indices.
+        add_late("prologue_uncounted", &prologue_uncounted[0]);
+        add_late("prologue_uncounted_cycles", &prologue_uncounted[1]);
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -1532,6 +1538,8 @@ int main(int argc, char** argv) {
             guards[2], guards[3]);
     fprintf(f, "const uint32_t kSelfExitsLoop[2] = {%u, %u};  // chain, count\n", self_exits_loop[0],
             self_exits_loop[1]);
+    fprintf(f, "const uint32_t kPrologueUncounted[2] = {%u, %u};  // host cycles off, on\n",
+            prologue_uncounted[0], prologue_uncounted[1]);
     fprintf(f, "}  // namespace bcore::bcore_cp\n");
     fclose(f);
 

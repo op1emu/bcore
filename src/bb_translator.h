@@ -204,7 +204,8 @@ public:
                                        llvm::Constant* span, llvm::Constant* const lb[2],
                                        llvm::Constant* const lt[2], llvm::Function* cont);
     // A copy-and-patch block's start: its tier counter (emit_tier_counter,
-    // with holes for the counter, its count's offset and the threshold),
+    // with holes for the counter, its count's offset and the threshold;
+    // none for a null counter, a block that never asks to be promoted),
     // CYCLES with host_cycles (emit_host_cycles), then a musttail call of cont.
     llvm::Function* emit_stencil_prologue(llvm::Module& mod, const char* name, llvm::Constant* counter,
                                           llvm::Constant* count_offset, llvm::Constant* threshold, bool host_cycles,
