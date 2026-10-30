@@ -58,15 +58,24 @@ CpTranslator::Block CpTranslator::emit_wasm(uint32_t pc, uint32_t counter, const
         return true;
     };
     // The function: the locals, the pieces inside a block, then the exit:
-    // the block's own, or the one its chaining takes.
+    // the block's own, or the one its chaining takes. A block that runs
+    // again past its guard (kSelfExitsLoop) has the guard first, then a loop
+    // around the rest, which its exit branches to.
     body_ = locals;
+    bool placed = true;
+    size_t first = 0;
+    if (past_guard_) {
+        placed = place(pieces_[0]);
+        first = 1;
+        body_.insert(body_.end(), {0x03, 0x40});
+    }
     body_.insert(body_.end(), {0x02, 0x40});
     const size_t pieces = exit_piece_ >= 0 ? size_t(exit_piece_) : pieces_.size();
-    bool placed = true;
-    for (size_t i = 0; i < pieces && placed; ++i) placed = place(pieces_[i]);
+    for (size_t i = first; i < pieces && placed; ++i) placed = place(pieces_[i]);
     body_.push_back(0x0b);
     placed = placed && place(exit_piece_ >= 0 ? pieces_[size_t(exit_piece_)]
                                               : CpTranslator::piece(kStencils[kExits[exit]], pc, 0, -1));
+    if (past_guard_) body_.push_back(0x0b);
     body_.push_back(0x0b);
     if (!placed) {
         out.why = "relocation";

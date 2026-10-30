@@ -1199,7 +1199,7 @@ int main(int argc, char** argv) {
     Blob blob;
     std::vector<uint32_t> prologue(2), exits(5), self_exits(2);
     uint32_t fallthrough = 0, parallel_tail[2] = {}, parallel_tail_bottom[2] = {}, parallel_tail_absent[2] = {};
-    uint32_t parallel_tail_pinned[3][2] = {}, guards[4] = {};
+    uint32_t parallel_tail_pinned[3][2] = {}, guards[4] = {}, self_exits_loop[2] = {};
     // Added to the blob after everything else, so that what was there before
     // them keeps its place: where each one's index goes, and its code.
     std::vector<std::pair<uint32_t*, Code>> late;
@@ -1293,6 +1293,11 @@ int main(int argc, char** argv) {
         for (const char* name : names) mod.getFunction(name)->addFnAttr(Compiler::kNoSplitAttr);
         std::map<std::string, Code> code;
         worker.compile(mod, code);
+        // A block's own exits as they come, for the loop's (kSelfExitsLoop),
+        // before add() rewrites them.
+        Code self_code[2];
+        for (int e = 0; e < 2; ++e)
+            if (code.count(self_names[e])) self_code[e] = code[self_names[e]];
         auto add = [&](const char* name, bool exit = false) -> uint32_t {
             auto it = code.find(name);
             if (it != code.end()) exit ? as_exit(it->second) : as_piece(it->second);
@@ -1324,6 +1329,15 @@ int main(int argc, char** argv) {
             for (int p = 0; p < 3; ++p) add_late(tail_names[6 + 2 * p + t], &parallel_tail_pinned[p][t]);
         }
         for (unsigned m = 0; m < 4; ++m) add_late("guard" + std::to_string(m), &guards[m], true);
+        for (int e = 0; e < 2; ++e) {
+            if (!Triple(g_triple).isWasm()) {
+                self_exits_loop[e] = self_exits[e];
+            } else if (wasm_piece(self_code[e], true, true)) {
+                late.emplace_back(&self_exits_loop[e], self_code[e]);
+            } else {
+                special_error += std::string(self_names[e]) + " (loop): " + self_code[e].error + "\n";
+            }
+        }
     }
     if (!special_error.empty()) {
         fprintf(stderr, "stencilgen: %s", special_error.c_str());
@@ -1516,6 +1530,8 @@ int main(int argc, char** argv) {
             parallel_tail_pinned[1][1], parallel_tail_pinned[2][0], parallel_tail_pinned[2][1]);
     fprintf(f, "const uint32_t kGuards[4] = {%u, %u, %u, %u};  // by the loops pinned\n", guards[0], guards[1],
             guards[2], guards[3]);
+    fprintf(f, "const uint32_t kSelfExitsLoop[2] = {%u, %u};  // chain, count\n", self_exits_loop[0],
+            self_exits_loop[1]);
     fprintf(f, "}  // namespace bcore::bcore_cp\n");
     fclose(f);
 
