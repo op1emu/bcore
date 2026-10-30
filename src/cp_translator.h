@@ -99,7 +99,25 @@ public:
         uint8_t* cold = nullptr;   // its cold code (in the arena's cold region), cold_size bytes
         size_t cold_size = 0;
         const char* why = nullptr; // why there is none
+        int batched = -1;          // its function's index in the Batch it went to, or -1
     };
+#if defined(__EMSCRIPTEN__)
+    // A block with no module of its own (Core::set_cold_threshold): its
+    // pieces' functions (cp_cold_wasm.h) and their hole values, in order.
+    struct Cold {
+        std::vector<ColdPiece> pieces;
+        std::vector<uint32_t> values;
+        uint32_t fallthrough_pc = 0;
+        uint32_t packets = 0;
+        uint32_t threshold = 0;     // its tier counter's
+        const char* why = nullptr;  // why there is none (no pieces)
+    };
+    // Blocks for one module (translate's batch, load): their functions'
+    // bodies, in order.
+    struct Batch {
+        std::vector<std::vector<uint8_t>> bodies;
+    };
+#endif
 
     explicit CpTranslator(JitEngine& jit);
 
@@ -107,6 +125,20 @@ public:
     // counted in TierTable::count[counter]. words() then holds every
     // halfword it read, for a translation of the same block to read again.
     Block translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config);
+#if defined(__EMSCRIPTEN__)
+    // The same, the block's function put in batch (Block::batched) instead
+    // of a module of its own; a block that runs itself again does so by a
+    // branch to a loop around its pieces (kSelfExitsLoop), as its function's
+    // index is not the one its module alone would give it.
+    Block translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config, Batch* batch);
+    // The batch's blocks as one module, loaded: fns[i] its i-th; false if
+    // that fails (none loaded). pc names the batch where it fails.
+    bool load(Batch& batch, uint32_t pc, std::vector<BbFunc>& fns);
+    // The block at pc as a cold block, for a config with neither chaining,
+    // a hint nor a self loop, careful: false, with out.why, where there is
+    // none (as translate's, or a piece with no function).
+    bool translate_cold(uint32_t pc, Memory& code, uint32_t counter, const Config& config, Cold& out);
+#endif
     const bcore_tier::CodeLog& words() const { return words_; }
     // A hash of the last block's code, the same for the same block in any
     // process (BcoreCompileMetrics::object_hash): FNV-1a over each stencil's
@@ -184,8 +216,11 @@ private:
 #if defined(__EMSCRIPTEN__)
     // WebAssembly (cp_wasm.h, cp_emit_wasm.cpp): the scanned block as a
     // module of its own, loaded.
-    Block emit_wasm(uint32_t pc, uint32_t counter, const Config& config, Block out);
+    Block emit_wasm(uint32_t pc, uint32_t counter, const Config& config, Block out, Batch* batch);
     std::vector<uint8_t> module_, body_;  // the last block's module, and its function's code
+    // The last block runs itself again by a branch to a loop around all its
+    // pieces (a batch's), its guard's too where it has one.
+    bool loop_all_ = false;
 #endif
 
     uint32_t threshold_ = 0;  // the last block's tier counter's (Block::threshold)

@@ -26,6 +26,13 @@
 #include <llvm/Support/Format.h>
 #include <llvm/Support/raw_ostream.h>
 
+// The cold tier (Core::set_cold_threshold): WebAssembly's copy-and-patch.
+#if BCORE_COPY_PATCH && defined(__EMSCRIPTEN__)
+#define BCORE_COLD 1
+#else
+#define BCORE_COLD 0
+#endif
+
 namespace bcore {
 
 // What a tier-0 compilation saw, to compile the block again at tier 1 as
@@ -35,8 +42,23 @@ struct Core::Tier0Record {
     uint32_t pc = 0;
     bool careful = false;
     uint32_t threshold = 0;  // its count's (tier_threshold)
+    // A cold block's (set_cold_threshold): threshold is the cold tier's, and
+    // reaching it compiles the block at tier 0, which counts on.
+    bool cold = false;
     CpuState hint{};
     bcore_tier::CodeLog code;
+};
+
+// A block in the cold tier: its pieces, its counter, whether its count
+// reached the cold threshold (promote), and the CPU state of its first
+// start after that, its compilation's hint.
+struct Core::Cold {
+#if BCORE_COLD
+    CpTranslator::Cold block;
+#endif
+    uint32_t counter = 0;
+    bool asked = false;
+    std::unique_ptr<CpuState> hint;
 };
 
 Core::Core(CpuState* cpu, Memory* mem)
@@ -174,9 +196,7 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
     // noted earlier let them bypass a host that had hidden it to see every
     // access).
     std::optional<bcore_tier::PrefetchedMemory> prefetched;
-    if (tier0 && copy_patch_ && cp_ && tier.code->page_table() && !mem_->is_fastmem() &&
-        mem_->rawmem_limit() == 0 && unlimited_ &&
-        lazy_state_ && !dump_ir_
+    if (tier0 && can_copy_patch(*tier.code)
 #if BCORE_ENABLE_PROFILE
         && !want_ir
 #endif
@@ -378,7 +398,39 @@ BbFunc Core::compile(uint32_t pc, bool careful, Tier0Record* promote) {
 
 bool Core::run(uint32_t pc) {
     if (!pending_.empty()) collect_promotions();
+#if BCORE_COLD
+    // The blocks that left the cold tier have waited long enough.
+    if (!cold_queue_.empty() && cold_age_ && packets_run_ - cold_queued_at_ >= cold_age_) {
+        std::vector<uint32_t> pcs;
+        pcs.swap(cold_queue_);
+        leave_cold(pcs);
+    }
+#endif
     BbFunc fn = jit_->lookup(pc);
+#if BCORE_COLD
+    if (!fn && cold_threshold_) {
+        if (Cold* cold = cold_block(pc)) {
+            if (!cold->asked) return run_cold(pc, *cold);
+            // It reached the cold threshold: this start's state is its hint
+            // (as a block's first start is compile()'s).
+            if (!cold->hint) {
+                cold->hint = std::make_unique<CpuState>(*cpu_);
+                if (cold_queue_.empty()) cold_queued_at_ = packets_run_;
+                cold_queue_.push_back(pc);
+            }
+            if (cold_queue_.size() >= cold_batch_) {
+                std::vector<uint32_t> pcs;
+                pcs.swap(cold_queue_);
+                leave_cold(pcs);
+            }
+            fn = jit_->lookup(pc);
+            if (!fn) {
+                const auto it = cold_.find(pc);
+                if (it != cold_.end()) return run_cold(pc, *it->second);
+            }
+        }
+    }
+#endif
     if (!fn) {
         fn = compile(pc, false);
         if (!fn)
@@ -390,20 +442,7 @@ bool Core::run(uint32_t pc) {
     }
 #endif
 
-    // Set on every run, not once: the host may reset CpuState
-    // (cpu_state_init) between runs of blocks that are already compiled.
-    cpu_->page_table = page_table_;
-    cpu_->cec_pending = &bcore_cec_pending;
-    cpu_->idle_wake = idle_wake_;
-    cpu_->chain_table = jit_->chainTable();
-    cpu_->chain_packets = 0;
-    cpu_->chain_blocks = 0;
-    cpu_->chain_would = 0;
-    cpu_->idle = 0;
-    cpu_->cycles_base = uint64_t(cpu_->cycles[1]) << 32 | cpu_->cycles[0];
-    cpu_->did_jump = false;
-    cpu_->pc = pc;
-    cpu_->packets = 0;
+    begin_run(pc);
     jit_->set_executing(pc);
 #if BCORE_COPY_PATCH || BCORE_HELPERS_CATCH
     // A host exception a helper caught, thrown here (host_bridge.h).
@@ -443,13 +482,34 @@ bool Core::run(uint32_t pc) {
 #endif
         jit_->clear_executing();
     }
+    end_run();
+    return true;
+}
+
+void Core::begin_run(uint32_t pc) {
+    // Set on every run, not once: the host may reset CpuState
+    // (cpu_state_init) between runs of blocks that are already compiled.
+    cpu_->page_table = page_table_;
+    cpu_->cec_pending = &bcore_cec_pending;
+    cpu_->idle_wake = idle_wake_;
+    cpu_->chain_table = jit_->chainTable();
+    cpu_->chain_packets = 0;
+    cpu_->chain_blocks = 0;
+    cpu_->chain_would = 0;
+    cpu_->idle = 0;
+    cpu_->cycles_base = uint64_t(cpu_->cycles[1]) << 32 | cpu_->cycles[0];
+    cpu_->did_jump = false;
+    cpu_->pc = pc;
+    cpu_->packets = 0;
+}
+
+void Core::end_run() {
 #if BCORE_ENABLE_PROFILE
     profile_->stats.blocks_executed += 1 + cpu_->chain_blocks;
 #endif
     // The run's packets: those of its chained blocks and the last block's.
     packets_run_ += uint64_t(cpu_->chain_packets) + cpu_->packets;
     if (tier_threshold_ && jit_->tierTable()->requests) promote();
-    return true;
 }
 
 void Core::promote() {
@@ -471,6 +531,14 @@ void Core::promote() {
     }
     for (uint32_t counter : counters) {
         if (counter >= tier0_.size() || !tier0_[counter]) continue;
+#if BCORE_COLD
+        if (tier0_[counter]->cold) {
+            // Compiled at its next start (Core::run), from the state then.
+            const auto it = cold_.find(tier0_[counter]->pc);
+            if (it != cold_.end() && it->second->counter == counter) it->second->asked = true;
+            continue;
+        }
+#endif
         std::unique_ptr<Tier0Record> record = std::move(tier0_[counter]);
         // Its code may have been replaced since (a careful compilation after
         // a loop-bottom guard miss): that one counts for itself.
@@ -660,6 +728,148 @@ void Core::set_copy_patch(bool enable) {
 #endif
 }
 
+bool Core::can_copy_patch(Memory& code) const {
+    // Stencils reach RAM through the page table: only while the Memory
+    // shows one now (compile()).
+    return copy_patch_ && cp_ && code.page_table() && !mem_->is_fastmem() && mem_->rawmem_limit() == 0 &&
+           unlimited_ && lazy_state_ && !dump_ir_;
+}
+
+bool Core::set_cold_threshold(uint32_t threshold) {
+#if BCORE_COLD
+    cold_threshold_ = threshold;
+    return true;
+#else
+    (void)threshold;
+    return false;
+#endif
+}
+
+void Core::set_cold_batch(uint32_t blocks, uint64_t age) {
+    cold_batch_ = blocks ? blocks : 1;
+    cold_age_ = age;
+}
+
+#if BCORE_COLD
+Core::Cold* Core::cold_block(uint32_t pc) {
+    const auto it = cold_.find(pc);
+    if (it != cold_.end()) return it->second.get();
+    if (!tier_threshold_ || tier0_.size() >= TierTable::kCounters) return nullptr;
+    note_page_table();
+    auto record = std::make_unique<Tier0Record>();
+    record->pc = pc;
+    record->cold = true;
+    record->hint = *cpu_;
+    bcore_tier::RecordingMemory recording(*mem_, record->code);
+    if (!can_copy_patch(recording)) return nullptr;
+    // Careful, with no hint (its compilation has one) and no chaining.
+    CpTranslator::Config config;
+    config.host_cycles = host_cycles_;
+    config.idle_waits = idle_waits_;
+    config.threshold = cold_threshold_;
+    config.careful = true;
+    auto cold = std::make_unique<Cold>();
+    cold->counter = uint32_t(tier0_.size());
+    if (!cp_->translate_cold(pc, recording, cold->counter, config, cold->block)) return nullptr;
+    record->threshold = cold->block.threshold;
+    tier0_current_[pc] = cold->counter;
+    tier0_latest_[pc] = cold->counter;
+    tier0_.push_back(std::move(record));
+    return (cold_[pc] = std::move(cold)).get();
+}
+
+bool Core::run_cold(uint32_t pc, Cold& cold) {
+    begin_run(pc);
+    jit_->set_executing(pc);
+    bcore_bridge::RunScope scope(cpu_);
+    jit_->loader().run_pieces(cold.block.pieces.data(), cold.block.pieces.size(), cold.block.values.data(), cpu_,
+                              mem_);
+    scope.rethrow();
+    jit_->clear_executing();
+    end_run();
+    return true;
+}
+
+void Core::leave_cold(const std::vector<uint32_t>& pcs) {
+    // Each at tier 0 as compile() would have at its first start, from the
+    // instructions its cold block read, with its counter (counting on);
+    // into one module where there are several.
+    struct Left {
+        uint32_t pc;
+        Tier0Record* record;
+        CpTranslator::Block block;
+    };
+    std::vector<Left> left;
+    std::vector<uint32_t> failed;
+    CpTranslator::Batch batch;
+    CpTranslator::Batch* const into = pcs.size() > 1 ? &batch : nullptr;
+    for (const uint32_t pc : pcs) {
+        const auto it = cold_.find(pc);
+        if (it == cold_.end()) continue;
+        const std::unique_ptr<Cold> cold = std::move(it->second);
+        cold_.erase(it);
+        Tier0Record* const record = cold->counter < tier0_.size() ? tier0_[cold->counter].get() : nullptr;
+        if (!record || tier0_current_[pc] != cold->counter) {
+            failed.push_back(pc);
+            continue;
+        }
+        note_page_table();
+        bcore_tier::ReplayMemory replay(*mem_, record->code);
+        CpTranslator::Block block;
+        if (can_copy_patch(replay)) {
+            CpTranslator::Config config;
+            config.chaining = chaining_;
+            config.dry = chain_dry_;
+            config.count_chained = count_chained_;
+            config.host_cycles = host_cycles_;
+            config.idle_waits = idle_waits_;
+            config.threshold = tier_threshold_;
+            config.size_ref = tier_size_ref_;
+            config.self_loop = chaining_ && !chain_dry_ && (!chain_filter_ || chain_filter_(pc));
+            config.hint = copy_patch_hints_ ? cold->hint.get() : nullptr;
+            block = cp_->translate(pc, replay, cold->counter, config, into);
+            if (replay.missed()) {
+                // It read code its cold block did not: compiled anew below.
+                if (block.batched >= 0) batch.bodies.pop_back();
+                if (block.fn) jit_->loader().release(block.fn);
+                block = CpTranslator::Block{};
+            }
+        }
+        if (!block.fn && block.batched < 0) {
+            failed.push_back(pc);
+            continue;
+        }
+        record->cold = false;
+        record->hint = *cold->hint;
+        left.push_back({pc, record, block});
+    }
+    std::vector<BbFunc> fns;
+    if (!batch.bodies.empty() && !cp_->load(batch, left.front().pc, fns)) fns.clear();
+    TierTable& table = *jit_->tierTable();
+    for (const Left& l : left) {
+        const BbFunc fn = l.block.batched < 0 ? l.block.fn : fns.empty() ? nullptr : fns[size_t(l.block.batched)];
+        if (!fn) {
+            failed.push_back(l.pc);
+            continue;
+        }
+        jit_->addCode(l.pc, fn, l.block.fallthrough_pc);
+        l.record->threshold = l.block.threshold;
+        // Its count goes on from the cold tier's: past its threshold
+        // already, it asks now.
+        const uint32_t counter = tier0_current_[l.pc];
+        if (l.block.threshold != UINT32_MAX && table.count[counter] >= l.block.threshold) {
+            if (table.requests < TierTable::kRequests) table.request[table.requests] = counter;
+            ++table.requests;
+        }
+    }
+    // The others as any block is, with counters of their own.
+    for (const uint32_t pc : failed) {
+        tier0_current_.erase(pc);
+        compile(pc, false);
+    }
+}
+#endif
+
 void Core::set_copy_patch_reach(size_t bytes) {
     copy_patch_reach_ = bytes;
 #if BCORE_COPY_PATCH
@@ -695,6 +905,8 @@ void Core::invalidate() {
     tier0_.clear();
     tier0_current_.clear();
     tier0_latest_.clear();
+    cold_.clear();
+    cold_queue_.clear();
 #if BCORE_ENABLE_PROFILE
     // The old engine's objects are gone; drop their map entries before the
     // host can observe stale addresses, then re-arm the listeners (including

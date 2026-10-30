@@ -509,19 +509,34 @@ uint64_t CpTranslator::code_hash(uint32_t counter) const {
 }
 
 CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config) {
+#if defined(__EMSCRIPTEN__)
+    return translate(pc, code, counter, config, nullptr);
+}
+
+CpTranslator::Block CpTranslator::translate(uint32_t pc, Memory& code, uint32_t counter, const Config& config,
+                                            Batch* batch) {
+#endif
     Block out;
     if (!scan(pc, code, config, out)) return out;
     threshold_ = out.threshold = tier_threshold(config.threshold, config.size_ref, out.packets);
     exit_piece_ = -1;
+#if defined(__EMSCRIPTEN__)
+    loop_all_ = false;
+#endif
     if (config.self_loop && config.chaining && !config.dry) {
         exit_piece_ = int(pieces_.size());
+#if defined(__EMSCRIPTEN__)
+        loop_all_ = batch && !past_guard_;
+        const uint32_t* exits = past_guard_ || loop_all_ ? kSelfExitsLoop : kSelfExits;
+#else
         const uint32_t* exits = past_guard_ ? kSelfExitsLoop : kSelfExits;
+#endif
         pieces_.push_back(CpTranslator::piece(kStencils[exits[config.count_chained]], pc, 0, -1));
     } else {
         past_guard_ = false;
     }
 #if defined(__EMSCRIPTEN__)
-    return emit_wasm(pc, counter, config, out);
+    return emit_wasm(pc, counter, config, out, batch);
 #else
     size_t total = 0, cold_total = 0;
     size_t open = 0;     // the first piece whose hot trampolines are not placed

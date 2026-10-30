@@ -109,6 +109,22 @@ public:
     // guard), instead of calling bfin_hwloop_step. Exact either way. On by
     // default.
     void set_copy_patch_hints(bool enable) { copy_patch_hints_ = enable; }
+    // WebAssembly, copy-and-patch and tiering on (a threshold, if only
+    // UINT32_MAX): a block's first `threshold` starts make no module of its
+    // own. Its pieces run one at a time, as functions every block shares
+    // (cp_cold_wasm.h), careful and without chaining (a chained block that
+    // goes to it returns to the host). At its next start after that it is
+    // compiled as copy-and-patch would have at its first, with the CPU
+    // state of that start as its hint, and goes on counting its starts
+    // towards set_tiering's threshold. Exact either way: the same stencils.
+    // 0 (the default) for none; false, and nothing set, where there are
+    // none (natively a block costs microseconds).
+    bool set_cold_threshold(uint32_t threshold);
+    // Blocks leaving the cold tier are compiled `blocks` at a time into one
+    // module (1, the default: each at once), running cold while they wait,
+    // but for no more than `age` packets after the first of them asked
+    // (0: no limit). For blocks from now on.
+    void set_cold_batch(uint32_t blocks, uint64_t age = 0);
     // For tests: how far from a block (bytes) its arena's helper jumps and
     // exits may lie, 0 for as far as the host's calls reach (all of an arena
     // on x86-64; under 128 MiB on AArch64). A short distance makes a set for
@@ -209,6 +225,18 @@ private:
     void collect_promotions(bool all = false);
     void startWorker();
     void stopWorker();
+    // The cold tier (set_cold_threshold): pc's cold block, made where it has
+    // none yet (null if it cannot be one); runs it; compiles the blocks that
+    // left it (all those queued, or pc's alone); whether one may be made now.
+    struct Cold;
+    Cold* cold_block(uint32_t pc);
+    bool run_cold(uint32_t pc, Cold& cold);
+    void leave_cold(const std::vector<uint32_t>& pcs);
+    bool can_copy_patch(Memory& code) const;
+    // A run's CpuState before its first block, and its accounting after
+    // its last (the packets, promotions).
+    void begin_run(uint32_t pc);
+    void end_run();
     // (Re)registers the code-map listener on jit_. Called by init/invalidate.
     void attachProfiler();
 
@@ -267,6 +295,15 @@ private:
         uint64_t due;  // packets_run_ at which it is published (publish_after)
     };
     std::deque<Pending> pending_;
+    // The cold tier: its threshold, the blocks in it, those that left it
+    // and wait for a batch (oldest first), and packets_run_ when the first
+    // of them asked.
+    uint32_t cold_threshold_ = 0;
+    uint32_t cold_batch_ = 1;
+    uint64_t cold_age_ = 0;
+    std::unordered_map<uint32_t, std::unique_ptr<Cold>> cold_;
+    std::vector<uint32_t> cold_queue_;
+    uint64_t cold_queued_at_ = 0;
     bool idle_waits_ = false;
     int steady_skip_ = 0;
     const uint8_t* idle_wake_ = nullptr;
