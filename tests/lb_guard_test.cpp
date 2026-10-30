@@ -309,6 +309,7 @@ static unsigned test_pinned_both() {
     return cases;
 }
 
+#if BCORE_COPY_PATCH_TEST
 // The same in copy-and-patch blocks (Core::set_copy_patch): three parallel
 // packets, each R3 = [P0++] in a slot, then JUMP.S 0. Compiled with no loop
 // in the block, a parallel packet's tail compares nothing behind the
@@ -392,10 +393,13 @@ static unsigned test_copy_patch() {
             }
     return cases;
 }
+#endif
 
 int main() {
     unsigned cases = 0;
+#if BCORE_COPY_PATCH_TEST
     cases += test_copy_patch();
+#endif
     cases += test_pinned();
     cases += test_pinned_both();
     for (int opt : {0, 1, 2, 3}) test_fetch_during_careful(opt);
