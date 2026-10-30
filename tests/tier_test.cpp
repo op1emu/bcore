@@ -81,6 +81,8 @@ struct Mode {
     uint32_t cold = 0;
     uint32_t batch = 1;
     uint64_t age = 0;
+    // Core::set_llvm_on_demand: LLVM made by the first block that needs it.
+    bool on_demand = false;
 };
 
 // background: -1 promotions on this thread; else on the worker, published
@@ -106,6 +108,7 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     if (threshold && mode.cold) require(core.set_cold_threshold(mode.cold), "no cold tier");
     core.set_cold_batch(mode.batch, mode.age);
     if (background >= 0) require(core.set_tier_background(true, uint64_t(background)), "no worker");
+    core.set_llvm_on_demand(mode.on_demand);
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
     cec_init(); evt_init();
@@ -547,6 +550,8 @@ int main() {
         // Helper jumps and exits for every block or so (far from the
         // first, as on AArch64 once an arena holds 120 MiB).
         {"stencils near", true, true, false, true, 64},
+        {"stencils, LLVM on demand", true, true, false, true, 0, 0, 1, 0, true},
+        {"raw, LLVM on demand", false, false, false, true, 0, 0, 1, 0, true},
 #if defined(__EMSCRIPTEN__)
         // Cold for two starts, compiled alone or four to a module, a batch
         // that does not fill after 40 packets (the promotion at threshold 1
@@ -560,7 +565,7 @@ int main() {
     for (const Case& c : cases)
         for (int opt : {0, 1, 2})
         for (const Mode& mode : modes) {
-            if ((mode.dry || !mode.count || mode.reach || mode.cold) && opt != 1) continue;
+            if ((mode.dry || !mode.count || mode.reach || mode.cold || mode.on_demand) && opt != 1) continue;
             if (mode.cold && !c.same_any_run) continue;
             const Outcome want = run(c, opt, 0, -1, mode);
             uint64_t packets = 0;  // a cold mode's: as many as the untiered runs

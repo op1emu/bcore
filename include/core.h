@@ -32,6 +32,11 @@ public:
     // codegen_level: the backend on the same scale (0=None, 1=Less, 2=Default,
     // 3=Aggressive); it follows opt_level when negative.
     bool init(int opt_level = 2, int codegen_level = -1);
+    // LLVM (the Compiler, the lifter) made when a block first needs it, one
+    // copy-and-patch does not take or a promotion, not by init (off by
+    // default): on WebAssembly a host may load LLVM's code only then. Its
+    // failure is then that block's, not init's. Before init().
+    void set_llvm_on_demand(bool on_demand) { llvm_on_demand_ = on_demand; }
     void invalidate();
     bool run(uint32_t pc);
     std::tuple<std::string, uint32_t> disassemble(uint32_t pc);
@@ -210,6 +215,9 @@ public:
 
 private:
     void applyModuleTarget();
+    // LLVM's part of init (set_llvm_on_demand); the tier-0 Compiler.
+    bool init_llvm();
+    bool init_tier0_compiler();
     // Translates, optimizes and adds the block at pc (careful: see
     // BBTranslator::translate); null if that fails.
     // promote: the tier-0 compilation to compile again at tier 1.
@@ -256,6 +264,7 @@ private:
     int opt_level_ = 2;
     int codegen_level_ = -1;
     bool dump_ir_ = false;
+    bool llvm_on_demand_ = false;
     std::function<bool(uint32_t)> chain_filter_;
     bool chaining_ = false;
     bool chain_dry_ = false;
