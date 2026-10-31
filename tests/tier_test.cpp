@@ -9,6 +9,7 @@
 // WebAssembly's cold tier first; and three cases found in review (below).
 #include "core.h"
 #include "bcore_profile.h"
+#include "remote_tier.h"
 #include "../src/bb_translator.h"
 #include "../src/cec.h"
 #include "../src/evt.h"
@@ -92,8 +93,17 @@ struct Mode {
 // packets: run until that many packets ran, the last run's budget cut to
 // end there, instead of c.runs runs (each run's outcome then not kept): a
 // cold block (Mode::cold) chains to none, so its runs end elsewhere.
+// remote: promotions compiled by a RemoteCompiler (Core::set_remote_tier)
+// and delivered that many runs after they were asked for (-1: none), the
+// latest asked first where reversed.
+struct Remote {
+    int lag = -1;
+    bool reversed = false;
+};
+static uint64_t g_remote_installed = 0, g_remote_refused = 0;
+
 static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"},
-                   uint32_t size_ref = 0, bool light = false, uint64_t packets = 0) {
+                   uint32_t size_ref = 0, bool light = false, uint64_t packets = 0, Remote remote = {}) {
     CpuState cpu{};
     FlatMemory mem(0, 0x4000, &cpu);
     if (mode.paged) mem.enable_page_table();
@@ -109,6 +119,36 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     core.set_cold_batch(mode.batch, mode.age);
     if (background >= 0) require(core.set_tier_background(true, uint64_t(background)), "no worker");
     core.set_llvm_on_demand(mode.on_demand);
+    struct Job {
+        uint32_t ticket;
+        std::vector<uint8_t> bytes;
+        int due;
+    };
+    std::vector<Job> jobs;
+    int at = 0;  // the run asking
+    RemoteCompiler compiler;
+    if (remote.lag >= 0)
+        core.set_remote_tier([&](uint32_t ticket, std::vector<uint8_t> bytes) {
+            jobs.push_back({ticket, std::move(bytes), at + 1 + remote.lag});
+            return true;
+        });
+    auto deliver = [&](int r) {
+        std::vector<Job> due;
+        for (auto it = jobs.begin(); it != jobs.end();)
+            if (it->due <= r) {
+                due.push_back(std::move(*it));
+                it = jobs.erase(it);
+            } else {
+                ++it;
+            }
+        if (remote.reversed) std::reverse(due.begin(), due.end());
+        for (const Job& job : due) {
+            RemoteCode code;
+            const bool ok = compiler.compile(job.bytes.data(), job.bytes.size(), code);
+            if (!ok) fprintf(stderr, "FAIL: a remote promotion did not compile: %s\n", code.why.c_str()), std::exit(1);
+            core.deliver(job.ticket, ok, code.object, code.name, code.fallthrough_pc);
+        }
+    };
     require(core.init(opt), "init");
     if (c.filter) core.set_chain_filter(c.filter);
     cec_init(); evt_init();
@@ -116,6 +156,8 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     Outcome out;
     uint64_t ran = 0;
     for (int r = 0; packets ? ran < packets : r < c.runs; ++r) {
+        at = r;
+        deliver(r);
         c.before(cpu, mem, r);
         cpu.chain_budget = packets ? uint32_t(std::min<uint64_t>(c.budget, packets - ran)) : c.budget;
         require(core.run(r ? cpu.pc : c.start), "run");
@@ -129,6 +171,8 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
     out.data.assign(mem.raw(), mem.raw() + 0x4000);
     out.stats = core.stats();
     out.support_sets = core.copy_patch_support_sets();
+    g_remote_installed += core.remote_stats().installed;
+    g_remote_refused += core.remote_stats().refused;
     return out;
 }
 
@@ -578,6 +622,53 @@ static void test_cold_code() {
 }
 #endif
 
+// A remote promotion delivered after its engine went (invalidate, here by
+// a chain filter): it must not replace the new engine's block at that PC,
+// which runs other code now (found in review of the plan: invalidate bumped
+// the generation only with a worker, and counters start again at 0 in the
+// new engine, so the stale code would have looked current); nor one that
+// failed. Either way the block keeps running what it is now.
+static void test_remote_stale() {
+    for (bool failed : {false, true}) {
+        CpuState cpu{};
+        FlatMemory mem(0, 0x4000, &cpu);
+        mem.enable_page_table();
+        mem.write16(0x100, kAdd1);
+        mem.write16(0x102, 0x0010);  // RTS
+        Core core(&cpu, &mem);
+        core.set_tiering(1);
+        core.set_copy_patch(true);
+        std::vector<std::pair<uint32_t, std::vector<uint8_t>>> jobs;
+        core.set_remote_tier([&](uint32_t ticket, std::vector<uint8_t> bytes) {
+            jobs.emplace_back(ticket, std::move(bytes));
+            return true;
+        });
+        require(core.init(1), "init");
+        cec_init(); evt_init();
+        cpu.lb[0] = cpu.lb[1] = 0x3f00;
+        cpu.rets = 0x800;
+        require(core.run(0x100), "run");
+        require(jobs.size() == 1, "no remote job after the first start");
+        // The code changes and the engine goes: the next start compiles R0 += 2.
+        mem.write16(0x100, kAdd2);
+        core.set_chain_filter([](uint32_t) { return true; });
+        cpu.rets = 0x800;
+        cpu.dpregs[0] = 0;
+        require(core.run(0x100), "run");
+        RemoteCode code;
+        RemoteCompiler compiler;
+        require(compiler.compile(jobs[0].second.data(), jobs[0].second.size(), code), "the job did not compile");
+        require(!core.deliver(jobs[0].first, !failed, code.object, code.name, code.fallthrough_pc),
+                "a stale promotion was installed");
+        cpu.rets = 0x800;
+        cpu.dpregs[0] = 0;
+        require(core.run(0x100), "run");
+        require(cpu.dpregs[0] == 2, "the old engine's promotion ran");
+        require(core.remote_stats().installed == 0 && core.remote_stats().stale + core.remote_stats().failed == 1,
+                "the stale delivery was not counted");
+    }
+}
+
 int main() {
 #if defined(__EMSCRIPTEN__)
     test_cold_code();
@@ -666,10 +757,18 @@ int main() {
                 bool light;
             };
             for (const Tiers& t : {Tiers{1, 0, false}, {2, 0, false}, {7, 0, false}, {1, 1, false}, {2, 1, true}})
-            for (int background : {-1, 0, 1, 50}) {
+            // Background -2 to -5 (-O1): promotions compiled remotely,
+            // delivered before the next run, a run later, three later (the
+            // latest asked first), never.
+            for (int background : {-1, 0, 1, 50, -2, -3, -4, -5}) {
                 if (background >= 0 && !Core::kHasThreads) continue;
+                if (background <= -2 && opt != 1) continue;
+                Remote remote;
+                if (background <= -2) remote = {background == -2 ? 0 : background == -3 ? 1 : background == -4 ? 3 : 1000,
+                                                background == -4};
                 const uint32_t threshold = t.threshold;
-                const Outcome got = run(c, opt, threshold, background, mode, t.size_ref, t.light, packets);
+                const Outcome got = run(c, opt, threshold, background < 0 ? -1 : background, mode, t.size_ref,
+                                        t.light, packets, remote);
                 if (packets ? got.state != want.state || got.data != want.data : !(got == want)) {
                     fprintf(stderr, "FAIL: %s (%s) -O%d threshold %u size_ref %u%s background %d: %zu/%zu runs\n",
                             c.name, mode.name, opt, threshold, t.size_ref, t.light ? " light" : "", background,
@@ -711,7 +810,10 @@ int main() {
     require(near_sets > 0, "no set of helper jumps was made near a block");
 #endif
 #endif
-    printf("tier test passed (%u cases, %llu promotions, %llu request overflows)\n", compared,
-           (unsigned long long)promoted, (unsigned long long)overflows);
+    require(g_remote_installed > 0, "no remote promotion was installed");
+    require(g_remote_refused > 0, "no remote promotion was refused (raw memory)");
+    test_remote_stale();
+    printf("tier test passed (%u cases, %llu promotions, %llu request overflows, %llu remote)\n", compared,
+           (unsigned long long)promoted, (unsigned long long)overflows, (unsigned long long)g_remote_installed);
     return 0;
 }
