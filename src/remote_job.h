@@ -27,6 +27,9 @@ struct RemoteJob {
     // Core::init_llvm (and init's opt and codegen levels).
     struct Settings {
         int32_t opt_level = 2, codegen_level = -1;
+        // Whether init saw no step limit (Core::unlimited_), and the limit
+        // the translator has (or would have, made now: init_llvm's).
+        bool unlimited = true;
         uint32_t max_packets = 0;
         bool chaining = false, dry = false, host_cycles = false, count_chained = true, lazy_state = true,
              loop_blocks = true, verify = true, idle_waits = false;

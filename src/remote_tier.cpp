@@ -68,6 +68,7 @@ private:
 void write_settings(Writer& w, const RemoteJob::Settings& s) {
     w.pod(s.opt_level);
     w.pod(s.codegen_level);
+    w.flag(s.unlimited);
     w.pod(s.max_packets);
     for (bool flag : {s.chaining, s.dry, s.host_cycles, s.count_chained, s.lazy_state, s.loop_blocks, s.verify,
                       s.idle_waits})
@@ -77,7 +78,8 @@ void write_settings(Writer& w, const RemoteJob::Settings& s) {
 }
 
 bool read_settings(Reader& r, RemoteJob::Settings& s) {
-    return r.pod(s.opt_level) && r.pod(s.codegen_level) && r.pod(s.max_packets) && r.flag(s.chaining) &&
+    return r.pod(s.opt_level) && r.pod(s.codegen_level) && r.flag(s.unlimited) && r.pod(s.max_packets) &&
+           r.flag(s.chaining) &&
            r.flag(s.dry) && r.flag(s.host_cycles) && r.flag(s.count_chained) && r.flag(s.lazy_state) &&
            r.flag(s.loop_blocks) && r.flag(s.verify) && r.flag(s.idle_waits) && r.pod(s.steady_skip) &&
            r.str(s.post_pipeline);
@@ -232,7 +234,10 @@ bool RemoteCompiler::compile(const uint8_t* bytes, size_t size, RemoteCode& out)
     if (!instance) {
         auto made = std::make_unique<Impl::Instance>();
         const RemoteJob::Settings& s = job.settings;
-        made->cpu.steps_remaining = s.max_packets;
+        // The two as the first instance's Core took them: init reads
+        // whether there is a step limit, init_llvm (by the first job) the
+        // translator's.
+        made->cpu.steps_remaining = s.unlimited ? 0 : 1;
         made->core = std::make_unique<Core>(&made->cpu, &impl.mem);
         Core& core = *made->core;
         core.set_llvm_on_demand(true);  // LLVM made by the first job, with these
@@ -249,6 +254,7 @@ bool RemoteCompiler::compile(const uint8_t* bytes, size_t size, RemoteCode& out)
             impl.cores.erase(encode_settings(job.settings));
             return false;
         }
+        made->cpu.steps_remaining = s.max_packets;
         core.set_chain_filter([&impl](uint32_t pc) {
             if (pc == impl.pc) return impl.chain_ok;
             impl.asked_other = true;

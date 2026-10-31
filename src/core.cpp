@@ -87,7 +87,6 @@ bool Core::init(int opt_level, int codegen_level) {
     jit_->setChainFilter(chain_filter_);
     attachProfiler();
     unlimited_ = cpu_->steps_remaining == 0;
-    max_packets_ = cpu_->steps_remaining;
     cp_.reset();
     set_copy_patch(copy_patch_);
     return llvm_on_demand_ || init_llvm();
@@ -111,6 +110,8 @@ bool Core::init_llvm() {
         /*unlimited=*/unlimited_,
         fastmem,
         fast_base);
+    // A job (set_remote_tier) names the limit this translator has.
+    max_packets_ = cpu_->steps_remaining;
     if (cpu_->steps_remaining)
         translator_->set_max_packets(cpu_->steps_remaining);
     translator_->set_chaining(chaining_, chain_dry_);
@@ -677,7 +678,11 @@ void Core::submit_promotion(const Tier0Record& record, uint32_t counter) {
     RemoteJob::Settings& s = job.settings;
     s.opt_level = opt_level_;
     s.codegen_level = codegen_level_;
-    s.max_packets = max_packets_;
+    // init's, and the translator's limit: init_llvm's, or what it would
+    // read made now (set_llvm_on_demand). Two settings: the limit may have
+    // changed in between (found in review).
+    s.unlimited = unlimited_;
+    s.max_packets = translator_ ? max_packets_ : cpu_->steps_remaining;
     s.chaining = chaining_;
     s.dry = chain_dry_;
     s.host_cycles = host_cycles_;
