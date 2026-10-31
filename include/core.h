@@ -193,8 +193,13 @@ public:
     // a promotion that fails is: the block stays at tier 0. Null (the
     // default) to compile them here. Not for a Memory with fastmem or raw
     // memory (their addresses would be in the code): those are dropped.
+    // Null drops the jobs under way: their code, delivered later, is not
+    // used.
     using RemoteSubmit = std::function<bool(uint32_t ticket, std::vector<uint8_t> job)>;
-    void set_remote_tier(RemoteSubmit submit) { remote_submit_ = std::move(submit); }
+    void set_remote_tier(RemoteSubmit submit) {
+        remote_submit_ = std::move(submit);
+        if (!remote_submit_) remote_.clear();
+    }
     // Between runs: the code compiled for ticket (RemoteCompiler::compile's
     // RemoteCode): object, its object to load; or none, on WebAssembly,
     // where the host has put the module made of it in Module.bcoreModules
@@ -202,7 +207,8 @@ public:
     // RemoteCode's. ok false: the job failed. Whether the code runs now:
     // not if it failed, or its engine went (invalidate) or the block was
     // compiled again since (careful, after a guard miss), as for a
-    // promotion compiled here. Every ticket submitted is delivered once.
+    // promotion compiled here. A ticket is delivered once at most; one never
+    // delivered leaves its block at tier 0.
     bool deliver(uint32_t ticket, bool ok, const std::vector<uint8_t>& object, const std::string& name,
                  uint32_t fallthrough_pc);
     struct RemoteStats {
@@ -328,7 +334,7 @@ private:
     size_t copy_patch_reach_ = 0;  // set_copy_patch_reach
     std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
     bool unlimited_ = true;             // no step limit at init
-    uint32_t max_packets_ = 0;          // CpuState::steps_remaining at init
+    uint32_t max_packets_ = 0;          // CpuState::steps_remaining at init_llvm
     std::unique_ptr<Compiler> tier0_compiler_;
     // The tier-0 compilations of this engine, by counter (TierTable), until
     // promoted; and for each PC the counter of the tier-0 code compiled for

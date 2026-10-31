@@ -697,6 +697,60 @@ static void test_remote_stale() {
     }
 }
 
+// A step limit at init, none when LLVM is made (on demand, at the first
+// promotion): a remote promotion compiles as one here would, with the step
+// checks init's limit asks for (found in review: a job named only the
+// later limit, and the remote code ran the block's three packets on a
+// budget of one). The same with the limit the other way round.
+static void test_remote_step_limit() {
+    for (const bool limit_first : {true, false}) {
+        uint32_t r0[2], pc[2];
+        for (const bool remote : {false, true}) {
+            CpuState cpu{};
+            cpu.steps_remaining = limit_first ? 5 : 0;
+            FlatMemory mem(0, 0x4000, &cpu);
+            mem.enable_page_table();
+            for (uint32_t at = 0x100; at < 0x106; at += 2) mem.write16(at, kAdd1);
+            mem.write16(0x106, 0x0010);  // RTS
+            Core core(&cpu, &mem);
+            core.set_llvm_on_demand(true);
+            core.set_tiering(1);
+            std::vector<std::pair<uint32_t, std::vector<uint8_t>>> jobs;
+            if (remote)
+                core.set_remote_tier([&](uint32_t ticket, std::vector<uint8_t> bytes) {
+                    jobs.emplace_back(ticket, std::move(bytes));
+                    return true;
+                });
+            require(core.init(1), "init");
+            cec_init(); evt_init();
+            cpu.lb[0] = cpu.lb[1] = 0x3f00;
+            cpu.rets = 0x800;
+            cpu.steps_remaining = limit_first ? 0 : 5;
+            require(core.run(0x100), "run");
+            if (remote) {
+                require(jobs.size() == 1, "no remote job");
+                RemoteCompiler compiler;
+                RemoteCode code;
+                require(compiler.compile(jobs[0].second.data(), jobs[0].second.size(), code), "the job did not compile");
+                require(core.deliver(jobs[0].first, true, code.object, code.name, code.fallthrough_pc),
+                        "the promotion was not installed");
+            }
+            cpu.steps_remaining = 1;
+            cpu.dpregs[0] = 0;
+            cpu.did_jump = false;
+            cpu.rets = 0x800;
+            require(core.run(0x100), "run");
+            r0[remote] = cpu.dpregs[0];
+            pc[remote] = cpu.pc;
+        }
+        if (r0[0] != r0[1] || pc[0] != pc[1]) {
+            fprintf(stderr, "FAIL: step limit %s: R0 %u pc %x here, R0 %u pc %x remote\n",
+                    limit_first ? "at init only" : "after init", r0[0], pc[0], r0[1], pc[1]);
+            std::exit(1);
+        }
+    }
+}
+
 #if defined(__EMSCRIPTEN__)
 // The code delivered as a module (CodeLoader::install): one under a name it
 // has no function of fails, its slot back and its module out of the map;
@@ -911,6 +965,7 @@ int main() {
     require(g_remote_installed > 0, "no remote promotion was installed");
     require(g_remote_refused > 0, "no remote promotion was refused (raw memory)");
     test_remote_stale();
+    test_remote_step_limit();
 #if defined(__EMSCRIPTEN__)
     require(modules_held() == 0, "a delivered module stayed in Module.bcoreModules");
     test_remote_modules();
