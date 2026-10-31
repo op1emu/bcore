@@ -75,6 +75,27 @@ square of the blocks (Node 20 ran out of it in the test suite). V8 13.3
 on keeps one dispatch table a Table: Node 24, Chrome 133 or newer.
 Firefox 157 ran the test programs (`web/`); Safari is untried.
 
+## Promotions in another instance
+
+Without threads a promotion compiles between two blocks, stopping the guest
+for as long (a boot's longest 764 ms, at a threshold of 10 million starts).
+`Core::set_remote_tier(submit)` (`include/remote_tier.h`) hands the host
+each promotion as a job instead of compiling it, a ticket and its bytes:
+what its tier-0 compilation read, the state it saw, what the Memory says
+about itself and the chain filter about the block, and the Core's settings.
+Another instance of the program compiles it with a `RemoteCompiler`, as
+`Core::compile` would have (LLVM's object reaches nothing of the first
+instance's but through CpuState and by its imports' names: no Memory with
+fastmem or raw memory, whose addresses would be in the code), and the host
+gives it back by `Core::deliver`, between runs: the object, or on
+WebAssembly the module made of it, which the host put in
+`Module.bcoreModules` under the ticket (`CodeLoader::install`). A promotion
+delivered after its engine went (`invalidate`) or its block was compiled
+again is dropped, as one the worker thread compiled is natively. The block
+runs at tier 0 meanwhile, so the wait costs nothing but the promotion's
+gain. `tier_test`'s remote rows deliver them a run later, three later in
+reverse order, and never.
+
 ## Tools
 
 ```bash
