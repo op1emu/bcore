@@ -24,6 +24,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
+
 using namespace bcore;
 
 static void require(bool ok, const char* why) {
@@ -99,8 +103,25 @@ struct Mode {
 struct Remote {
     int lag = -1;
     bool reversed = false;
+    // WebAssembly: the code delivered as a browser's host delivers it, the
+    // module made of the object in Module.bcoreModules (CodeLoader::install).
+    bool modules = false;
 };
 static uint64_t g_remote_installed = 0, g_remote_refused = 0;
+
+#if defined(__EMSCRIPTEN__)
+// The module of object in Module.bcoreModules under ticket, as a host puts
+// it there; and how many modules the map holds.
+static void put_module(uint32_t ticket, const std::vector<uint8_t>& object) {
+    EM_ASM({
+        Module["bcoreModules"] ??= new Map();
+        Module["bcoreModules"].set($0 >>> 0, new WebAssembly.Module(HEAPU8.slice($1 >>> 0, ($1 >>> 0) + ($2 >>> 0))));
+    }, ticket, object.data(), object.size());
+}
+static int modules_held() {
+    return EM_ASM_INT({ return Module["bcoreModules"] ? Module["bcoreModules"].size : 0; });
+}
+#endif
 
 static Outcome run(const Case& c, int opt, uint32_t threshold, int background = -1, const Mode& mode = {"raw"},
                    uint32_t size_ref = 0, bool light = false, uint64_t packets = 0, Remote remote = {}) {
@@ -146,6 +167,13 @@ static Outcome run(const Case& c, int opt, uint32_t threshold, int background = 
             RemoteCode code;
             const bool ok = compiler.compile(job.bytes.data(), job.bytes.size(), code);
             if (!ok) fprintf(stderr, "FAIL: a remote promotion did not compile: %s\n", code.why.c_str()), std::exit(1);
+#if defined(__EMSCRIPTEN__)
+            if (remote.modules) {
+                put_module(job.ticket, code.object);
+                core.deliver(job.ticket, ok, {}, code.name, code.fallthrough_pc);
+                continue;
+            }
+#endif
             core.deliver(job.ticket, ok, code.object, code.name, code.fallthrough_pc);
         }
     };
@@ -669,6 +697,71 @@ static void test_remote_stale() {
     }
 }
 
+#if defined(__EMSCRIPTEN__)
+// The code delivered as a module (CodeLoader::install): one under a name it
+// has no function of fails, its slot back and its module out of the map;
+// one delivered after its engine went is dropped, out of the map too; a
+// current one runs. The block's work is the same throughout.
+static void test_remote_modules() {
+    CpuState cpu{};
+    FlatMemory mem(0, 0x4000, &cpu);
+    mem.enable_page_table();
+    mem.write16(0x100, kAdd1);
+    mem.write16(0x102, 0x0010);  // RTS
+    Core core(&cpu, &mem);
+    core.set_tiering(1);
+    core.set_copy_patch(true);
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> jobs;
+    core.set_remote_tier([&](uint32_t ticket, std::vector<uint8_t> bytes) {
+        jobs.emplace_back(ticket, std::move(bytes));
+        return true;
+    });
+    require(core.init(1), "init");
+    cec_init(); evt_init();
+    cpu.lb[0] = cpu.lb[1] = 0x3f00;
+    RemoteCompiler compiler;
+    // A start, which asks for a promotion (threshold 1), and its code.
+    auto start = [&](const char* why) {
+        cpu.rets = 0x800;
+        cpu.dpregs[0] = 0;
+        require(core.run(0x100), "run");
+        require(cpu.dpregs[0] == 1, why);
+    };
+    auto code_of = [&](size_t job) {
+        RemoteCode code;
+        require(compiler.compile(jobs[job].second.data(), jobs[job].second.size(), code), "the job did not compile");
+        return code;
+    };
+    // A new engine: the next start compiles the block again, and asks again.
+    auto invalidate = [&] { core.set_chain_filter([](uint32_t) { return true; }); };
+
+    start("the first start");
+    RemoteCode code = code_of(0);
+    put_module(jobs[0].first, code.object);
+    require(!core.deliver(jobs[0].first, true, {}, "no_such_function", code.fallthrough_pc),
+            "a module without the function was installed");
+    require(modules_held() == 0 && core.remote_stats().failed == 1, "the failed module stayed in the map");
+    start("after the failed delivery");
+
+    invalidate();
+    start("the second engine's first start");
+    require(jobs.size() == 2, "no job from the second engine");
+    invalidate();
+    start("the third engine's first start");
+    require(jobs.size() == 3, "no job from the third engine");
+    code = code_of(1);
+    put_module(jobs[1].first, code.object);
+    require(!core.deliver(jobs[1].first, true, {}, code.name, code.fallthrough_pc), "a stale module was installed");
+    require(modules_held() == 0 && core.remote_stats().stale == 1, "the stale module stayed in the map");
+
+    code = code_of(2);
+    put_module(jobs[2].first, code.object);
+    require(core.deliver(jobs[2].first, true, {}, code.name, code.fallthrough_pc), "the module was not installed");
+    require(modules_held() == 0 && core.remote_stats().installed == 1, "the installed module stayed in the map");
+    for (int r = 0; r < 3; ++r) start("the installed promotion's start");
+}
+#endif
+
 int main() {
 #if defined(__EMSCRIPTEN__)
     test_cold_code();
@@ -759,13 +852,18 @@ int main() {
             for (const Tiers& t : {Tiers{1, 0, false}, {2, 0, false}, {7, 0, false}, {1, 1, false}, {2, 1, true}})
             // Background -2 to -5 (-O1): promotions compiled remotely,
             // delivered before the next run, a run later, three later (the
-            // latest asked first), never.
-            for (int background : {-1, 0, 1, 50, -2, -3, -4, -5}) {
+            // latest asked first), never; -6 (WebAssembly) a run later as
+            // modules.
+            for (int background : {-1, 0, 1, 50, -2, -3, -4, -5, -6}) {
                 if (background >= 0 && !Core::kHasThreads) continue;
                 if (background <= -2 && opt != 1) continue;
+#if !defined(__EMSCRIPTEN__)
+                if (background == -6) continue;
+#endif
                 Remote remote;
-                if (background <= -2) remote = {background == -2 ? 0 : background == -3 ? 1 : background == -4 ? 3 : 1000,
-                                                background == -4};
+                if (background <= -2)
+                    remote = {background == -2 ? 0 : background == -3 || background == -6 ? 1 : background == -4 ? 3 : 1000,
+                              background == -4, background == -6};
                 const uint32_t threshold = t.threshold;
                 const Outcome got = run(c, opt, threshold, background < 0 ? -1 : background, mode, t.size_ref,
                                         t.light, packets, remote);
@@ -813,6 +911,10 @@ int main() {
     require(g_remote_installed > 0, "no remote promotion was installed");
     require(g_remote_refused > 0, "no remote promotion was refused (raw memory)");
     test_remote_stale();
+#if defined(__EMSCRIPTEN__)
+    require(modules_held() == 0, "a delivered module stayed in Module.bcoreModules");
+    test_remote_modules();
+#endif
     printf("tier test passed (%u cases, %llu promotions, %llu request overflows, %llu remote)\n", compared,
            (unsigned long long)promoted, (unsigned long long)overflows, (unsigned long long)g_remote_installed);
     return 0;
