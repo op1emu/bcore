@@ -124,6 +124,30 @@ EM_JS(void, bcore_wasm_clear, (uint32_t slot), {
     wasmTable.set(slot, null);
 });
 
+// The module the host put in Module.bcoreModules under ticket (a promotion
+// compiled elsewhere, Core::deliver) instantiated, taken out of the map, and
+// its function `name` in the table's slot. 0, or -1 (said why, for pc).
+EM_JS(int, bcore_wasm_install, (uint32_t ticket, const char* name, uint32_t slot, uint32_t pc), {
+    const modules = Module["bcoreModules"];
+    const module = modules && modules.get(ticket);
+    if (modules) modules.delete(ticket);
+    try {
+        if (!module) throw new Error("no module for ticket " + ticket);
+        const fn = new WebAssembly.Instance(module, {env: Module["bcoreBlocks"]}).exports[UTF8ToString(name)];
+        if (!(fn instanceof Function)) throw new Error("no function " + UTF8ToString(name));
+        wasmTable.set(slot, fn);
+        return 0;
+    } catch (error) {
+        err("bcore: the block at 0x" + (pc >>> 0).toString(16).padStart(8, "0") + ": " + error);
+        return -1;
+    }
+});
+
+EM_JS(void, bcore_wasm_drop, (uint32_t ticket), {
+    const modules = Module["bcoreModules"];
+    if (modules) modules.delete(ticket);
+});
+
 namespace bcore {
 
 namespace {
@@ -236,6 +260,28 @@ bool CodeLoader::load_functions(uint32_t pc, const uint8_t* bytes, size_t size, 
     }
     object_bytes_ += size;
     return true;
+}
+
+BbFunc CodeLoader::install(uint32_t pc, uint32_t ticket, const char* name) {
+    uint32_t slot;
+    if (!take_slots(1, &slot)) {
+        bcore_wasm_drop(ticket);
+        return nullptr;
+    }
+    if (bcore_wasm_install(ticket, name, slot, pc) != 0) {
+        give_slots(1, &slot);
+        return nullptr;
+    }
+    slots_.insert(slot);
+    return reinterpret_cast<BbFunc>(uintptr_t(slot));
+}
+
+void CodeLoader::drop_module(uint32_t ticket) { bcore_wasm_drop(ticket); }
+
+std::string CodeLoader::check(const uint8_t* object, size_t size, const std::string& name) {
+    if (!g_ready) return "no imports made (CodeLoader::init)";
+    const llvm::MemoryBufferRef ref(llvm::StringRef(reinterpret_cast<const char*>(object), size), name);
+    return check_wasm_object(ref, g_imports.data(), g_imports.size(), name);
 }
 
 void CodeLoader::run_pieces(const ColdPiece* pieces, size_t n, const uint32_t* values, CpuState* cpu,

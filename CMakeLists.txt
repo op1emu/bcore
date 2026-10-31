@@ -287,6 +287,7 @@ endif()
 # ---- Core library (disassembler + emulator) ----
 add_library(bfin-core STATIC
     src/core.cpp
+    src/remote_tier.cpp
     ${BCORE_CP_SOURCES}
 )
 target_include_directories(bfin-core

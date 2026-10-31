@@ -2,6 +2,7 @@
 #include "compile_worker.h"
 #include "compiler.h"
 #include "guest_memory.h"
+#include "remote_job.h"
 #include "steady_skip.h"
 #include "tier_memory.h"
 #include "tier_table.h"
@@ -86,6 +87,7 @@ bool Core::init(int opt_level, int codegen_level) {
     jit_->setChainFilter(chain_filter_);
     attachProfiler();
     unlimited_ = cpu_->steps_remaining == 0;
+    max_packets_ = cpu_->steps_remaining;
     cp_.reset();
     set_copy_patch(copy_patch_);
     return llvm_on_demand_ || init_llvm();
@@ -574,6 +576,10 @@ void Core::promote() {
         auto current = tier0_current_.find(record->pc);
         if (current == tier0_current_.end() || current->second != counter) continue;
         tier0_current_.erase(current);
+        if (remote_submit_) {
+            submit_promotion(*record, counter);
+            continue;
+        }
         if (worker_) {
             queue_promotion(*record, counter);
             continue;
@@ -651,6 +657,91 @@ void Core::queue_promotion(Tier0Record& record, uint32_t counter) {
     job.module = std::move(result.module);
     pending_.push_back({pc, counter, packets_run_ + publish_after_});
     worker_->submit(std::move(job));
+}
+
+void Core::submit_promotion(const Tier0Record& record, uint32_t counter) {
+    // Code that inlines the host's raw memory has its addresses in it, of
+    // this instance's.
+    if (mem_->is_fastmem() || mem_->rawmem_limit()) {
+        remote_stats_.refused++;
+        return;
+    }
+    note_page_table();  // its code may inline through it, as compile()'s
+    RemoteJob job;
+    job.pc = record.pc;
+    job.careful = record.careful;
+    job.page_table = mem_->page_table() != nullptr;
+    job.preserve_registers = mem_->callbacks_preserve_registers();
+    job.chain_ok = !chain_filter_ || chain_filter_(record.pc);
+    job.light = light_tier1_;
+    RemoteJob::Settings& s = job.settings;
+    s.opt_level = opt_level_;
+    s.codegen_level = codegen_level_;
+    s.max_packets = max_packets_;
+    s.chaining = chaining_;
+    s.dry = chain_dry_;
+    s.host_cycles = host_cycles_;
+    s.count_chained = count_chained_;
+    s.lazy_state = lazy_state_;
+    s.loop_blocks = loop_blocks_;
+    s.verify = verify_;
+    s.idle_waits = idle_waits_;
+    s.steady_skip = steady_skip_;
+    s.post_pipeline = post_pipeline_;
+    job.code = record.code;
+    job.hint = record.hint;
+    // Pointers of this instance's, which no translation reads.
+    job.hint.page_table = nullptr;
+    job.hint.cec_pending = nullptr;
+    job.hint.idle_wake = nullptr;
+    job.hint.chain_table = nullptr;
+    // Tickets are the process's: a host may run several Cores.
+    static uint32_t next_ticket = 0;
+    const uint32_t ticket = ++next_ticket;
+    remote_.emplace(ticket, Remote{record.pc, counter, generation_});
+    if (remote_submit_(ticket, encode_job(job))) {
+        remote_stats_.submitted++;
+    } else {
+        remote_.erase(ticket);
+        remote_stats_.refused++;
+    }
+}
+
+bool Core::deliver(uint32_t ticket, bool ok, const std::vector<uint8_t>& object, const std::string& name,
+                   uint32_t fallthrough_pc) {
+    const auto it = remote_.find(ticket);
+    const bool known = it != remote_.end();
+    Remote remote{};
+    if (known) {
+        remote = it->second;
+        remote_.erase(it);
+    }
+    // Stale: the engine was replaced (invalidate), or the block compiled
+    // again at tier 0 since (careful, after a guard miss; that one promotes
+    // itself), as collect_promotions decides.
+    const auto latest = known ? tier0_latest_.find(remote.pc) : tier0_latest_.end();
+    const bool current = known && remote.generation == generation_ && latest != tier0_latest_.end() &&
+                         latest->second == remote.counter;
+    if (!ok || !current) {
+        (ok ? remote_stats_.stale : remote_stats_.failed)++;
+#ifdef __EMSCRIPTEN__
+        if (object.empty()) CodeLoader::drop_module(ticket);
+#endif
+        return false;
+    }
+    BbFunc fn = nullptr;
+    if (!object.empty()) {
+        auto buffer = llvm::MemoryBuffer::getMemBufferCopy(
+            llvm::StringRef(reinterpret_cast<const char*>(object.data()), object.size()), name);
+        if (jit_->addObject(remote.pc, std::move(buffer), fallthrough_pc, name)) fn = jit_->lookup(remote.pc);
+    }
+#ifdef __EMSCRIPTEN__
+    else if ((fn = jit_->loader().install(remote.pc, ticket, name.c_str()))) {
+        jit_->addCode(remote.pc, fn, fallthrough_pc);
+    }
+#endif
+    (fn ? remote_stats_.installed : remote_stats_.failed)++;
+    return fn != nullptr;
 }
 
 void Core::collect_promotions(bool all) {
@@ -927,8 +1018,13 @@ unsigned Core::copy_patch_support_sets() const {
 void Core::invalidate() {
     // The worker's promotions were lifted for the old engine: their code is
     // not used (and the worker stops before the backend of one in flight).
+    // Every time, for the remote tier's promotions too (set_remote_tier),
+    // whose tickets are dropped here: delivered later, theirs is no code of
+    // this engine's.
+    ++generation_;
+    remote_.clear();
     if (worker_) {
-        worker_->set_generation(++generation_);
+        worker_->set_generation(generation_);
         collect_promotions(/*all=*/true);
     }
     jit_ = std::make_shared<JitEngine>();

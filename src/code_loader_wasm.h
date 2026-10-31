@@ -64,6 +64,16 @@ public:
     // Its slot emptied (the module goes when nothing else holds it: none of
     // its functions in a slot) and free for another block's.
     void release(BbFunc fn);
+    // A block compiled elsewhere (Core::deliver): the module the host put
+    // in Module.bcoreModules under ticket, instantiated as load_module's,
+    // its function `name` in a slot; null (said why) if that fails. Either
+    // way the module leaves the map; drop_module takes one out unused.
+    BbFunc install(uint32_t pc, uint32_t ticket, const char* name);
+    static void drop_module(uint32_t ticket);
+    // Why the object (its function `name`) would not load (load's checks,
+    // wasm_object.h), or nothing: for an instance that compiles objects for
+    // another's loader (RemoteCompiler). After init().
+    static std::string check(const uint8_t* object, size_t size, const std::string& name);
     void enter(BbFunc fn, CpuState* cpu, Memory* mem) const { fn(cpu, mem); }
     // A cold block: its pieces (functions (cpu, mem) -> i32), one after the
     // other, each with its hole values at values + piece.values, until one

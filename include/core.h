@@ -22,6 +22,8 @@ class Compiler;
 class CompileWorker;
 class BBTranslator;
 class CpTranslator;
+class RemoteCompiler;
+struct RemoteCode;
 namespace bcore_profile { struct ProfileState; }
 
 class Core {
@@ -181,6 +183,37 @@ public:
     bool set_post_pipeline(const std::string& pipeline);
     static const char* const kDefaultPostPipeline;
 
+    // ---- Tier 1 compiled elsewhere (remote_tier.h) ----
+
+    // Promotions compiled by another instance of the program (a Web
+    // Worker's, where a build has no threads): instead of compiling one, the
+    // Core hands submit a ticket and the job's bytes (RemoteCompiler takes
+    // them), and the tier-0 block runs on until the host delivers the code
+    // for that ticket (deliver). A job submit refuses (false) is dropped, as
+    // a promotion that fails is: the block stays at tier 0. Null (the
+    // default) to compile them here. Not for a Memory with fastmem or raw
+    // memory (their addresses would be in the code): those are dropped.
+    using RemoteSubmit = std::function<bool(uint32_t ticket, std::vector<uint8_t> job)>;
+    void set_remote_tier(RemoteSubmit submit) { remote_submit_ = std::move(submit); }
+    // Between runs: the code compiled for ticket (RemoteCompiler::compile's
+    // RemoteCode): object, its object to load; or none, on WebAssembly,
+    // where the host has put the module made of it in Module.bcoreModules
+    // under the ticket (code_loader_wasm.h); name and fallthrough_pc are
+    // RemoteCode's. ok false: the job failed. Whether the code runs now:
+    // not if it failed, or its engine went (invalidate) or the block was
+    // compiled again since (careful, after a guard miss), as for a
+    // promotion compiled here. Every ticket submitted is delivered once.
+    bool deliver(uint32_t ticket, bool ok, const std::vector<uint8_t>& object, const std::string& name,
+                 uint32_t fallthrough_pc);
+    struct RemoteStats {
+        uint64_t submitted = 0;  // jobs handed to submit
+        uint64_t refused = 0;    // not submitted (submit refused, or a Memory remote code cannot reach)
+        uint64_t installed = 0;  // delivered and running
+        uint64_t stale = 0;      // delivered for an engine or a block since replaced
+        uint64_t failed = 0;     // the job, or loading its code, failed
+    };
+    RemoteStats remote_stats() const { return remote_stats_; }
+
     // ---- JIT observability (contract in bcore_profile.h) ----
 
     // Iterate every currently-compiled block with its host address and exact
@@ -215,6 +248,7 @@ public:
     void set_perf_jitdump(bool enable);
 
 private:
+    friend class RemoteCompiler;
     void applyModuleTarget();
     // LLVM's part of init (set_llvm_on_demand); the tier-0 Compiler.
     bool init_llvm();
@@ -232,6 +266,13 @@ private:
     void note_page_table();
     // Lifts a promotion for the worker (set_tier_background).
     void queue_promotion(Tier0Record& record, uint32_t counter);
+    // Hands a promotion to set_remote_tier's submit.
+    void submit_promotion(const Tier0Record& record, uint32_t counter);
+    // RemoteCompiler's: the promotion of the block at pc, from the code it
+    // read (code) and the state its tier-0 compilation saw (hint), as
+    // compile() would compile it, into out; false (out.why) if that fails.
+    bool compile_job(uint32_t pc, bool careful, const CpuState& hint,
+                     const std::vector<std::pair<uint32_t, uint16_t>>& code, bool light, RemoteCode& out);
     // Loads and publishes the worker's promotions that are due (all: every
     // one sent, waiting for the worker).
     void collect_promotions(bool all = false);
@@ -287,6 +328,7 @@ private:
     size_t copy_patch_reach_ = 0;  // set_copy_patch_reach
     std::unique_ptr<CpTranslator> cp_;  // with jit_ (set_copy_patch)
     bool unlimited_ = true;             // no step limit at init
+    uint32_t max_packets_ = 0;          // CpuState::steps_remaining at init
     std::unique_ptr<Compiler> tier0_compiler_;
     // The tier-0 compilations of this engine, by counter (TierTable), until
     // promoted; and for each PC the counter of the tier-0 code compiled for
@@ -323,6 +365,15 @@ private:
     int steady_skip_ = 0;
     const uint8_t* idle_wake_ = nullptr;
     std::string post_pipeline_ = kDefaultPostPipeline;
+    // set_remote_tier: the submit, and the promotions submitted and not yet
+    // delivered, by ticket.
+    RemoteSubmit remote_submit_;
+    struct Remote {
+        uint32_t pc, counter;
+        uint64_t generation;
+    };
+    std::unordered_map<uint32_t, Remote> remote_;
+    RemoteStats remote_stats_;
 };
 
 }  // namespace bcore
