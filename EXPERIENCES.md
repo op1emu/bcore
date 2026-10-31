@@ -1233,3 +1233,40 @@ at one), as the careful lift now does where it was a NOP, so it needs no
 guard. With that a host may make LLVM only when a block needs it
 (set_llvm_on_demand); the browser's build keeps LLVM's code in a module it
 loads then (op1emu's web/tools/split-module.mjs).
+
+## Promotions in another instance (WebAssembly)
+
+A browser's build has no threads, so a promotion compiled between two
+blocks: tier 1 stayed off in op1emu's page (a threshold of 10 million
+stopped the guest for 764 ms once; at 1 million LLVM took as much time as
+tier 1 saved). `Core::set_remote_tier` hands each one to the host as a job
+(`remote_job.h`), and another instance of the same build compiles it with
+a `RemoteCompiler` (a Core for each set of settings over a `JobMemory` that
+has no data), its host making the object a module and the first host
+`Core::deliver`ing it between runs.
+
+- What a promotion reads besides its code and hint: `rawmem_limit`,
+  `page_table() != nullptr`, `callbacks_preserve_registers`, the chain
+  filter for the block's own PC, and the settings `init_llvm` gives the
+  translator. A fastmem or raw-memory Memory bakes its addresses into the
+  code (fast_base, rawmem_limit): no job for those. The hint goes whole,
+  its pointers null: the lifter reads `lc` too (`pin_mask`), which a list
+  of fields had left out.
+- `invalidate()` bumped `generation_` only with a worker: on WebAssembly a
+  promotion delivered after an invalidate, whose new engine counts from 0
+  again, would have looked current. It bumps it always now
+  (`tier_test`'s `test_remote_stale`).
+- Tried and dropped: another Worker calling every function of each batch
+  once, before the emulator's Worker did (V8 compiles a function at its
+  first call, on the calling thread, and shares the code of a module
+  between Workers). Called with a null CPU state against a memory of no
+  pages, each of a boot's 9,207 batched functions traps at its first load,
+  compiled. In Node it took the main thread's Liftoff time from 0.71 to
+  0.47 s; in Chrome 133 the boot was 0.6 s slower with it (7.8 against 7.8
+  to 8.9 s, five visits each): block code +0.55 s, lazy compilation +0.18,
+  `new WebAssembly.Module` +0.09 (V8's trap handler takes a lock the
+  thread compiling code takes too: `trap_handler::MetadataLock` showed in
+  the main thread's profile in Node). Waiting for that Worker instead of
+  compiling would cost more still: each batch's blocks run cold meanwhile,
+  64 Ki packets a batch +0.1 s a boot, 1 Mi +1.0 s, and an answer comes
+  between two of the host's slices.
